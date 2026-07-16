@@ -44,7 +44,12 @@ curl http://localhost:8080/status
 | `QUAZAR_RATE_LIMIT_RPS` | Rate limit на защищённых роутах (default: 60) |
 | `QUAZAR_CORS_ORIGINS` | CORS origins (через запятую); `*` = permissive; без значения = dev defaults |
 | `RUST_LOG` | Уровень логов (`info`, `debug`) |
-| `QUAZAR_STRICT_SECRETS` | `true` — ошибка при дефолтных секретах |
+| `QUAZAR_STRICT_SECRETS` | `true` — ошибка при дефолтных секретах; также включает обязательный reCAPTCHA |
+| `RECAPTCHA_SITE_KEY` | Публичный site key Google reCAPTCHA v2/v3 (для фронта / `GET /api/public-config`) |
+| `RECAPTCHA_SECRET_KEY` | Секретный ключ; сервер проверяет токен через `https://www.google.com/recaptcha/api/siteverify` |
+| `RECAPTCHA_MIN_SCORE` | Мин. score для v3 (default `0.5`); игнорируется для v2 |
+| `RECAPTCHA_EXPECTED_ACTION` | Опционально: ожидаемое `action` в ответе v3 |
+| `QUAZAR_TRUSTED_PROXIES` | IP/CIDR прокси через запятую; только от них доверяется `X-Forwarded-For` / `X-Real-IP` |
 | `QUAZAR_API_KEYS` | Доп. ключи при старте: `ключ:Роль:имя_гражданина` (через запятую) |
 | `QUAZAR_INIT_TEST_KEYS` | `true` — синхронизировать тестовые ключи в PostgreSQL |
 | `GMAIL_USER` | Gmail-адрес отправителя (например `quazarvs@gmail.com`) |
@@ -85,6 +90,8 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 - `POST /auth/login`, `GET /auth/check` — публичный вход по паролю и проверка наличия пароля
 - `POST /auth/register/send-code`, `POST /auth/register/verify-code` — отправка и проверка кода регистрации с лендинга (Gmail SMTP, см. `GMAIL_*`)
 - `POST /auth/set-password` — установка/смена пароля (требуется API-ключ гражданина)
+- `POST /api/application` — публичная заявка на гражданство (поле `captcha_token` — токен Google reCAPTCHA v2/v3)
+- `GET /api/public-config` — публичный конфиг (`recaptcha_site_key`, `recaptcha_required`)
 
 Авторизация: `Authorization: Bearer <API_KEY>` или заголовок `X-API-Key`.  
 Для примеров ниже задайте ключ с правами Aiya/Founder, например через `QUAZAR_API_KEYS` в `.env`:

@@ -122,27 +122,11 @@ fn rate_limit_exceeded(path: &str, ip: &str) -> Response {
 }
 
 fn client_ip(req: &axum::http::Request<axum::body::Body>) -> String {
-    if let Some(forwarded) = req.headers().get("x-forwarded-for") {
-        if let Ok(value) = forwarded.to_str() {
-            if let Some(first) = value.split(',').next() {
-                let ip = first.trim();
-                if !ip.is_empty() {
-                    return ip.to_string();
-                }
-            }
-        }
-    }
-    if let Some(real_ip) = req.headers().get("x-real-ip") {
-        if let Ok(ip) = real_ip.to_str() {
-            if !ip.trim().is_empty() {
-                return ip.trim().to_string();
-            }
-        }
-    }
-    req.extensions()
+    let peer = req
+        .extensions()
         .get::<ConnectInfo<SocketAddr>>()
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+        .map(|ConnectInfo(addr)| *addr);
+    crate::client_ip::resolve_client_ip(req.headers(), peer)
 }
 
 fn strict_secrets_enabled() -> bool {

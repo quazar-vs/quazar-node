@@ -40,12 +40,38 @@ pub(crate) fn recaptcha_configured() -> bool {
         .unwrap_or(false)
 }
 
+/// Public site key for frontend widgets (v2 checkbox / v3). Never secret.
+pub fn recaptcha_site_key() -> Option<String> {
+    std::env::var("RECAPTCHA_SITE_KEY")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
 /// Captcha is required when configured, or always in production.
 pub(crate) fn recaptcha_required() -> bool {
     crate::auth::is_production() || recaptcha_configured()
 }
 
+fn recaptcha_min_score() -> f64 {
+    std::env::var("RECAPTCHA_MIN_SCORE")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0.5)
+}
+
 pub(crate) async fn verify_recaptcha(token: &str) -> Result<(), String> {
+    verify_recaptcha_with_ip(token, None).await
+}
+
+/// Verify Google reCAPTCHA v2/v3 token via siteverify.
+///
+/// For v3 responses that include `score`, require `score >= RECAPTCHA_MIN_SCORE` (default 0.5).
+/// Optional `RECAPTCHA_EXPECTED_ACTION` must match the `action` field when set.
+pub(crate) async fn verify_recaptcha_with_ip(
+    token: &str,
+    remote_ip: Option<&str>,
+) -> Result<(), String> {
     crate::auth::ensure_recaptcha_secret()?;
 
     let Ok(secret) = std::env::var("RECAPTCHA_SECRET_KEY") else {
@@ -60,10 +86,18 @@ pub(crate) async fn verify_recaptcha(token: &str) -> Result<(), String> {
         return Err("Пройдите проверку reCAPTCHA".to_string());
     }
 
+    let mut form = vec![
+        ("secret", secret),
+        ("response", token.trim().to_string()),
+    ];
+    if let Some(ip) = remote_ip.map(str::trim).filter(|s| !s.is_empty() && *s != "unknown") {
+        form.push(("remoteip", ip.to_string()));
+    }
+
     let client = reqwest::Client::new();
     let resp = client
         .post("https://www.google.com/recaptcha/api/siteverify")
-        .form(&[("secret", secret.as_str()), ("response", token)])
+        .form(&form)
         .send()
         .await
         .map_err(|e| format!("reCAPTCHA unreachable: {e}"))?;
@@ -73,11 +107,42 @@ pub(crate) async fn verify_recaptcha(token: &str) -> Result<(), String> {
         .await
         .map_err(|e| format!("reCAPTCHA parse error: {e}"))?;
 
-    if body.get("success").and_then(|v| v.as_bool()) == Some(true) {
-        Ok(())
-    } else {
-        Err("Проверка reCAPTCHA не пройдена".to_string())
+    if body.get("success").and_then(|v| v.as_bool()) != Some(true) {
+        return Err("Проверка reCAPTCHA не пройдена".to_string());
     }
+
+    // v3: score present — enforce minimum.
+    if let Some(score) = body.get("score").and_then(|v| v.as_f64()) {
+        let min = recaptcha_min_score();
+        if score < min {
+            tracing::warn!(score, min, "reCAPTCHA v3 score too low");
+            return Err("Проверка reCAPTCHA не пройдена".to_string());
+        }
+    }
+
+    if let Ok(expected) = std::env::var("RECAPTCHA_EXPECTED_ACTION") {
+        let expected = expected.trim();
+        if !expected.is_empty() {
+            let action = body
+                .get("action")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if action != expected {
+                tracing::warn!(action, expected, "reCAPTCHA action mismatch");
+                return Err("Проверка reCAPTCHA не пройдена".to_string());
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// GET /api/public-config — non-secret frontend config (reCAPTCHA site key).
+pub async fn public_config_handler() -> impl IntoResponse {
+    Json(ApiResponse::success(serde_json::json!({
+        "recaptcha_site_key": recaptcha_site_key(),
+        "recaptcha_required": recaptcha_required(),
+    })))
 }
 
 /// GET /api/applications — list applications (Bearer API key).

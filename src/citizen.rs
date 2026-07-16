@@ -607,17 +607,7 @@ fn detect_digital_applicant(
 }
 
 fn apply_client_ip(headers: &HeaderMap, connect: Option<&ConnectInfo<SocketAddr>>) -> String {
-    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = forwarded.split(',').next() {
-            let ip = first.trim();
-            if !ip.is_empty() {
-                return ip.to_string();
-            }
-        }
-    }
-    connect
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
+    crate::client_ip::resolve_from_connect(headers, connect)
 }
 
 async fn get_citizen_by_name(pool: &PgPool, name: &str) -> Result<Option<Citizen>, CitizenError> {

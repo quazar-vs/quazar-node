@@ -237,6 +237,79 @@
     const SUBMIT_RATE_KEY = "quazar_app_last_submit";
     const ADMIN_KEY = "quazar_admin_api_key";
 
+    let recaptchaSiteKey = window.QUAZAR_RECAPTCHA_SITE_KEY
+      ? String(window.QUAZAR_RECAPTCHA_SITE_KEY)
+      : "";
+    let recaptchaRequired = false;
+    let recaptchaWidgetId = null;
+
+    async function loadPublicConfig() {
+      try {
+        const res = await fetch(API_BASE + "/api/public-config", {
+          headers: { Accept: "application/json" }
+        });
+        const body = await res.json();
+        const data = (body && body.data) || {};
+        if (!recaptchaSiteKey && data.recaptcha_site_key) {
+          recaptchaSiteKey = String(data.recaptcha_site_key);
+        }
+        recaptchaRequired = !!data.recaptcha_required;
+      } catch (_) {
+        /* keep defaults */
+      }
+    }
+
+    function loadRecaptchaScript(siteKey) {
+      return new Promise((resolve, reject) => {
+        if (window.grecaptcha && window.grecaptcha.render) {
+          resolve();
+          return;
+        }
+        const existing = document.querySelector("script[data-quazar-recaptcha]");
+        if (existing) {
+          existing.addEventListener("load", () => resolve());
+          existing.addEventListener("error", () => reject(new Error("reCAPTCHA script failed")));
+          return;
+        }
+        const s = document.createElement("script");
+        s.src = "https://www.google.com/recaptcha/api.js?render=explicit";
+        s.async = true;
+        s.defer = true;
+        s.dataset.quazarRecaptcha = "1";
+        s.onload = () => resolve();
+        s.onerror = () => reject(new Error("Не удалось загрузить reCAPTCHA"));
+        document.head.appendChild(s);
+        void siteKey;
+      });
+    }
+
+    async function ensureRecaptchaWidget() {
+      const mount = document.getElementById("recaptcha-mount");
+      if (!mount || !recaptchaSiteKey) return;
+      await loadRecaptchaScript(recaptchaSiteKey);
+      await new Promise((resolve) => {
+        window.grecaptcha.ready(() => resolve());
+      });
+      if (recaptchaWidgetId !== null) {
+        try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
+        return;
+      }
+      mount.innerHTML = "";
+      recaptchaWidgetId = window.grecaptcha.render(mount, {
+        sitekey: recaptchaSiteKey,
+        theme: "dark"
+      });
+    }
+
+    function getCaptchaToken() {
+      if (!recaptchaSiteKey || !window.grecaptcha || recaptchaWidgetId === null) return "";
+      try {
+        return window.grecaptcha.getResponse(recaptchaWidgetId) || "";
+      } catch (_) {
+        return "";
+      }
+    }
+
     function showMessage(text, type) {
       MSG.textContent = text;
       MSG.className = "message show " + (type || "info");
@@ -336,12 +409,21 @@
         + '    <div class="field"><label>ФИО</label><input id="full_name" required maxlength="200" placeholder="Иван Иванов"></div>'
         + '    <div class="field"><label>Данные паспорта</label><textarea id="passport_data" required maxlength="2000" placeholder="Серия/номер, кем выдан, дата"></textarea></div>'
         + '    <div class="field"><label>Причина</label><textarea id="reason" required maxlength="5000" placeholder="Коротко: зачем вам гражданство Квазара"></textarea></div>'
+        + '    <div class="field" id="recaptcha-field" style="display:none"><label>Проверка</label><div id="recaptcha-mount"></div></div>'
         + '    <button class="btn btn-primary" type="submit" id="submitBtn">Отправить заявку</button>'
         + '    <div class="hint" style="color:#9aa3b5;font-size:0.84rem;margin-top:0.25rem;">Не более 1 заявки в месяц на один email.</div>'
         + '  </form>'
         + "</div>";
 
       document.getElementById("apply-form").addEventListener("submit", onSubmit);
+      recaptchaWidgetId = null;
+      loadPublicConfig().then(() => {
+        const field = document.getElementById("recaptcha-field");
+        if (field && (recaptchaRequired || recaptchaSiteKey)) {
+          field.style.display = "block";
+          return ensureRecaptchaWidget();
+        }
+      }).catch((err) => showMessage(err.message || String(err), "err"));
     }
 
     async function onSubmit(e) {
@@ -382,7 +464,20 @@
       btn.disabled = true;
 
       try {
-        const payload = { login: loginNorm, full_name, passport_data, email, reason };
+        const captcha_token = getCaptchaToken();
+        if ((recaptchaRequired || recaptchaSiteKey) && !captcha_token) {
+          showMessage("Пройдите проверку reCAPTCHA.", "err");
+          btn.disabled = false;
+          return;
+        }
+        const payload = {
+          login: loginNorm,
+          full_name,
+          passport_data,
+          email,
+          reason,
+          captcha_token: captcha_token || undefined
+        };
         const res = await api("/api/application", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -398,6 +493,9 @@
         setRoute("verify", id);
       } catch (err) {
         showMessage(err.message || String(err), "err");
+        if (window.grecaptcha && recaptchaWidgetId !== null) {
+          try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
+        }
       } finally {
         btn.disabled = false;
       }

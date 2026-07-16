@@ -23,6 +23,7 @@ mod blockchain;
 mod candidacy;
 mod channel;
 mod chat;
+mod client_ip;
 mod citizen;
 mod citizenship_application;
 mod citizenship_portal;
@@ -221,6 +222,7 @@ async fn main() {
             "/api/application/:id",
             get(citizenship_portal::get_application_status),
         )
+        .route("/api/public-config", get(applications::public_config_handler))
         .route("/api/public/stats", get(public_stats_handler))
         .route("/health", get(health_handler))
         .route("/citizen/apply", post(apply_for_citizenship))

@@ -4,9 +4,24 @@
 
 ## API (public)
 
-- `POST /api/application` — подача заявки
+- `POST /api/application` — подача заявки (тело JSON + `captcha_token`)
 - `POST /api/application/verify` — подтверждение email-кода
 - `GET /api/application/:id` — статус заявки
+- `GET /api/public-config` — `recaptcha_site_key` / `recaptcha_required`
+
+## reCAPTCHA
+
+Сервер проверяет токен через Google `siteverify` (`RECAPTCHA_SECRET_KEY`).
+
+Фронт берёт site key из `window.QUAZAR_RECAPTCHA_SITE_KEY` или из `GET /api/public-config`.
+
+```bash
+# .env
+RECAPTCHA_SITE_KEY=...
+RECAPTCHA_SECRET_KEY=...
+# за reverse-proxy:
+QUAZAR_TRUSTED_PROXIES=127.0.0.1,::1,10.0.0.0/8
+```
 
 ## Логин
 
@@ -17,8 +32,8 @@
 ```html
 <script>
   window.QUAZAR_API_BASE = "http://127.0.0.1:8080";
-  // опционально: задайте точку API вручную
-  // window.QUAZAR_API_BASE = "http://127.0.0.1:8080";
+  // опционально, если не используете /api/public-config:
+  // window.QUAZAR_RECAPTCHA_SITE_KEY = "6Lc...";
 </script>
 ```
 

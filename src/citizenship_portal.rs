@@ -17,12 +17,14 @@ use uuid::Uuid;
 
 use sha2::{Digest, Sha256};
 
+use crate::applications::{recaptcha_required, verify_recaptcha_with_ip};
 use crate::auth::{AuthContext, Role};
 use crate::block_producer;
 use crate::blockchain::{
     build_signed_citizen_added_event, build_signed_citizen_role_event, build_signed_passport_issued_event,
 };
 use crate::citizen::hash_key;
+use crate::client_ip;
 use crate::email::{
     send_citizenship_application, send_citizenship_approval, send_citizenship_confirmation,
     send_citizenship_rejection, SmtpConfig,
@@ -55,20 +57,6 @@ fn allow_submit(ip: &str) -> bool {
 
     map.insert(ip.to_string(), now);
     true
-}
-
-fn client_ip(headers: &HeaderMap, connect: Option<&ConnectInfo<SocketAddr>>) -> String {
-    if let Some(forwarded) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        if let Some(first) = forwarded.split(',').next() {
-            let ip = first.trim();
-            if !ip.is_empty() {
-                return ip.to_string();
-            }
-        }
-    }
-    connect
-        .map(|ConnectInfo(addr)| addr.ip().to_string())
-        .unwrap_or_else(|| "unknown".to_string())
 }
 
 fn sha256_hex(value: &str) -> String {
@@ -140,6 +128,9 @@ pub struct SubmitApplicationRequest {
     pub passport_data: String,
     pub email: String,
     pub reason: String,
+    /// Google reCAPTCHA v2/v3 response token.
+    #[serde(default)]
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -207,11 +198,21 @@ pub async fn submit_application(
     Json(req): Json<SubmitApplicationRequest>,
 ) -> impl IntoResponse {
     // Client-side attackers can still hammer the endpoint; keep a cheap per-IP throttle.
-    let ip = client_ip(&headers, Some(&connect));
+    let ip = client_ip::resolve_from_connect(&headers, Some(&connect));
     if !allow_submit(&ip) {
         return response::too_many_requests(
             "Слишком часто. Подождите минуту и попробуйте снова.",
         );
+    }
+
+    if let Err(msg) = crate::auth::ensure_recaptcha_secret() {
+        return response::service_unavailable(msg);
+    }
+    if recaptcha_required() {
+        let token = req.captcha_token.as_deref().unwrap_or("");
+        if let Err(msg) = verify_recaptcha_with_ip(token, Some(&ip)).await {
+            return response::bad_request(msg);
+        }
     }
 
     let login = match validate_login(&req.login) {

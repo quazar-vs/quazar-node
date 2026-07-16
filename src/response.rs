@@ -66,3 +66,7 @@ pub fn too_many_requests(message: impl Into<String>) -> Response {
 pub fn internal_error(message: impl Into<String>) -> Response {
     err_response(StatusCode::INTERNAL_SERVER_ERROR, message)
 }
+
+pub fn service_unavailable(message: impl Into<String>) -> Response {
+    err_response(StatusCode::SERVICE_UNAVAILABLE, message)
+}
