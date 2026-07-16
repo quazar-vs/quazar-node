@@ -83,7 +83,7 @@ use mayor::{
     start_election_handler, vote_handler as mayor_vote_handler,
 };
 use handlers::background_sync;
-use http::{auth_middleware, build_cors_layer, rate_limit_middleware};
+use http::{auth_middleware, build_cors_layer, public_rate_limit_middleware, rate_limit_middleware};
 use nodes::{Node, NodeRegistry, NodeStatus};
 
 pub use models::{Block, Event};
@@ -240,6 +240,8 @@ async fn main() {
         .route("/mayor/list", get(list_elections_handler))
         .route("/mayor/:id", get(get_election_handler))
         .route("/chat/admin/send", post(admin_send_message_handler))
+        // Public abuse limits: register 5/min, auth 10/min, application 10/min (per IP).
+        .route_layer(middleware::from_fn(public_rate_limit_middleware))
         .with_state(state.clone());
 
     let protected_routes = Router::new()

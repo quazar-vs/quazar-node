@@ -40,12 +40,20 @@ pub(crate) fn recaptcha_configured() -> bool {
         .unwrap_or(false)
 }
 
+/// Captcha is required when configured, or always in production.
+pub(crate) fn recaptcha_required() -> bool {
+    crate::auth::is_production() || recaptcha_configured()
+}
+
 pub(crate) async fn verify_recaptcha(token: &str) -> Result<(), String> {
+    crate::auth::ensure_recaptcha_secret()?;
+
     let Ok(secret) = std::env::var("RECAPTCHA_SECRET_KEY") else {
         tracing::warn!("RECAPTCHA_SECRET_KEY unset — captcha skipped (dev)");
         return Ok(());
     };
     if secret.trim().is_empty() {
+        tracing::warn!("RECAPTCHA_SECRET_KEY empty — captcha skipped (dev)");
         return Ok(());
     }
     if token.trim().is_empty() {

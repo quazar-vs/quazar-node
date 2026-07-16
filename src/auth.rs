@@ -46,6 +46,27 @@ pub fn is_node_secret(key: &str) -> bool {
     key == node_secret()
 }
 
+/// Production mode: `QUAZAR_STRICT_SECRETS=true|1`.
+pub fn is_production() -> bool {
+    std::env::var("QUAZAR_STRICT_SECRETS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false)
+}
+
+/// In production `RECAPTCHA_SECRET_KEY` is mandatory; in dev an empty/missing key is allowed.
+pub fn ensure_recaptcha_secret() -> Result<(), String> {
+    let configured = std::env::var("RECAPTCHA_SECRET_KEY")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if configured {
+        return Ok(());
+    }
+    if is_production() {
+        return Err("RECAPTCHA_SECRET_KEY must be set in production".to_string());
+    }
+    Ok(())
+}
+
 pub fn compute_registration_signature(
     citizen_id: &str,
     public_key: &str,

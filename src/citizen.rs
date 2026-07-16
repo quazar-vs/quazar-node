@@ -17,7 +17,7 @@ pub use crate::types::Role;
 use crate::auth::{
     grant_default_agent_permissions, list_agent_permissions, registration_signature, AuthContext,
 };
-use crate::applications::{recaptcha_configured, verify_recaptcha};
+use crate::applications::{recaptcha_required, verify_recaptcha};
 use crate::block_producer;
 use crate::blockchain::{
     build_citizen_added_event, build_signed_citizen_role_event, build_signed_citizen_status_event,
@@ -1441,7 +1441,11 @@ pub async fn apply_for_citizenship(
     }
 
     let captcha_token = req.captcha_token.as_deref().unwrap_or("");
-    let captcha_failed = if recaptcha_configured() {
+    // Production without RECAPTCHA_SECRET_KEY must fail before digital/human branching.
+    if let Err(msg) = crate::auth::ensure_recaptcha_secret() {
+        return (StatusCode::SERVICE_UNAVAILABLE, Json(ApiResponse::error(msg))).into_response();
+    }
+    let captcha_failed = if recaptcha_required() {
         verify_recaptcha(captcha_token).await.is_err()
     } else {
         false
@@ -1456,8 +1460,8 @@ pub async fn apply_for_citizenship(
     );
     let applicant_type = if is_digital { "digital" } else { "human" };
 
-    // Humans must pass CAPTCHA when configured (bots take the digital Agent path instead).
-    if !is_digital && recaptcha_configured() {
+    // Humans must pass CAPTCHA when required (bots take the digital Agent path instead).
+    if !is_digital && recaptcha_required() {
         if let Err(msg) = verify_recaptcha(captcha_token).await {
             return (StatusCode::BAD_REQUEST, Json(ApiResponse::error(msg))).into_response();
         }

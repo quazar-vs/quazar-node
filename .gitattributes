@@ -1,0 +1,5 @@
+*.tar.gz binary
+*.tar binary
+*.zip binary
+*.sqlite binary
+*.db binary

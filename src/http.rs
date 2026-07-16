@@ -23,6 +23,9 @@ type KeyedLimiter = RateLimiter<
 >;
 
 static RATE_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
+static PUBLIC_REGISTER_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
+static PUBLIC_AUTH_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
+static PUBLIC_APPLICATION_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
 
 fn mask_key(key: &str) -> String {
     if key.is_empty() {
@@ -45,6 +48,59 @@ fn rate_limiter() -> Arc<KeyedLimiter> {
             Arc::new(RateLimiter::keyed(Quota::per_second(rps)))
         })
         .clone()
+}
+
+fn per_minute_limiter(rpm: u32) -> Arc<KeyedLimiter> {
+    let rpm = NonZeroU32::new(rpm.max(1)).unwrap_or(NonZeroU32::MIN);
+    Arc::new(RateLimiter::keyed(Quota::per_minute(rpm)))
+}
+
+fn public_register_limiter() -> Arc<KeyedLimiter> {
+    PUBLIC_REGISTER_LIMITER
+        .get_or_init(|| per_minute_limiter(5))
+        .clone()
+}
+
+fn public_auth_limiter() -> Arc<KeyedLimiter> {
+    PUBLIC_AUTH_LIMITER
+        .get_or_init(|| per_minute_limiter(10))
+        .clone()
+}
+
+fn public_application_limiter() -> Arc<KeyedLimiter> {
+    PUBLIC_APPLICATION_LIMITER
+        .get_or_init(|| per_minute_limiter(10))
+        .clone()
+}
+
+/// Register endpoints: `/api/register*`, `/auth/register*` — 5 req/min per IP.
+fn is_public_register_path(path: &str) -> bool {
+    path == "/api/register"
+        || path.starts_with("/api/register/")
+        || path == "/auth/register"
+        || path.starts_with("/auth/register/")
+}
+
+/// Auth endpoints: `/api/auth*`, `/auth/login`, `/auth/check` — 10 req/min per IP.
+fn is_public_auth_path(path: &str) -> bool {
+    path == "/api/auth"
+        || path.starts_with("/api/auth/")
+        || path == "/auth/login"
+        || path == "/auth/check"
+}
+
+/// Application endpoints: `/api/application*` — 10 req/min per IP.
+fn is_public_application_path(path: &str) -> bool {
+    path == "/api/application" || path.starts_with("/api/application/")
+}
+
+fn rate_limit_exceeded(path: &str, ip: &str) -> Response {
+    tracing::warn!(path = %path, client_ip = %ip, "rate limit exceeded");
+    (
+        StatusCode::TOO_MANY_REQUESTS,
+        Json(ApiResponse::error("Rate limit exceeded")),
+    )
+        .into_response()
 }
 
 fn client_ip(req: &axum::http::Request<axum::body::Body>) -> String {
@@ -162,14 +218,37 @@ fn allows_pending_citizen(path: &str) -> bool {
 
 pub async fn rate_limit_middleware(req: axum::http::Request<axum::body::Body>, next: Next) -> Response {
     let ip = client_ip(&req);
+    let path = req.uri().path();
     if rate_limiter().check_key(&ip).is_err() {
-        tracing::warn!(path = %req.uri().path(), client_ip = %ip, "rate limit exceeded");
-        return (
-            StatusCode::TOO_MANY_REQUESTS,
-            Json(ApiResponse::error("Rate limit exceeded")),
-        )
-            .into_response();
+        return rate_limit_exceeded(path, &ip);
     }
+    next.run(req).await
+}
+
+/// Stricter per-minute limits for public auth / register / application routes.
+pub async fn public_rate_limit_middleware(
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let ip = client_ip(&req);
+    let path = req.uri().path();
+
+    let limiter = if is_public_register_path(path) {
+        Some(public_register_limiter())
+    } else if is_public_auth_path(path) {
+        Some(public_auth_limiter())
+    } else if is_public_application_path(path) {
+        Some(public_application_limiter())
+    } else {
+        None
+    };
+
+    if let Some(limiter) = limiter {
+        if limiter.check_key(&ip).is_err() {
+            return rate_limit_exceeded(path, &ip);
+        }
+    }
+
     next.run(req).await
 }
 

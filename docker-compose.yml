@@ -8,8 +8,6 @@ services:
       POSTGRES_USER: quazar
       POSTGRES_PASSWORD: quazar
       POSTGRES_DB: quazar
-    ports:
-      - "5432:5432"
     volumes:
       - quazar_pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -27,11 +25,12 @@ services:
       DATABASE_URL: postgres://quazar:quazar@postgres:5432/quazar
       QUAZAR_NODE_SECRET: quazar_node_secret_2026
       QUAZAR_REG_SECRET: quazar_reg_secret_2026
-      QUAZAR_INIT_TEST_KEYS: "true"
+      QUAZAR_INIT_TEST_KEYS: "false"
       QUAZAR_NODE_ID: QZ-NODE-1
       QUAZAR_NODE_URL: http://quazar-node:8080
       QUAZAR_PORT: "8080"
       QUAZAR_SYNC_INTERVAL_SECS: "60"
+      QUAZAR_CORS_ORIGINS: "https://quazar.website"
       RUST_LOG: info
     depends_on:
       postgres:

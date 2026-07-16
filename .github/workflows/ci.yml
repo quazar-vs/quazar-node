@@ -41,11 +41,27 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Install cargo-audit and cargo-deny
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit,cargo-deny
+
       - name: cargo check
         run: cargo check --locked
+
+      - name: cargo clippy
+        run: cargo clippy --locked -- -D warnings
+
+      - name: cargo audit
+        run: cargo audit
+
+      - name: cargo deny check
+        run: cargo deny check
 
       - name: cargo build
         run: cargo build --locked
