@@ -250,7 +250,7 @@ const INITIATIVE_SELECT: &str = r#"
 
 async fn fetch_initiative(pool: &PgPool, id: &str) -> Result<InitiativeRow, InitiativeError> {
     let query = format!("{INITIATIVE_SELECT} WHERE i.id = $1");
-    sqlx::query_as(&query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -470,7 +470,7 @@ pub async fn list_initiatives(
     }
     sql.push_str(" ORDER BY i.created_at DESC");
 
-    let mut q = sqlx::query_as::<_, InitiativeRow>(&sql);
+    let mut q = sqlx::query_as::<_, InitiativeRow>(sqlx::AssertSqlSafe(sql));
     for b in &binds {
         q = q.bind(b);
     }

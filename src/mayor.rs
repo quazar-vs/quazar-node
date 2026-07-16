@@ -901,7 +901,7 @@ pub async fn list_elections(
     }
     sql.push_str(" ORDER BY created_at DESC");
 
-    let mut q = sqlx::query_as::<_, MayorElection>(&sql);
+    let mut q = sqlx::query_as::<_, MayorElection>(sqlx::AssertSqlSafe(sql));
     for b in &binds {
         q = q.bind(b);
     }

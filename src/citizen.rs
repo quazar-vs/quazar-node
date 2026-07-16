@@ -611,9 +611,7 @@ fn apply_client_ip(headers: &HeaderMap, connect: Option<&ConnectInfo<SocketAddr>
 }
 
 async fn get_citizen_by_name(pool: &PgPool, name: &str) -> Result<Option<Citizen>, CitizenError> {
-    let row = sqlx::query_as::<_, CitizenRow>(&format!(
-        "{CITIZEN_SELECT} FROM citizens WHERE LOWER(name) = LOWER($1)"
-    ))
+    let row = sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!("{CITIZEN_SELECT} FROM citizens WHERE LOWER(name) = LOWER($1)")))
     .bind(name)
     .fetch_optional(pool)
     .await
@@ -624,7 +622,7 @@ async fn get_citizen_by_name(pool: &PgPool, name: &str) -> Result<Option<Citizen
 }
 
 async fn get_citizen_by_id(pool: &PgPool, id: &str) -> Result<Option<Citizen>, CitizenError> {
-    let row = sqlx::query_as::<_, CitizenRow>(&format!("{CITIZEN_SELECT} FROM citizens WHERE id = $1"))
+    let row = sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!("{CITIZEN_SELECT} FROM citizens WHERE id = $1")))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -854,9 +852,7 @@ pub async fn list_citizens(
         return resp;
     }
 
-    let rows = match sqlx::query_as::<_, CitizenRow>(&format!(
-        "{CITIZEN_SELECT} FROM citizens ORDER BY created_at DESC"
-    ))
+    let rows = match sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!("{CITIZEN_SELECT} FROM citizens ORDER BY created_at DESC")))
     .fetch_all(&state.db)
     .await
     {
@@ -1203,9 +1199,7 @@ pub async fn search_citizens(
     }
 
     let search_pattern = format!("%{}%", query.q);
-    let rows = match sqlx::query_as::<_, CitizenRow>(&format!(
-        "{CITIZEN_SELECT} FROM citizens WHERE name LIKE $1 ORDER BY created_at DESC"
-    ))
+    let rows = match sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!("{CITIZEN_SELECT} FROM citizens WHERE name LIKE $1 ORDER BY created_at DESC")))
     .bind(search_pattern)
     .fetch_all(&state.db)
     .await

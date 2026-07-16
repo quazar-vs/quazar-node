@@ -392,7 +392,7 @@ pub async fn get_messages(
          WHERE session_id = $1
          ORDER BY created_at ASC, id ASC"
     );
-    sqlx::query_as::<_, ChatMessageRow>(&sql)
+    sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
         .bind(session_id)
         .fetch_all(pool)
         .await
@@ -814,7 +814,7 @@ pub async fn list_messages(
                 LIMIT $3
                 "#
             );
-            sqlx::query_as::<_, ChatMessageRow>(&sql)
+            sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
                 .bind(before_ts)
                 .bind(before_msg_id)
                 .bind(limit)
@@ -832,7 +832,7 @@ pub async fn list_messages(
                 LIMIT $3
                 "#
             );
-            sqlx::query_as::<_, ChatMessageRow>(&sql)
+            sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
                 .bind(before_ts)
                 .bind(before_msg_id)
                 .bind(limit)
@@ -850,7 +850,7 @@ pub async fn list_messages(
             LIMIT $2
             "#
         );
-        sqlx::query_as::<_, ChatMessageRow>(&sql)
+        sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
             .bind(sid)
             .bind(limit)
             .fetch_all(pool)
@@ -865,7 +865,7 @@ pub async fn list_messages(
             LIMIT $1
             "#
         );
-        sqlx::query_as::<_, ChatMessageRow>(&sql)
+        sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
             .bind(limit)
             .fetch_all(pool)
             .await
@@ -907,7 +907,7 @@ pub async fn search_messages(
             LIMIT $2
             "#
         );
-        sqlx::query_as::<_, ChatMessageRow>(&sql)
+        sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
             .bind(trimmed)
             .bind(limit)
             .bind(exclude)
@@ -923,7 +923,7 @@ pub async fn search_messages(
             LIMIT $2
             "#
         );
-        sqlx::query_as::<_, ChatMessageRow>(&sql)
+        sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
             .bind(trimmed)
             .bind(limit)
             .fetch_all(pool)

@@ -231,7 +231,7 @@ const REFERENDUM_SELECT: &str = r#"
 
 async fn fetch_referendum(pool: &PgPool, id: &str) -> Result<ReferendumRow, ReferendumError> {
     let query = format!("{REFERENDUM_SELECT} WHERE r.id = $1");
-    sqlx::query_as(&query)
+    sqlx::query_as(sqlx::AssertSqlSafe(query))
         .bind(id)
         .fetch_optional(pool)
         .await
@@ -399,7 +399,7 @@ pub async fn list_referendums(
     }
     sql.push_str(" ORDER BY r.created_at DESC");
 
-    let mut q = sqlx::query_as::<_, ReferendumRow>(&sql);
+    let mut q = sqlx::query_as::<_, ReferendumRow>(sqlx::AssertSqlSafe(sql));
     for b in &binds {
         q = q.bind(b);
     }

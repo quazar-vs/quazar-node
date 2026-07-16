@@ -173,7 +173,7 @@ pub async fn get_catalog(pool: &PgPool, active_only: bool) -> SvodResult<Vec<Ser
     } else {
         format!("{SERVICE_SELECT} ORDER BY s.code")
     };
-    sqlx::query_as::<_, ServiceItem>(&sql)
+    sqlx::query_as::<_, ServiceItem>(sqlx::AssertSqlSafe(sql))
         .fetch_all(pool)
         .await
         .map_err(|e| SvodError::Database(e.to_string()))
@@ -190,7 +190,7 @@ pub async fn get_service_by_code(
     } else {
         format!("{SERVICE_SELECT} WHERE s.code = $1")
     };
-    sqlx::query_as::<_, ServiceItem>(&sql)
+    sqlx::query_as::<_, ServiceItem>(sqlx::AssertSqlSafe(sql))
         .bind(&code)
         .fetch_optional(pool)
         .await
