@@ -97,7 +97,7 @@ async fn fetch_block_state_row(pool: &PgPool) -> Result<Option<BlockState>, Stri
     .fetch_optional(pool)
     .await
     .map_err(|e| e.to_string())?;
-    Ok(row.map(|(next_block_number, next_required_events, last_block_size)| {
+    Ok(row.map(|(next_block_number, _next_required_events, last_block_size)| {
         let next_block_number = next_block_number as u64;
         BlockState {
             next_block_number,

@@ -258,7 +258,7 @@ pub async fn update_service(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .unwrap_or(&existing.name);
-    let description = req.description.as_ref().map(|d| d.as_str()).or(existing.description.as_deref());
+    let description = req.description.as_deref().or(existing.description.as_deref());
     let base_price = req.base_price.unwrap_or(existing.base_price);
     let min_quantity = req.min_quantity.unwrap_or(existing.min_quantity);
     let max_quantity = req.max_quantity.unwrap_or(existing.max_quantity);

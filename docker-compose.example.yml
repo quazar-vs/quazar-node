@@ -1,12 +1,13 @@
+# Example 2-node stack. Copy to docker-compose.yml and fill .env — no secrets inlined.
+# Required in .env: POSTGRES_PASSWORD, QUAZAR_NODE_SECRET, QUAZAR_REG_SECRET, ADMIN_API_KEY
+
 services:
   postgres:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: quazar
-      POSTGRES_PASSWORD: quazar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: quazar
-    ports:
-      - "5432:5432"
     volumes:
       - quazar_pg_data:/var/lib/postgresql/data
     healthcheck:
@@ -19,10 +20,8 @@ services:
     image: postgres:16-alpine
     environment:
       POSTGRES_USER: quazar
-      POSTGRES_PASSWORD: quazar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: quazar
-    ports:
-      - "5433:5432"
     volumes:
       - quazar_pg_data_2:/var/lib/postgresql/data
     healthcheck:
@@ -36,14 +35,17 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DATABASE_URL: postgres://quazar:quazar@postgres:5432/quazar
-      QUAZAR_NODE_SECRET: QUAZAR_NODE_SECRET_2026
-      QUAZAR_REG_SECRET: QUAZAR_REG_SECRET_2026
-      QUAZAR_INIT_TEST_KEYS: "true"
+      DATABASE_URL: postgres://quazar:${POSTGRES_PASSWORD}@postgres:5432/quazar
+      QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}
+      QUAZAR_REG_SECRET: ${QUAZAR_REG_SECRET:?QUAZAR_REG_SECRET must be set}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set}
+      QUAZAR_STRICT_SECRETS: ${QUAZAR_STRICT_SECRETS:-false}
+      QUAZAR_INIT_TEST_KEYS: ${QUAZAR_INIT_TEST_KEYS:-false}
       QUAZAR_NODE_ID: QZ-NODE-1
       QUAZAR_NODE_URL: http://quazar-node:8080
       QUAZAR_PORT: "8080"
       QUAZAR_SYNC_INTERVAL_SECS: "60"
+      QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
       QUAZAR_BOOTSTRAP_PEERS: QZ-NODE-2@http://quazar-node-2:8080
     depends_on:
       postgres:
@@ -60,14 +62,17 @@ services:
     ports:
       - "8081:8080"
     environment:
-      DATABASE_URL: postgres://quazar:quazar@postgres-2:5432/quazar
-      QUAZAR_NODE_SECRET: QUAZAR_NODE_SECRET_2026
-      QUAZAR_REG_SECRET: QUAZAR_REG_SECRET_2026
-      QUAZAR_INIT_TEST_KEYS: "true"
+      DATABASE_URL: postgres://quazar:${POSTGRES_PASSWORD}@postgres-2:5432/quazar
+      QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}
+      QUAZAR_REG_SECRET: ${QUAZAR_REG_SECRET:?QUAZAR_REG_SECRET must be set}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set}
+      QUAZAR_STRICT_SECRETS: ${QUAZAR_STRICT_SECRETS:-false}
+      QUAZAR_INIT_TEST_KEYS: ${QUAZAR_INIT_TEST_KEYS:-false}
       QUAZAR_NODE_ID: QZ-NODE-2
       QUAZAR_NODE_URL: http://quazar-node-2:8080
       QUAZAR_PORT: "8080"
       QUAZAR_SYNC_INTERVAL_SECS: "60"
+      QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
       QUAZAR_BOOTSTRAP_PEERS: QZ-NODE-1@http://quazar-node:8080
     depends_on:
       postgres-2:

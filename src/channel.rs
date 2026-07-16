@@ -1,3 +1,5 @@
+#![allow(non_snake_case)] // External OpenClaw / plugin JSON uses camelCase field names.
+
 use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
@@ -15,7 +17,7 @@ use axum::{
     },
 };
 use chrono::Utc;
-use futures_util::stream::{self, StreamExt};
+use futures_util::stream::{self};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 use tokio::sync::{broadcast, RwLock};
@@ -121,7 +123,7 @@ pub struct CrossChannelSender {
 }
 
 #[derive(Debug, Deserialize)]
-struct TargetRef {
+pub(crate) struct TargetRef {
     #[allow(dead_code)]
     #[serde(rename = "type")]
     target_type: Option<String>,
@@ -129,7 +131,7 @@ struct TargetRef {
 }
 
 #[derive(Debug, Deserialize)]
-struct MessageContentRef {
+pub(crate) struct MessageContentRef {
     text: Option<String>,
     #[allow(dead_code)]
     format: Option<String>,

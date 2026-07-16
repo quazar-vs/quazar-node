@@ -9,14 +9,13 @@ pub enum NodeStatus {
     Syncing,
 }
 
-impl ToString for NodeStatus {
-    fn to_string(&self) -> String {
-        match self {
+impl std::fmt::Display for NodeStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
             NodeStatus::Alive => "alive",
             NodeStatus::Dead => "dead",
             NodeStatus::Syncing => "syncing",
-        }
-        .to_string()
+        })
     }
 }
 

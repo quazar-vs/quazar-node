@@ -184,7 +184,7 @@ impl MayorError {
         Self::NotFound(msg.into())
     }
 
-    fn to_response(self) -> (StatusCode, Json<ApiResponse>) {
+    fn to_response(&self) -> (StatusCode, Json<ApiResponse>) {
         let (status, message) = match self {
             MayorError::Message(m) => (StatusCode::BAD_REQUEST, m),
             MayorError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
@@ -725,13 +725,12 @@ pub async fn cast_vote(
                 "В первом туре можно голосовать только за квалифицированных кандидатов",
             ));
         }
-    } else if round == 2 {
-        if candidate.status != CandidateStatus::Advanced.as_str() {
+    } else if round == 2
+        && candidate.status != CandidateStatus::Advanced.as_str() {
             return Err(MayorError::bad_request(
                 "Во втором туре можно голосовать только за вышедших в финал",
             ));
         }
-    }
 
     let vote_id = Uuid::new_v4().to_string();
     let inserted = sqlx::query(

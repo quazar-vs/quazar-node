@@ -1,0 +1,3 @@
+# Clippy config for quazar_registry — keep CI `-D warnings` practical.
+too-many-arguments-threshold = 12
+type-complexity-threshold = 500

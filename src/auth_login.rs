@@ -158,8 +158,8 @@ pub async fn set_password_handler(
     }
 
     let password = req.password.trim();
-    if password.len() < 6 {
-        return response::bad_request("Пароль должен быть не короче 6 символов");
+    if password.len() < 10 {
+        return response::bad_request("Пароль должен быть не короче 10 символов");
     }
 
     let citizen_id = auth.resolve_account_id(&state.db).await;
@@ -203,8 +203,17 @@ pub async fn sync_test_passwords(pool: &sqlx::PgPool) -> Result<(), sqlx::Error>
     }
 
     let password = std::env::var("QUAZAR_TEST_CITIZEN_PASSWORD")
-        .unwrap_or_else(|_| "123456".to_string());
-
+        .unwrap_or_else(|_| "test_citizen_pass".to_string());
+    if password.len() < 10 {
+        tracing::warn!(
+            "QUAZAR_TEST_CITIZEN_PASSWORD shorter than 10 chars — using built-in test default"
+        );
+    }
+    let password = if password.len() < 10 {
+        "test_citizen_pass".to_string()
+    } else {
+        password
+    };
     for name in TEST_CITIZEN_NAMES {
         let Some(citizen) = find_citizen_by_name(pool, name).await else {
             continue;

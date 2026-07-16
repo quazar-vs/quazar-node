@@ -138,7 +138,7 @@ impl CandidacyError {
         Self::Message(msg.into())
     }
 
-    pub fn to_response(self) -> (StatusCode, Json<ApiResponse>) {
+    pub fn to_response(&self) -> (StatusCode, Json<ApiResponse>) {
         let (status, message) = match &self {
             CandidacyError::Message(m) => (StatusCode::BAD_REQUEST, m.clone()),
             CandidacyError::Database(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),

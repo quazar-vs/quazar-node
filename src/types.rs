@@ -184,9 +184,9 @@ pub enum QuazarEventType {
     ChatHistoryAdded,
 }
 
-impl ToString for QuazarEventType {
-    fn to_string(&self) -> String {
-        format!("{:?}", self)
+impl std::fmt::Display for QuazarEventType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}", self)
     }
 }
 

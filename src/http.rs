@@ -26,6 +26,7 @@ static RATE_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
 static PUBLIC_REGISTER_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
 static PUBLIC_AUTH_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
 static PUBLIC_APPLICATION_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
+static PUBLIC_ABUSE_LIMITER: OnceLock<Arc<KeyedLimiter>> = OnceLock::new();
 
 fn mask_key(key: &str) -> String {
     if key.is_empty() {
@@ -73,12 +74,22 @@ fn public_application_limiter() -> Arc<KeyedLimiter> {
         .clone()
 }
 
-/// Register endpoints: `/api/register*`, `/auth/register*` — 5 req/min per IP.
+fn public_abuse_limiter() -> Arc<KeyedLimiter> {
+    PUBLIC_ABUSE_LIMITER
+        .get_or_init(|| per_minute_limiter(20))
+        .clone()
+}
+
+/// Register / citizenship apply: 5 req/min per IP.
 fn is_public_register_path(path: &str) -> bool {
     path == "/api/register"
         || path.starts_with("/api/register/")
         || path == "/auth/register"
         || path.starts_with("/auth/register/")
+        || path == "/citizen/apply"
+        || path.starts_with("/citizen/apply/")
+        || path == "/citizen/verify-email"
+        || path == "/api/citizenship-application"
 }
 
 /// Auth endpoints: `/api/auth*`, `/auth/login`, `/auth/check` — 10 req/min per IP.
@@ -92,6 +103,13 @@ fn is_public_auth_path(path: &str) -> bool {
 /// Application endpoints: `/api/application*` — 10 req/min per IP.
 fn is_public_application_path(path: &str) -> bool {
     path == "/api/application" || path.starts_with("/api/application/")
+}
+
+/// Other abuse-sensitive public endpoints — 20 req/min per IP.
+fn is_public_abuse_path(path: &str) -> bool {
+    path.starts_with("/api/channel/")
+        || path == "/chat/admin/send"
+        || path == "/api/search"
 }
 
 fn rate_limit_exceeded(path: &str, ip: &str) -> Response {
@@ -239,6 +257,8 @@ pub async fn public_rate_limit_middleware(
         Some(public_auth_limiter())
     } else if is_public_application_path(path) {
         Some(public_application_limiter())
+    } else if is_public_abuse_path(path) {
+        Some(public_abuse_limiter())
     } else {
         None
     };
@@ -280,13 +300,7 @@ pub async fn auth_middleware(
 
     let api_key = auth_header
         .as_deref()
-        .and_then(|v| {
-            if v.starts_with("Bearer ") {
-                Some(v[7..].to_string())
-            } else {
-                None
-            }
-        })
+        .and_then(|v| v.strip_prefix("Bearer ").map(|rest| rest.to_string()))
         .or(x_api_key)
         .unwrap_or_default();
 

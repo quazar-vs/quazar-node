@@ -28,7 +28,7 @@ impl ValidationError {
             ValidationError::MissingRequiredField(f) => format!("Missing required field: {}", f),
             ValidationError::InvalidCitizenName(msg) => msg.clone(),
             ValidationError::DuplicateCitizenName => "Citizen name already exists".to_string(),
-            ValidationError::DuplicateEventId => format!("event_id already exists"),
+            ValidationError::DuplicateEventId => "event_id already exists".to_string(),
             ValidationError::InvalidPublicKey => "Invalid public_key".to_string(),
             ValidationError::DataValidationFailed(msg) => msg.clone(),
             ValidationError::HashMismatch => "Event hash does not match content".to_string(),

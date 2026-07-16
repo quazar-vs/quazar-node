@@ -139,11 +139,11 @@ curl -s "http://localhost:8080/auth/check?name=alice" | jq .
 curl -s -X POST http://localhost:8080/auth/set-password \
   -H "Authorization: Bearer test_citizen_key_2026" \
   -H "Content-Type: application/json" \
-  -d '{"password": "123456"}' | jq .
+  -d '{"password": "test_citizen_pass"}' | jq .
 
 curl -s -X POST http://localhost:8080/auth/login \
   -H "Content-Type: application/json" \
-  -d '{"name": "alice", "password": "123456"}' | jq .
+  -d '{"name": "alice", "password": "test_citizen_pass"}' | jq .
 ```
 
 ### POST /event

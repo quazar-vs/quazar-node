@@ -1,3 +1,6 @@
+#![allow(dead_code)]
+#![allow(clippy::result_large_err)]
+
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -240,7 +243,8 @@ async fn main() {
         .route("/mayor/list", get(list_elections_handler))
         .route("/mayor/:id", get(get_election_handler))
         .route("/chat/admin/send", post(admin_send_message_handler))
-        // Public abuse limits: register 5/min, auth 10/min, application 10/min (per IP).
+        // Public abuse limits: register/apply 5/min, auth/application 10/min,
+        // channel/search/admin-send 20/min (per IP).
         .route_layer(middleware::from_fn(public_rate_limit_middleware))
         .with_state(state.clone());
 

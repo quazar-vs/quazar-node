@@ -165,7 +165,7 @@ impl ChatError {
         Self::Forbidden(msg.into())
     }
 
-    fn to_response(self) -> (StatusCode, Json<ApiResponse>) {
+    fn to_response(&self) -> (StatusCode, Json<ApiResponse>) {
         let (status, message) = match &self {
             ChatError::Message(m) => (StatusCode::BAD_REQUEST, m.clone()),
             ChatError::Forbidden(m) => (StatusCode::FORBIDDEN, m.clone()),
@@ -1128,7 +1128,7 @@ pub async fn search_db(
             results.extend(search_votes_results(pool, trimmed, limit).await?);
             results.extend(search_events_results(pool, trimmed, limit).await?);
             results.extend(search_nodes_results(pool, trimmed, limit).await?);
-            results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+            results.sort_by_key(|r| std::cmp::Reverse(r.created_at));
             results.truncate(limit as usize);
             Ok(results)
         }

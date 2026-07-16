@@ -1,4 +1,3 @@
-use serde_json;
 use sha2::{Digest, Sha256};
 use sqlx::{PgPool, Postgres, Transaction};
 

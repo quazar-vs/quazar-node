@@ -130,7 +130,7 @@ impl InitiativeError {
         Self::Message(msg.into())
     }
 
-    fn to_response(self) -> (StatusCode, Json<ApiResponse>) {
+    fn to_response(&self) -> (StatusCode, Json<ApiResponse>) {
         let (status, message) = match &self {
             InitiativeError::Message(m) => (StatusCode::BAD_REQUEST, m.clone()),
             InitiativeError::Database(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),

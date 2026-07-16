@@ -1,12 +1,13 @@
 version: '3.8'
 
+# Secrets must come from .env (see .env.example). No weak inlined defaults.
 services:
   postgres:
     image: postgres:16-alpine
     restart: always
     environment:
       POSTGRES_USER: quazar
-      POSTGRES_PASSWORD: quazar
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: quazar
     volumes:
       - quazar_pg_data:/var/lib/postgresql/data
@@ -22,16 +23,19 @@ services:
     ports:
       - "8080:8080"
     environment:
-      DATABASE_URL: postgres://quazar:quazar@postgres:5432/quazar
-      QUAZAR_NODE_SECRET: quazar_node_secret_2026
-      QUAZAR_REG_SECRET: quazar_reg_secret_2026
-      QUAZAR_INIT_TEST_KEYS: "false"
-      QUAZAR_NODE_ID: QZ-NODE-1
-      QUAZAR_NODE_URL: http://quazar-node:8080
-      QUAZAR_PORT: "8080"
-      QUAZAR_SYNC_INTERVAL_SECS: "60"
-      QUAZAR_CORS_ORIGINS: "https://quazar.website"
-      RUST_LOG: info
+      DATABASE_URL: postgres://quazar:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/quazar
+      QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}
+      QUAZAR_REG_SECRET: ${QUAZAR_REG_SECRET:?QUAZAR_REG_SECRET must be set}
+      QUAZAR_STRICT_SECRETS: ${QUAZAR_STRICT_SECRETS:-true}
+      RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set}
+      QUAZAR_INIT_TEST_KEYS: ${QUAZAR_INIT_TEST_KEYS:-false}
+      QUAZAR_NODE_ID: ${QUAZAR_NODE_ID:-QZ-NODE-1}
+      QUAZAR_NODE_URL: ${QUAZAR_NODE_URL:-http://quazar-node:8080}
+      QUAZAR_PORT: ${QUAZAR_PORT:-8080}
+      QUAZAR_SYNC_INTERVAL_SECS: ${QUAZAR_SYNC_INTERVAL_SECS:-60}
+      QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
+      RUST_LOG: ${RUST_LOG:-info}
     depends_on:
       postgres:
         condition: service_healthy
