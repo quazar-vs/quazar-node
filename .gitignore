@@ -8,3 +8,4 @@ agent/state.json
 *.backup
 *.save
 .cursorrules
+*.tar.gz
