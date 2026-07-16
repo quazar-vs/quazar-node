@@ -1,5 +1,5 @@
 -- Rename legacy seed citizen id `seed-master-aiya-001` → `seed-successful-001`.
--- Update FK child rows first, then the citizens primary key.
+-- Clone row under new id (name is UNIQUE), repoint FKs, then delete the old row.
 
 DO $$
 DECLARE
@@ -12,6 +12,33 @@ BEGIN
     IF EXISTS (SELECT 1 FROM citizens WHERE id = new_id) THEN
         RETURN;
     END IF;
+
+    -- Temporarily free the unique name so the clone can take `successful`.
+    UPDATE citizens SET name = old_id || '-renaming' WHERE id = old_id;
+
+    INSERT INTO citizens (
+        id, name, public_key, status, role, created_at, passport_issued,
+        passport_expires, is_digital, email, email_verified,
+        verification_code, verification_expires, candidate_type, target_role
+    )
+    SELECT
+        new_id,
+        'successful',
+        public_key,
+        status,
+        role,
+        created_at,
+        passport_issued,
+        passport_expires,
+        is_digital,
+        email,
+        email_verified,
+        verification_code,
+        verification_expires,
+        candidate_type,
+        target_role
+    FROM citizens
+    WHERE id = old_id;
 
     IF to_regclass('public.api_keys') IS NOT NULL THEN
         UPDATE api_keys SET citizen_id = new_id WHERE citizen_id = old_id;
@@ -77,5 +104,5 @@ BEGIN
         UPDATE vote_choices SET citizen_id = new_id WHERE citizen_id = old_id;
     END IF;
 
-    UPDATE citizens SET id = new_id WHERE id = old_id;
+    DELETE FROM citizens WHERE id = old_id;
 END $$;
