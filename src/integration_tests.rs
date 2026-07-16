@@ -903,7 +903,7 @@ async fn initiative_propose_and_vote_flow() {
         let mut tx = pool.begin().await.expect("tx");
         confirm_event_in_block_tx(&mut tx, &event).await.expect("confirm");
         tx.commit().await.expect("commit");
-        activate_citizen_with_passport(&pool, id, &name).await;
+        activate_citizen_with_passport(&pool, id, name).await;
     }
 
     let state = Arc::new(AppState {
