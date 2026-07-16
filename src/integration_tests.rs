@@ -17,16 +17,12 @@ static TEST_AUTH_INIT: Once = Once::new();
 
 fn ensure_test_auth_secrets() {
     TEST_AUTH_INIT.call_once(|| {
-        if std::env::var("QUAZAR_MASTER_KEY").is_err() {
-            std::env::set_var("QUAZAR_MASTER_KEY", "integration-test-master");
-        }
         if std::env::var("QUAZAR_NODE_SECRET").is_err() {
             std::env::set_var("QUAZAR_NODE_SECRET", "integration-test-node");
         }
         if std::env::var("QUAZAR_REG_SECRET").is_err() {
             std::env::set_var("QUAZAR_REG_SECRET", "integration-test-reg");
         }
-        crate::auth::init_master_key();
         crate::auth::init_node_secret();
         crate::auth::init_reg_secret();
     });
@@ -601,7 +597,19 @@ async fn candidacy_nomination_vote_approve_flow() {
         voted
     );
 
-    let aiya_auth = AuthContext::master();
+    // After approval the citizen becomes Candidate (role) with the nominated target_role.
+    let (role_after, ctype, trole): (String, Option<String>, Option<String>) = sqlx::query_as(
+        "SELECT role, candidate_type, target_role FROM citizens WHERE id = $1",
+    )
+    .bind(&candidate_id)
+    .fetch_one(&pool)
+    .await
+    .expect("candidate type after approve");
+    assert_eq!(role_after, "Candidate");
+    assert_eq!(ctype.as_deref(), Some("role"));
+    assert_eq!(trole.as_deref(), Some("Guardian"));
+
+    let aiya_auth = AuthContext::from_api_key("aiya".into(), Role::Aiya);
     let appointed = appoint_candidate(state, &aiya_auth, &row.id)
         .await
         .expect("appoint");
@@ -757,12 +765,14 @@ async fn chat_send_and_list_messages() {
     assert_eq!(sent.content, "Тестовое сообщение чата");
     assert_eq!(sent.citizen_id, citizen_id);
     assert_eq!(sent.citizen_name, citizen_name);
+    assert!(!sent.session_id.is_empty());
 
     let messages = list_messages(
         &pool,
         ListMessagesQuery {
             limit: Some(10),
             before: None,
+            session_id: None,
         },
     )
     .await
@@ -825,6 +835,7 @@ async fn chat_gossip_insert_is_idempotent() {
         citizen_name: citizen_name.clone(),
         content: "gossip test".to_string(),
         created_at: chrono::Utc::now(),
+        session_id: uuid::Uuid::new_v4().to_string(),
     };
 
     assert_eq!(
@@ -977,7 +988,7 @@ async fn referendum_announce_and_vote_flow() {
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
     });
 
-    let aiya_auth = AuthContext::master();
+    let aiya_auth = AuthContext::from_api_key("aiya".into(), Role::Aiya);
     let referendum = announce_referendum(
         state.clone(),
         &aiya_auth,
@@ -1271,7 +1282,7 @@ async fn pending_citizen_login_blocked_until_passport() {
 }
 #[tokio::test]
 async fn api_keys_role_matches_citizens_after_sync() {
-    use crate::auth::{KeyStore, Role, MASTER_NAME};
+    use crate::auth::{KeyStore, Role};
 
     let Some(pool) = postgres_pool().await else {
         eprintln!("skip api_keys_role_matches_citizens_after_sync: PostgreSQL unavailable");
@@ -1304,8 +1315,8 @@ async fn api_keys_role_matches_citizens_after_sync() {
         .expect("insert mismatched api key");
 
     let key_role_before: String =
-        sqlx::query_scalar("SELECT role FROM api_keys WHERE key = $1")
-            .bind(&api_key)
+        sqlx::query_scalar("SELECT role FROM api_keys WHERE key_hash = $1")
+            .bind(crate::citizen::hash_key(&api_key))
             .fetch_one(&pool)
             .await
             .expect("key role before");
@@ -1317,8 +1328,8 @@ async fn api_keys_role_matches_citizens_after_sync() {
     assert_eq!(updated, 1);
 
     let key_role_after: String =
-        sqlx::query_scalar("SELECT role FROM api_keys WHERE key = $1")
-            .bind(&api_key)
+        sqlx::query_scalar("SELECT role FROM api_keys WHERE key_hash = $1")
+            .bind(crate::citizen::hash_key(&api_key))
             .fetch_one(&pool)
             .await
             .expect("key role after");
@@ -1332,27 +1343,8 @@ async fn api_keys_role_matches_citizens_after_sync() {
             .expect("citizen role");
     assert_eq!(key_role_after, citizen_role);
 
-    if let Some(successful_role) = KeyStore::lookup_citizen_role(&pool, MASTER_NAME).await {
-        KeyStore::upsert_key(&pool, "successful_role_probe_key", Role::Citizen, MASTER_NAME)
-            .await
-            .expect("insert successful probe key");
-        KeyStore::sync_roles_from_citizens(&pool)
-            .await
-            .expect("sync successful");
-        let synced: String = sqlx::query_scalar(
-            "SELECT role FROM api_keys WHERE key = 'successful_role_probe_key'",
-        )
-        .fetch_one(&pool)
-        .await
-        .expect("successful key role");
-        assert_eq!(synced, successful_role.as_str());
-    }
-
-    let _ = sqlx::query("DELETE FROM api_keys WHERE key = $1")
-        .bind(&api_key)
-        .execute(&pool)
-        .await;
-    let _ = sqlx::query("DELETE FROM api_keys WHERE key = 'successful_role_probe_key'")
+    let _ = sqlx::query("DELETE FROM api_keys WHERE key_hash = $1")
+        .bind(crate::citizen::hash_key(&api_key))
         .execute(&pool)
         .await;
     let _ = sqlx::query("DELETE FROM citizens WHERE id = $1")

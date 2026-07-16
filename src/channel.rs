@@ -737,18 +737,30 @@ async fn insert_cross_channel_message(
     let id = uuid::Uuid::new_v4().to_string();
     let now = Utc::now();
 
+    let session_id = crate::chat::get_or_create_session(state, citizen_id)
+        .await
+        .map_err(|e| e.to_string())?;
+
     sqlx::query(
-        "INSERT INTO chat_messages (id, citizen_id, citizen_name, content, created_at)
-         VALUES ($1, $2, $3, $4, $5)",
+        "INSERT INTO chat_messages (id, citizen_id, citizen_name, content, created_at, session_id)
+         VALUES ($1, $2, $3, $4, $5, $6)",
     )
     .bind(&id)
     .bind(citizen_id)
     .bind(citizen_name)
     .bind(content)
     .bind(now)
+    .bind(&session_id)
     .execute(&state.db)
     .await
     .map_err(|e| e.to_string())?;
+
+    sqlx::query("UPDATE chat_sessions SET last_activity = $1 WHERE id = $2")
+        .bind(now)
+        .bind(&session_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
 
     Ok(ChatMessageRow {
         id,
@@ -756,6 +768,7 @@ async fn insert_cross_channel_message(
         citizen_name: citizen_name.to_string(),
         content: content.to_string(),
         created_at: now,
+        session_id,
     })
 }
 
@@ -777,6 +790,7 @@ pub async fn events_handler(
             citizen_name: "Квазар".to_string(),
             content: String::new(),
             created_at: Utc::now(),
+            session_id: "sse".to_string(),
         },
         None,
     );
@@ -930,6 +944,7 @@ mod tests {
             citizen_name: "tui".to_string(),
             content: "hello".to_string(),
             created_at: Utc::now(),
+            session_id: "s1".to_string(),
         }));
         assert!(is_tui_chat_message(&ChatMessageRow {
             id: "2".to_string(),
@@ -937,6 +952,7 @@ mod tests {
             citizen_name: "Квазар [tui]".to_string(),
             content: "reply".to_string(),
             created_at: Utc::now(),
+            session_id: "s2".to_string(),
         }));
         assert!(!is_tui_chat_message(&ChatMessageRow {
             id: "3".to_string(),
@@ -944,6 +960,7 @@ mod tests {
             citizen_name: "Квазар [whatsapp]".to_string(),
             content: "reply".to_string(),
             created_at: Utc::now(),
+            session_id: "s3".to_string(),
         }));
     }
 }

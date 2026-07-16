@@ -59,7 +59,7 @@ struct CitizenRow {
 
 async fn find_citizen_by_name(pool: &sqlx::PgPool, name: &str) -> Option<CitizenRow> {
     sqlx::query_as::<_, CitizenRow>(
-        "SELECT id, name, role, status FROM citizens WHERE name = $1",
+        "SELECT id, name, role, status FROM citizens WHERE LOWER(name) = LOWER($1)",
     )
     .bind(name)
     .fetch_optional(pool)
@@ -77,15 +77,9 @@ async fn get_password_hash(pool: &sqlx::PgPool, citizen_id: &str) -> Option<Stri
         .flatten()
 }
 
-async fn find_active_api_key(pool: &sqlx::PgPool, citizen_name: &str) -> Option<String> {
-    sqlx::query_scalar(
-        "SELECT key FROM api_keys WHERE citizen_name = $1 AND is_active = TRUE ORDER BY created_at LIMIT 1",
-    )
-    .bind(citizen_name)
-    .fetch_optional(pool)
-    .await
-    .ok()
-    .flatten()
+async fn find_active_api_key(_pool: &sqlx::PgPool, _citizen_name: &str) -> Option<String> {
+    // Plaintext keys are not stored (only key_hash) — always issue a fresh key on login.
+    None
 }
 
 fn generate_api_key() -> String {
@@ -106,6 +100,12 @@ pub async fn login_handler(
     let Some(citizen) = find_citizen_by_name(&state.db, name).await else {
         return response::bad_request("Гражданин не найден");
     };
+
+    if citizen.role == Role::Candidate.as_str() || citizen.status == "applicant" {
+        return response::bad_request(
+            "Вход недоступен: роль Candidate — заявка ещё не проверена. API-ключ и доступ к системе недоступны.",
+        );
+    }
 
     if citizen.status != "active" {
         let message = if citizen.status == "pending" {

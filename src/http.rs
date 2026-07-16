@@ -11,7 +11,7 @@ use axum::{
 use governor::{Quota, RateLimiter};
 use tower_http::cors::{AllowOrigin, Any, CorsLayer};
 
-use crate::auth::{is_node_secret, master_key, AuthContext, KeyStore};
+use crate::auth::{is_node_secret, list_agent_permissions, AuthContext, KeyStore};
 use crate::response::{self, ApiResponse};
 use crate::types::Role;
 use crate::AppState;
@@ -143,15 +143,21 @@ pub fn build_cors_layer() -> CorsLayer {
 fn enforce_path_rbac(path: &str, auth: &AuthContext) -> Option<Response> {
     if (path == "/peers" || path == "/peers/network") && !auth.can_manage_peers() {
         return Some(response::forbidden(
-            "Insufficient permissions. Only Aiya and Guardian can manage peers",
+            "Insufficient permissions. Only Aiya, Founder, Mayor and Guardian can manage peers (Agent: read-only)",
         ));
     }
     if path == "/exchange/balance/add" && !auth.can_add_balance() {
         return Some(response::forbidden(
-            "Insufficient permissions. Only Aiya can add balance",
+            "Insufficient permissions. Only Aiya and Founder can add balance (Agent: read-only)",
         ));
     }
     None
+}
+
+/// Pending citizens may only touch passport endpoints until activated.
+fn allows_pending_citizen(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+    parts.len() >= 3 && parts[0] == "citizen" && parts[2] == "passport"
 }
 
 pub async fn rate_limit_middleware(req: axum::http::Request<axum::body::Body>, next: Next) -> Response {
@@ -210,23 +216,6 @@ pub async fn auth_middleware(
         return response::unauthorized("Invalid or missing API key");
     }
 
-    if api_key == master_key() {
-        if std::env::var("QUAZAR_DISABLE_MASTER_KEY")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false)
-        {
-            tracing::warn!(path = %path, "master key rejected (QUAZAR_DISABLE_MASTER_KEY)");
-            return response::unauthorized("Master key is disabled on this node");
-        }
-        tracing::debug!(path = %path, "master key accepted");
-        let auth = AuthContext::master();
-        if let Some(response) = enforce_path_rbac(&path, &auth) {
-            return response;
-        }
-        req.extensions_mut().insert(auth);
-        return next.run(req).await;
-    }
-
     if is_node_secret(&api_key) {
         let method = req.method();
         let node_allowed = *method == Method::GET
@@ -247,21 +236,42 @@ pub async fn auth_middleware(
         return response::forbidden("Node secret valid only for GET /events, GET /blocks, GET /keys/internal/export and POST /events/gossip, /chat/gossip, /keys/internal/*");
     }
 
-    let key_data = KeyStore::validate_key(&state.db, &api_key)
-        .await
-        .map(|k| (k.citizen_name, k.role, api_key.clone()));
+    let key_data = KeyStore::validate_key(&state.db, &api_key).await;
 
-    if let Some((citizen_name, key_role, key_value)) = key_data {
+    if let Some(k) = key_data {
+        let citizen_name = k.citizen_name;
+        let citizen_id = k.citizen_id;
+        let key_role = k.role;
         let (role, citizen_status) =
-            resolve_role_and_status_for_citizen(&state.db, &citizen_name, key_role, &key_value).await;
-        if citizen_status == "pending" {
+            resolve_role_and_status_for_citizen(&state.db, &citizen_name, key_role, &api_key).await;
+        if citizen_status == "applicant" || role.is_candidate() {
+            tracing::warn!(
+                path = %path,
+                citizen = %citizen_name,
+                ?role,
+                "Candidate/applicant API access denied"
+            );
+            return response::forbidden(
+                "Доступ запрещён: роль Candidate — только публичные данные. API-ключ и доступ к системе недоступны.",
+            );
+        }
+        if citizen_status == "pending" && !allows_pending_citizen(&path) {
             tracing::warn!(path = %path, citizen = %citizen_name, "pending citizen API access denied");
             return response::forbidden(
-                "Доступ запрещён: паспорт ещё не выдан (статус pending). Дождитесь подтверждения в блокчейне.",
+                "Доступ запрещён: паспорт ещё не выдан (статус pending). Разрешены только операции с /passport.",
             );
         }
         tracing::debug!(path = %path, citizen = %citizen_name, ?role, "API key accepted");
-        let auth = AuthContext::from_api_key(citizen_name, role);
+        let agent_permissions = if role.is_agent() {
+            list_agent_permissions(&state.db, &citizen_id)
+                .await
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+        let auth = AuthContext::from_api_key(citizen_name, role)
+            .with_citizen_id(citizen_id)
+            .with_agent_permissions(agent_permissions);
         if let Some(response) = enforce_path_rbac(&path, &auth) {
             return response;
         }

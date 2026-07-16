@@ -37,15 +37,12 @@ services:
       - "8080:8080"
     environment:
       DATABASE_URL: postgres://quazar:quazar@postgres:5432/quazar
-      QUAZAR_MASTER_KEY: QUAZAR_MASTER_KEY_2026
       QUAZAR_NODE_SECRET: QUAZAR_NODE_SECRET_2026
       QUAZAR_REG_SECRET: QUAZAR_REG_SECRET_2026
       QUAZAR_INIT_TEST_KEYS: "true"
       QUAZAR_NODE_ID: QZ-NODE-1
       QUAZAR_NODE_URL: http://quazar-node:8080
       QUAZAR_PORT: "8080"
-      QUAZAR_BLOCK_MIN_EVENTS: "3"
-      QUAZAR_BLOCK_MAX_WAIT_SECS: "30"
       QUAZAR_SYNC_INTERVAL_SECS: "60"
       QUAZAR_BOOTSTRAP_PEERS: QZ-NODE-2@http://quazar-node-2:8080
     depends_on:
@@ -64,15 +61,12 @@ services:
       - "8081:8080"
     environment:
       DATABASE_URL: postgres://quazar:quazar@postgres-2:5432/quazar
-      QUAZAR_MASTER_KEY: QUAZAR_MASTER_KEY_2026
       QUAZAR_NODE_SECRET: QUAZAR_NODE_SECRET_2026
       QUAZAR_REG_SECRET: QUAZAR_REG_SECRET_2026
       QUAZAR_INIT_TEST_KEYS: "true"
       QUAZAR_NODE_ID: QZ-NODE-2
       QUAZAR_NODE_URL: http://quazar-node-2:8080
       QUAZAR_PORT: "8080"
-      QUAZAR_BLOCK_MIN_EVENTS: "3"
-      QUAZAR_BLOCK_MAX_WAIT_SECS: "30"
       QUAZAR_SYNC_INTERVAL_SECS: "60"
       QUAZAR_BOOTSTRAP_PEERS: QZ-NODE-1@http://quazar-node:8080
     depends_on:

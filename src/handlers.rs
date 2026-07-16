@@ -124,20 +124,19 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<ApiResponse> {
         .fetch_one(&state.db)
         .await
         .unwrap_or(0);
-    let next_block: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(block_number), 0) + 1 FROM blocks",
-    )
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(1);
     let policy = block_producer::BlockPolicy::from_env();
     let nodes = state
         .node_registry
         .get_all_nodes()
         .await
         .unwrap_or_default();
+    let block_state = block_producer::load_block_state(&state.db)
+        .await
+        .unwrap_or_default();
+    let next_block = block_state.next_block_number as i64;
+    let required_events = block_state.next_required_events;
     let (effective_producer, designated_producer, producer_fallback) =
-        block_producer::resolve_block_producer(&state, next_block as u64, &nodes);
+        block_producer::resolve_block_producer(&state, block_state.next_block_number, &nodes);
 
     Json(ApiResponse::success(serde_json::json!({
         "version": "0.7.0",
@@ -146,13 +145,16 @@ pub async fn status(State(state): State<Arc<AppState>>) -> Json<ApiResponse> {
         "pending_events_local": pending_count,
         "blocks": blocks,
         "next_block": next_block,
+        "required_events_for_next_block": required_events,
         "block_producer": designated_producer,
         "effective_block_producer": effective_producer,
         "block_producer_fallback": producer_fallback,
         "is_block_producer": effective_producer == state.node_id,
         "block_policy": {
-            "min_events": policy.min_events,
-            "max_wait_secs": policy.max_wait_secs,
+            "algorithm": "geometric_pow2",
+            "formula": "block_n requires 2^(n-1) events",
+            "required_events_for_next_block": required_events,
+            "last_block_size": block_state.last_block_size,
             "sync_interval_secs": policy.sync_interval_secs,
         }
     })))
@@ -169,7 +171,7 @@ pub async fn add_peer(
     Json(peer): Json<Node>,
 ) -> impl IntoResponse {
     if !auth.can_manage_peers() {
-        return response::forbidden("Only Aiya and Guardian can add peers");
+        return response::forbidden("Only Aiya, Founder, Mayor and Guardian can add peers (Agent: read-only)");
     }
 
     match state.node_registry.upsert_node(&peer).await {
@@ -314,6 +316,11 @@ pub async fn cast_vote_handler(
     if citizen_id.is_empty() {
         return response::forbidden("citizen_id is required");
     }
+    if !auth.can_vote() {
+        return response::forbidden(
+            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+        );
+    }
     if !auth.authorize_citizen_ref(&state.db, citizen_id).await {
         return response::forbidden("Cannot cast a vote on behalf of another citizen");
     }
@@ -431,9 +438,6 @@ pub async fn background_sync(state: Arc<AppState>) {
 
         tracing::debug!(node_id = %state.node_id, "background sync: syncing blocks from peers");
         block_producer::sync_blocks_from_peers(&state).await;
-
-        tracing::debug!(node_id = %state.node_id, "background sync: attempting block production");
-        block_producer::try_create_block(state.clone()).await;
 
         keys::sync_keys_from_peers(&state).await;
     }

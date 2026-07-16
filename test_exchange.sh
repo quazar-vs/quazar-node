@@ -12,7 +12,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
 fi
 
 BASE_URL="http://localhost:8080"
-API_KEY="${QUAZAR_MASTER_KEY:?QUAZAR_MASTER_KEY not set — add it to .env}"
+API_KEY="${QUAZAR_API_KEY:?QUAZAR_API_KEY not set — add it to .env}"
 
 echo "1. Добавляем баланс для пользователя testcitizen (Aiya)"
 curl -s -X POST "$BASE_URL/exchange/balance/add" \

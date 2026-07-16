@@ -392,7 +392,7 @@ pub async fn cancel_offer(
     .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
     .ok_or_else(|| ExchangeError::NotFound(format!("Offer {} not found", offer_id)))?;
 
-    if !auth.is_master && offer.seller != account_id && offer.seller != auth.citizen_name {
+    if !auth.is_admin() && offer.seller != account_id && offer.seller != auth.citizen_name {
         return Err(ExchangeError::Unauthorized(
             "Only the seller can cancel this offer".to_string(),
         ));
@@ -603,7 +603,7 @@ pub async fn add_balance(
 ) -> ExchangeResult<Json<ApiResponse>> {
     if !auth.can_add_balance() {
         return Err(ExchangeError::Unauthorized(
-            "Only Aiya can add balance".to_string(),
+            "Only Aiya and Founder can add balance (Agent: read-only)".to_string(),
         ));
     }
     if request.amount == 0 {

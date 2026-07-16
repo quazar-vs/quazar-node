@@ -18,7 +18,7 @@ if [[ -f "$ROOT/agent/.env" ]]; then
   set +a
 fi
 
-export QUAZAR_MASTER_KEY="${QUAZAR_MASTER_KEY:-QUAZAR_MASTER_KEY_2026}"
+export QUAZAR_API_KEY="${QUAZAR_API_KEY:-QUAZAR_API_KEY_2026}"
 export QUAZAR_NODE_SECRET="${QUAZAR_NODE_SECRET:-QUAZAR_NODE_SECRET_2026}"
 BASE_URL="${QUAZAR_TEST_URL:-http://127.0.0.1:8080}"
 
@@ -35,13 +35,13 @@ echo "Блоков до: $BLOCKS_BEFORE"
 register_citizen() {
   local name="$1"
   curl -sf -X POST "$BASE_URL/citizen/register" \
-    -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+    -H "Authorization: Bearer $QUAZAR_API_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"${name}\",\"public_key\":\"${PUBKEY}\",\"role\":\"Citizen\",\"birth_place\":\"BotTestCity\"}" \
     | python3 -c "import sys,json; d=json.load(sys.stdin); assert d['status']=='success', d; print('  OK:', d['data'].get('event_id', d))"
 }
 
-echo "1) Регистрация 3 граждан (CitizenAdded, min_events=3)..."
+echo "1) Регистрация 3 граждан (CitizenAdded)..."
 register_citizen "$TEST_NAME"
 register_citizen "$(python3 -c 'import random,string; print("bot"+"".join(random.choices(string.ascii_lowercase,k=8)))')"
 register_citizen "$(python3 -c 'import random,string; print("bot"+"".join(random.choices(string.ascii_lowercase,k=8)))')"

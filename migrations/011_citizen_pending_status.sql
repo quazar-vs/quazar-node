@@ -1,7 +1,7 @@
--- Master-key auth resolves to citizen "successful" (Aiya); required for referendum/candidacy integration tests.
+-- Seed citizen "successful" if missing (legacy Aiya row; demoted to Citizen in later migrations).
 INSERT INTO citizens (id, name, public_key, status, role, created_at, passport_issued)
 VALUES (
-    'seed-master-aiya-001',
+    'seed-successful-001',
     'successful',
     '0000000000000000000000000000000000000000000000000000000000000001',
     'active',

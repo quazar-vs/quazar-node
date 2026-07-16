@@ -8,7 +8,7 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
   set +a
 fi
 
-API_KEY="${QUAZAR_MASTER_KEY:?QUAZAR_MASTER_KEY not set — add it to .env}"
+API_KEY="${QUAZAR_API_KEY:?QUAZAR_API_KEY not set — add it to .env}"
 BASE_URL="http://localhost:8080"
 
 echo "=== Тестирование Citizen Registry ==="

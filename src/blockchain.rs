@@ -233,6 +233,28 @@ fn signed_pending_event(mut event: Event) -> Event {
     event
 }
 
+pub fn build_signed_citizen_added_event(
+    event_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    public_key: &str,
+    birth_place: &str,
+    role: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_citizen_added_event(
+        event_id,
+        citizen_id,
+        citizen_name,
+        public_key,
+        birth_place,
+        role,
+        initiator,
+        timestamp,
+    ))
+}
+
 pub fn build_signed_passport_issued_event(
     event_id: &str,
     passport_id: &str,
@@ -775,6 +797,70 @@ pub fn build_signed_election_announced_event(
         title,
         target_decision,
         announcer_id,
+        initiator,
+        timestamp,
+    ))
+}
+
+pub fn build_chat_history_added_event(
+    event_id: &str,
+    archive_id: &str,
+    session_id: &str,
+    user_id: &str,
+    compressed_data_hex: &str,
+    original_size: i32,
+    compressed_size: i32,
+    message_count: i32,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "ChatHistoryAdded".to_string(),
+        title: format!("Архив чата сеанса {}", session_id),
+        description: format!(
+            "Сеанс {} пользователя {} заархивирован ({} сообщ.)",
+            session_id, user_id, message_count
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "archive_id": archive_id,
+            "session_id": session_id,
+            "user_id": user_id,
+            "compressed_data": compressed_data_hex,
+            "original_size": original_size,
+            "compressed_size": compressed_size,
+            "message_count": message_count,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_chat_history_added_event(
+    event_id: &str,
+    archive_id: &str,
+    session_id: &str,
+    user_id: &str,
+    compressed_data_hex: &str,
+    original_size: i32,
+    compressed_size: i32,
+    message_count: i32,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_chat_history_added_event(
+        event_id,
+        archive_id,
+        session_id,
+        user_id,
+        compressed_data_hex,
+        original_size,
+        compressed_size,
+        message_count,
         initiator,
         timestamp,
     ))

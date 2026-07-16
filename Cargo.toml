@@ -22,5 +22,6 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 hex = "0.4"
+zstd = "0.13"
 bcrypt = "0.16"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }

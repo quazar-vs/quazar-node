@@ -38,7 +38,7 @@ pub async fn create_api_key(
     Json(req): Json<CreateKeyRequest>,
 ) -> impl IntoResponse {
     if !auth.can_manage_api_keys() {
-        return response::forbidden("Only Aiya can manage API keys");
+        return response::forbidden("Only Aiya and Founder can manage API keys (Agent: read-only)");
     }
     if req.key.trim().len() < 8 {
         return response::bad_request("API key must be at least 8 characters");
@@ -71,7 +71,7 @@ pub async fn list_api_keys(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if !auth.can_manage_api_keys() {
-        return response::forbidden("Only Aiya can list API keys");
+        return response::forbidden("Only Aiya and Founder can list API keys (Agent: read-only)");
     }
 
     match KeyStore::list_active(&state.db).await {
@@ -86,7 +86,7 @@ pub async fn revoke_api_key(
     Json(req): Json<RevokeKeyRequest>,
 ) -> impl IntoResponse {
     if !auth.can_manage_api_keys() {
-        return response::forbidden("Only Aiya can revoke API keys");
+        return response::forbidden("Only Aiya and Founder can revoke API keys (Agent: read-only)");
     }
     if req.key.trim().is_empty() {
         return response::bad_request("key is required");
@@ -135,7 +135,7 @@ pub async fn sync_api_keys(
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if !auth.can_manage_api_keys() {
-        return response::forbidden("Only Aiya can sync API keys");
+        return response::forbidden("Only Aiya and Founder can sync API keys (Agent: read-only)");
     }
 
     match KeyStore::sync_roles_from_citizens(&state.db).await {
@@ -317,7 +317,7 @@ pub async fn sync_keys_from_peers(state: &AppState) {
             let Some(role) = Role::from_str(&record.role) else {
                 continue;
             };
-            if KeyStore::upsert_key(&state.db, &record.key, role, &record.citizen_name)
+            if KeyStore::upsert_hashed_key(&state.db, &record.key, role, &record.citizen_name)
                 .await
                 .is_ok()
             {

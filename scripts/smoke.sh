@@ -6,14 +6,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 export DATABASE_URL="${DATABASE_URL:-postgres://quazar:quazar@localhost:5432/quazar}"
-export QUAZAR_MASTER_KEY="${QUAZAR_MASTER_KEY:-QUAZAR_MASTER_KEY_CI}"
+export QUAZAR_API_KEY="${QUAZAR_API_KEY:-QUAZAR_API_KEY_CI}"
 export QUAZAR_NODE_SECRET="${QUAZAR_NODE_SECRET:-QUAZAR_NODE_SECRET_CI}"
 export QUAZAR_REG_SECRET="${QUAZAR_REG_SECRET:-QUAZAR_REG_SECRET_CI}"
 export QUAZAR_INIT_TEST_KEYS="${QUAZAR_INIT_TEST_KEYS:-true}"
 export QUAZAR_PORT="${QUAZAR_PORT:-8080}"
 export QUAZAR_NODE_ID="${QUAZAR_NODE_ID:-QZ-NODE-2}"
-export QUAZAR_BLOCK_MIN_EVENTS="${QUAZAR_BLOCK_MIN_EVENTS:-1}"
-export QUAZAR_BLOCK_MAX_WAIT_SECS="${QUAZAR_BLOCK_MAX_WAIT_SECS:-5}"
 export QUAZAR_FORCE_PRODUCER="${QUAZAR_FORCE_PRODUCER:-true}"
 export QUAZAR_RATE_LIMIT_RPS="${QUAZAR_RATE_LIMIT_RPS:-200}"
 if [ "${SMOKE_USE_RANDOM_PORT:-1}" = "1" ]; then
@@ -27,7 +25,7 @@ wait_for_citizen() {
   local id=""
   for _ in $(seq 1 35); do
     id=$(curl -sf "$BASE_URL/citizen/list" \
-      -H "Authorization: Bearer $QUAZAR_MASTER_KEY" | python3 -c "
+      -H "Authorization: Bearer $QUAZAR_API_KEY" | python3 -c "
 import sys, json
 d = json.load(sys.stdin)
 for c in d.get('data', {}).get('citizens', []):
@@ -49,12 +47,12 @@ ensure_registered_citizen() {
   local name="$1"
   local pubkey="$2"
   local list
-  list=$(curl -sf "$BASE_URL/citizen/list" -H "Authorization: Bearer $QUAZAR_MASTER_KEY")
+  list=$(curl -sf "$BASE_URL/citizen/list" -H "Authorization: Bearer $QUAZAR_API_KEY")
   if echo "$list" | grep -qE "\"name\"[[:space:]]*:[[:space:]]*\"${name}\""; then
     return 0
   fi
   curl -sf -X POST "$BASE_URL/citizen/register" \
-    -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+    -H "Authorization: Bearer $QUAZAR_API_KEY" \
     -H "Content-Type: application/json" \
     -d "{\"name\":\"${name}\",\"public_key\":\"${pubkey}\",\"role\":\"Citizen\",\"birth_place\":\"SmokeCity\"}" \
     | grep -q '"status":"success"'
@@ -64,13 +62,13 @@ ensure_registered_citizen() {
 issue_passport_and_wait() {
   local citizen_id="$1"
   curl -sf -X POST "$BASE_URL/citizen/${citizen_id}/passport" \
-    -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+    -H "Authorization: Bearer $QUAZAR_API_KEY" \
     -H "Content-Type: application/json" \
     -d '{"expires_in_days": 365}' >/dev/null
   for _ in $(seq 1 35); do
     local status
     status=$(curl -sf "$BASE_URL/citizen/${citizen_id}" \
-      -H "Authorization: Bearer $QUAZAR_MASTER_KEY" | python3 -c "
+      -H "Authorization: Bearer $QUAZAR_API_KEY" | python3 -c "
 import sys, json
 d = json.load(sys.stdin).get('data', {})
 print(d.get('status', ''))
@@ -191,7 +189,7 @@ done
 curl -sf "$BASE_URL/status" | grep -q '"status":"success"'
 
 REGISTER=$(curl -sf -X POST "$BASE_URL/citizen/register" \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
   -d "{\"name\":\"${SMOKE_NAME}\",\"public_key\":\"d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f8077986\",\"role\":\"Citizen\",\"birth_place\":\"SmokeCity\"}")
 
@@ -211,17 +209,17 @@ echo "$BLOCKS" | grep -q '"status":"success"'
 echo "$BLOCKS" | grep -q "$SMOKE_NAME"
 
 KEYS=$(curl -sf "$BASE_URL/keys" \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY")
+  -H "Authorization: Bearer $QUAZAR_API_KEY")
 echo "$KEYS" | grep -q '"status":"success"'
 echo "$KEYS" | grep -q 'testcitizen'
 
 SVOD=$(curl -sf "$BASE_URL/svod" \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY")
+  -H "Authorization: Bearer $QUAZAR_API_KEY")
 echo "$SVOD" | grep -q '"status":"success"'
 echo "$SVOD" | grep -q 'WEB_DEV'
 
 SVOD_CAT=$(curl -sf "$BASE_URL/svod/categories" \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY")
+  -H "Authorization: Bearer $QUAZAR_API_KEY")
 echo "$SVOD_CAT" | grep -q '"status":"success"'
 echo "$SVOD_CAT" | grep -q 'IT'
 
@@ -259,14 +257,14 @@ echo "Candidacy status after vote: ${CAND_STATUS}"
 
 if [ "$CAND_STATUS" = "Approved" ]; then
   APPOINT=$(curl -sf -X POST "$BASE_URL/candidacy/${CANDIDACY_ID}/appoint" \
-    -H "Authorization: Bearer $QUAZAR_MASTER_KEY")
+    -H "Authorization: Bearer $QUAZAR_API_KEY")
   echo "$APPOINT" | grep -q '"status":"success"'
   echo "$APPOINT" | grep -q '"status":"Appointed"'
   echo "Candidacy appointed"
 fi
 
 CAND_LIST=$(curl -sf "$BASE_URL/candidacy/list" \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY")
+  -H "Authorization: Bearer $QUAZAR_API_KEY")
 echo "$CAND_LIST" | grep -q '"status":"success"'
 echo "$CAND_LIST" | grep -q "$CANDIDACY_ID"
 

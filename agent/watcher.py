@@ -50,7 +50,7 @@ class Config:
     telegram_bot_token: str
     telegram_chat_id: str
     nodes: list[NodeTarget]
-    master_key: str
+    api_key: str
     node_secret: str
     block_alert_nodes: set[str]
     interval_secs: int = 30
@@ -153,10 +153,10 @@ def load_config() -> Config:
         "QUAZAR_WATCH_NODES",
         "local=http://127.0.0.1:8080",
     )
-    master_key = os.environ.get("QUAZAR_MASTER_KEY", "").strip()
+    api_key = os.environ.get("QUAZAR_API_KEY", "").strip()
     node_secret = os.environ.get("QUAZAR_NODE_SECRET", "").strip()
-    if not master_key or not node_secret:
-        raise ValueError("Set QUAZAR_MASTER_KEY and QUAZAR_NODE_SECRET in agent/.env")
+    if not api_key or not node_secret:
+        raise ValueError("Set QUAZAR_API_KEY and QUAZAR_NODE_SECRET in agent/.env")
 
     nodes = parse_nodes(nodes_raw)
     block_alert_nodes = parse_block_alert_nodes(
@@ -168,7 +168,7 @@ def load_config() -> Config:
         telegram_bot_token=token,
         telegram_chat_id=chat_id,
         nodes=nodes,
-        master_key=master_key,
+        api_key=api_key,
         node_secret=node_secret,
         block_alert_nodes=block_alert_nodes,
         interval_secs=int(os.environ.get("WATCHER_INTERVAL_SECS", "30")),
@@ -222,7 +222,7 @@ def fetch_status(node: NodeTarget, cfg: Config) -> NodeSnapshot:
 def fetch_nodes(node: NodeTarget, cfg: Config) -> list[dict[str, Any]]:
     payload = http_json(
         f"{node.url}/nodes",
-        bearer=cfg.master_key,
+        bearer=cfg.api_key,
         timeout_secs=cfg.request_timeout_secs,
     )
     data = payload.get("data")
@@ -402,7 +402,7 @@ def discover_chat_id(token: str) -> str:
 def default_quazar_env() -> dict[str, str]:
     load_dotenv(AGENT_DIR.parent / ".env")
     return {
-        "QUAZAR_MASTER_KEY": os.environ.get("QUAZAR_MASTER_KEY", "QUAZAR_MASTER_KEY_2026"),
+        "QUAZAR_API_KEY": os.environ.get("QUAZAR_API_KEY", "QUAZAR_API_KEY_2026"),
         "QUAZAR_NODE_SECRET": os.environ.get("QUAZAR_NODE_SECRET", "QUAZAR_NODE_SECRET_2026"),
         "QUAZAR_WATCH_NODES": os.environ.get(
             "QUAZAR_WATCH_NODES",
@@ -424,7 +424,7 @@ def write_agent_env(token: str, chat_id: str, bot: dict[str, Any]) -> None:
         f"TELEGRAM_CHAT_ID={chat_id}",
         f"TELEGRAM_PROXY={proxy}",
         "",
-        f"QUAZAR_MASTER_KEY={env['QUAZAR_MASTER_KEY']}",
+        f"QUAZAR_API_KEY={env['QUAZAR_API_KEY']}",
         f"QUAZAR_NODE_SECRET={env['QUAZAR_NODE_SECRET']}",
         "",
         f"QUAZAR_WATCH_NODES={env['QUAZAR_WATCH_NODES']}",

@@ -200,26 +200,20 @@ async fn resolve_signer_public_key(event: &Event, db: &sqlx::PgPool) -> Option<S
 pub fn is_weak_secret(value: &str) -> bool {
     matches!(
         value,
-        "QUAZAR_MASTER_KEY_2026"
-            | "QUAZAR_NODE_SECRET_2026"
+        "QUAZAR_NODE_SECRET_2026"
             | "QUAZAR_REG_SECRET_2026"
-            | "QUAZAR_MASTER_KEY_CI"
             | "QUAZAR_NODE_SECRET_CI"
             | "QUAZAR_REG_SECRET_CI"
+            | "quazar_node_secret_2026"
+            | "quazar_reg_secret_2026"
     )
 }
 
-pub fn assert_production_secrets(master: &str, node_secret: &str, reg_secret: &str) {
+pub fn assert_production_secrets(node_secret: &str, reg_secret: &str) {
     let strict = std::env::var("QUAZAR_STRICT_SECRETS")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
 
-    if is_weak_secret(master) {
-        if strict {
-            panic!("QUAZAR_STRICT_SECRETS: QUAZAR_MASTER_KEY uses a known default value");
-        }
-        tracing::warn!("QUAZAR_MASTER_KEY matches a known default — unsafe for production");
-    }
     if is_weak_secret(node_secret) {
         if strict {
             panic!("QUAZAR_STRICT_SECRETS: QUAZAR_NODE_SECRET uses a known default value");
@@ -237,14 +231,6 @@ pub fn assert_production_secrets(master: &str, node_secret: &str, reg_secret: &s
             panic!("QUAZAR_STRICT_SECRETS: QUAZAR_REG_SECRET must differ from QUAZAR_NODE_SECRET");
         }
         tracing::warn!("QUAZAR_REG_SECRET equals QUAZAR_NODE_SECRET — reg_sig can be forged with P2P secret");
-    }
-    if strict {
-        let master_disabled = std::env::var("QUAZAR_DISABLE_MASTER_KEY")
-            .map(|v| v == "true" || v == "1")
-            .unwrap_or(false);
-        if !master_disabled {
-            panic!("QUAZAR_STRICT_SECRETS: set QUAZAR_DISABLE_MASTER_KEY=true in production");
-        }
     }
 }
 

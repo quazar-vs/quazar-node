@@ -138,7 +138,7 @@ impl CandidacyError {
         Self::Message(msg.into())
     }
 
-    fn to_response(self) -> (StatusCode, Json<ApiResponse>) {
+    pub fn to_response(self) -> (StatusCode, Json<ApiResponse>) {
         let (status, message) = match &self {
             CandidacyError::Message(m) => (StatusCode::BAD_REQUEST, m.clone()),
             CandidacyError::Database(m) => (StatusCode::INTERNAL_SERVER_ERROR, m.clone()),
@@ -157,7 +157,7 @@ pub fn approval_threshold(citizen_count: i64) -> i32 {
 }
 
 pub fn is_elevated_role(role: &str) -> bool {
-    crate::types::is_governance_role_str(role)
+    crate::types::is_governance_role_str(role) || role == "Mayor"
 }
 
 async fn citizen_count(pool: &PgPool) -> Result<i64, CandidacyError> {
@@ -304,7 +304,7 @@ pub async fn nominate_candidate(
     let target_role = req.target_role.trim().to_string();
     if !is_elevated_role(&target_role) {
         return Err(CandidacyError::bad_request(
-            "target_role must be Guardian, Judge, or Aiya",
+            "target_role must be Guardian, Judge, Aiya, or Mayor",
         ));
     }
     if Role::from_str(&target_role).is_none() {
@@ -398,6 +398,32 @@ pub async fn approve_candidate(
     .await
     .map_err(|e| CandidacyError::Database(e.to_string()))?;
 
+    // Register as Candidate (role) with the approved target_role — Aiya may then appoint only that role.
+    sqlx::query(
+        r#"
+        UPDATE citizens
+        SET role = $1,
+            candidate_type = $2,
+            target_role = $3
+        WHERE id = $4
+        "#,
+    )
+    .bind(Role::Candidate.as_str())
+    .bind(crate::types::CandidateType::Role.as_str())
+    .bind(&row.target_role)
+    .bind(&row.citizen_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| CandidacyError::Database(e.to_string()))?;
+
+    // Role candidates must not hold API keys.
+    let _ = sqlx::query(
+        "UPDATE api_keys SET is_active = FALSE WHERE citizen_id = $1 AND is_active = TRUE",
+    )
+    .bind(&row.citizen_id)
+    .execute(&state.db)
+    .await;
+
     let event_id = format!("candidate_approved_{}", candidacy_id);
     let event = build_signed_candidate_approved_event(
         &event_id,
@@ -422,6 +448,11 @@ pub async fn vote_for_candidate(
     candidacy_id: &str,
     req: VoteRequest,
 ) -> Result<CandidacyRow, CandidacyError> {
+    if !auth.can_vote() {
+        return Err(CandidacyError::bad_request(
+            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+        ));
+    }
     let voter_id = resolve_auth_citizen_id(auth, &state.db).await?;
     ensure_can_participate(&state.db, &voter_id).await?;
 
@@ -500,12 +531,35 @@ pub async fn appoint_candidate(
         ));
     }
 
+    let desired = Role::from_str(&candidacy.target_role).ok_or_else(|| {
+        CandidacyError::bad_request(format!("Invalid target_role: {}", candidacy.target_role))
+    })?;
+
+    if !auth.can_assign_role(
+        Some(&crate::types::CandidateType::Role),
+        Some(&candidacy.target_role),
+        &desired,
+    ) {
+        return Err(CandidacyError::bad_request(
+            "Нельзя назначить роль выше целевой кандидатуры или выше иерархии назначающего",
+        ));
+    }
+
     let now = Utc::now();
     sqlx::query(
         "UPDATE candidacies SET status = 'Appointed', appointed_at = $1 WHERE id = $2",
     )
     .bind(now)
     .bind(candidacy_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| CandidacyError::Database(e.to_string()))?;
+
+    // Clear candidacy metadata on the citizen as part of appointment.
+    sqlx::query(
+        "UPDATE citizens SET candidate_type = NULL, target_role = NULL WHERE id = $1",
+    )
+    .bind(&candidacy.citizen_id)
     .execute(&state.db)
     .await
     .map_err(|e| CandidacyError::Database(e.to_string()))?;
@@ -613,6 +667,11 @@ pub async fn vote_handler(
     if auth.is_node {
         return response::forbidden("Node credentials cannot vote");
     }
+    if !auth.can_vote() {
+        return response::forbidden(
+            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+        );
+    }
 
     match vote_for_candidate(state, &auth, &id, req).await {
         Ok(row) => Json(ApiResponse::success(row)).into_response(),
@@ -674,6 +733,7 @@ mod tests {
         assert!(is_elevated_role("Guardian"));
         assert!(is_elevated_role("Judge"));
         assert!(is_elevated_role("Aiya"));
+        assert!(is_elevated_role("Mayor"));
         assert!(!is_elevated_role("Citizen"));
     }
 

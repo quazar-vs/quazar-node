@@ -14,28 +14,159 @@ use crate::pending;
 use crate::models::{Block, Event};
 use crate::AppState;
 
+/// Peer sync interval only. Block creation has no time limit — events only.
 pub struct BlockPolicy {
-    pub min_events: usize,
-    pub max_wait_secs: i64,
     pub sync_interval_secs: u64,
 }
 
 impl BlockPolicy {
     pub fn from_env() -> Self {
         Self {
-            min_events: std::env::var("QUAZAR_BLOCK_MIN_EVENTS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(3),
-            max_wait_secs: std::env::var("QUAZAR_BLOCK_MAX_WAIT_SECS")
-                .ok()
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(30),
             sync_interval_secs: std::env::var("QUAZAR_SYNC_INTERVAL_SECS")
                 .ok()
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(60),
         }
+    }
+}
+
+/// Events required to close block #n: 2^(n-1) (1, 2, 4, 8, …).
+pub fn required_events_for_block(block_number: u64) -> u64 {
+    if block_number == 0 {
+        return 1;
+    }
+    let shift = (block_number - 1).min(62);
+    1u64 << shift
+}
+
+/// Geometric block sizing: block #n closes with exactly 2^(n-1) pending events.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BlockState {
+    pub next_block_number: u64,
+    pub next_required_events: u64,
+    pub last_block_size: u64,
+}
+
+impl BlockState {
+    pub fn new() -> Self {
+        Self {
+            next_block_number: 1,
+            next_required_events: required_events_for_block(1),
+            last_block_size: 0,
+        }
+    }
+
+    pub fn update_after_block(&mut self, block_size: u64) {
+        self.last_block_size = block_size;
+        self.next_block_number += 1;
+        self.next_required_events = required_events_for_block(self.next_block_number);
+    }
+
+    /// Rebuild from chain tip.
+    pub fn from_last_block(block_number: u64, events_count: u64) -> Self {
+        let next_block_number = block_number.saturating_add(1);
+        Self {
+            next_block_number,
+            next_required_events: required_events_for_block(next_block_number),
+            last_block_size: events_count,
+        }
+    }
+}
+
+impl Default for BlockState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+async fn tip_block(pool: &PgPool) -> Result<Option<(u64, u64)>, String> {
+    let row: Option<(i64, i32)> = sqlx::query_as(
+        "SELECT block_number, events_count FROM blocks ORDER BY block_number DESC LIMIT 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row.map(|(n, c)| (n as u64, c as u64)))
+}
+
+async fn fetch_block_state_row(pool: &PgPool) -> Result<Option<BlockState>, String> {
+    let row: Option<(i32, i32, i32)> = sqlx::query_as(
+        "SELECT next_block_number, next_required_events, last_block_size
+         FROM block_state WHERE id = 1",
+    )
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| e.to_string())?;
+    Ok(row.map(|(next_block_number, next_required_events, last_block_size)| {
+        let next_block_number = next_block_number as u64;
+        BlockState {
+            next_block_number,
+            next_required_events: required_events_for_block(next_block_number),
+            last_block_size: last_block_size as u64,
+        }
+    }))
+}
+
+pub async fn save_block_state(pool: &PgPool, state: &BlockState) -> Result<(), String> {
+    sqlx::query(
+        "INSERT INTO block_state (id, next_block_number, next_required_events, last_block_size, last_block_closed_by_timeout, updated_at)
+         VALUES (1, $1, $2, $3, FALSE, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           next_block_number = EXCLUDED.next_block_number,
+           next_required_events = EXCLUDED.next_required_events,
+           last_block_size = EXCLUDED.last_block_size,
+           last_block_closed_by_timeout = FALSE,
+           updated_at = NOW()",
+    )
+    .bind(state.next_block_number as i32)
+    .bind(state.next_required_events as i32)
+    .bind(state.last_block_size as i32)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to save block_state: {e}"))?;
+    Ok(())
+}
+
+/// Load geometric state from `block_state`, reconstructing from chain tip when missing/stale.
+pub async fn load_block_state(pool: &PgPool) -> Result<BlockState, String> {
+    let tip = tip_block(pool).await?;
+    let stored = fetch_block_state_row(pool).await?;
+
+    let state = match (&tip, stored) {
+        (None, Some(s)) if s.next_block_number == 1 => s,
+        (None, _) => BlockState::new(),
+        (Some((bn, size)), Some(s)) if s.next_block_number == bn + 1 => {
+            let mut synced = s;
+            synced.last_block_size = *size;
+            synced.next_required_events = required_events_for_block(synced.next_block_number);
+            synced
+        }
+        (Some((bn, size)), Some(s)) => {
+            tracing::warn!(
+                stored_next = s.next_block_number,
+                tip_block = bn,
+                "block_state out of sync with chain tip; reconstructing"
+            );
+            BlockState::from_last_block(*bn, *size)
+        }
+        (Some((bn, size)), None) => BlockState::from_last_block(*bn, *size),
+    };
+
+    save_block_state(pool, &state).await?;
+    Ok(state)
+}
+
+fn should_create_block(pending_count: u64, required: u64) -> (bool, String) {
+    if pending_count >= required {
+        (
+            true,
+            format!("pending_count {pending_count} >= required {required}"),
+        )
+    } else {
+        (
+            false,
+            format!("pending_count {pending_count} < required {required}"),
+        )
     }
 }
 
@@ -320,6 +451,23 @@ pub async fn collect_network_pending(state: &AppState) -> Result<Vec<Event>, Str
                 }
                 continue;
             }
+            // Persist peer pending locally so fetch_n / block gate see a unified queue.
+            match pending::insert(&state.db, &event).await {
+                Ok(pending::PendingInsertResult::Inserted) => {
+                    tracing::debug!(
+                        event_id = %event.event_id,
+                        peer = %peer.id,
+                        "peer pending event stored locally"
+                    );
+                }
+                Ok(pending::PendingInsertResult::AlreadyExists) => {}
+                Err(e) => tracing::warn!(
+                    event_id = %event.event_id,
+                    peer = %peer.id,
+                    error = %e,
+                    "failed to store peer pending event"
+                ),
+            }
             by_id.insert(event.event_id.clone(), event);
         }
     }
@@ -329,54 +477,15 @@ pub async fn collect_network_pending(state: &AppState) -> Result<Vec<Event>, Str
     Ok(events)
 }
 
-fn block_creation_gate(events: &[Event], policy: &BlockPolicy) -> (bool, String) {
-    if events.is_empty() {
-        return (false, "no pending events".to_string());
-    }
-    if events.len() >= policy.min_events {
-        return (
-            true,
-            format!(
-                "pending_count {} >= min_events {}",
-                events.len(),
-                policy.min_events
-            ),
-        );
-    }
-    let now = Utc::now().timestamp();
-    let oldest = events.iter().map(|e| e.timestamp).min().unwrap_or(now);
-    let age_secs = now - oldest;
-    if age_secs >= policy.max_wait_secs {
-        return (
-            true,
-            format!(
-                "oldest pending age {}s >= max_wait_secs {}",
-                age_secs, policy.max_wait_secs
-            ),
-        );
-    }
-    (
-        false,
-        format!(
-            "pending_count {} < min_events {} and oldest age {}s < max_wait_secs {}",
-            events.len(),
-            policy.min_events,
-            age_secs,
-            policy.max_wait_secs
-        ),
-    )
-}
-
 pub async fn create_block_from_events(
     state: &AppState,
-    events: Vec<Event>,
+    take: usize,
 ) -> Result<Block, String> {
-    if events.is_empty() {
+    if take == 0 {
         return Err("No events to include in block".to_string());
     }
 
-    let events_count = events.len();
-    tracing::info!(events = events_count, "creating block from network pending");
+    tracing::info!(take, "creating block from pending queue (geometric)");
 
     let mut tx = state
         .db
@@ -389,6 +498,23 @@ pub async fn create_block_from_events(
         .await
         .map_err(|e| format!("Failed to acquire block lock: {}", e))?;
 
+    let block_number: i64 = sqlx::query_scalar(
+        "SELECT COALESCE(MAX(block_number), 0) + 1 FROM blocks",
+    )
+    .fetch_one(&mut *tx)
+    .await
+    .map_err(|e| format!("Failed to compute next block number: {}", e))?;
+
+    let mut events = pending::fetch_n_in_tx(&mut tx, take).await?;
+    if events.len() < take {
+        return Err(format!(
+            "Need {} events for block #{}, but pending has only {}",
+            take,
+            block_number,
+            events.len()
+        ));
+    }
+
     let confirmed: HashSet<String> = sqlx::query_scalar("SELECT event_id FROM events")
         .fetch_all(&mut *tx)
         .await
@@ -396,14 +522,16 @@ pub async fn create_block_from_events(
         .into_iter()
         .collect();
 
-    let events: Vec<Event> = events
-        .into_iter()
-        .filter(|e| !confirmed.contains(&e.event_id))
-        .collect();
-
-    if events.is_empty() {
-        return Err("All collected events are already confirmed".to_string());
+    events.retain(|e| !confirmed.contains(&e.event_id));
+    if events.len() < take {
+        return Err(format!(
+            "After filtering confirmed events, need {} for block #{} but have {}",
+            take,
+            block_number,
+            events.len()
+        ));
     }
+    events.truncate(take);
 
     for event in &events {
         let data_json = serde_json::to_string(&event.data)
@@ -440,13 +568,6 @@ pub async fn create_block_from_events(
     .await
     .map_err(|e| format!("Failed to read last block hash: {}", e))?
     .unwrap_or_else(|| "0".to_string());
-
-    let block_number: i64 = sqlx::query_scalar(
-        "SELECT COALESCE(MAX(block_number), 0) + 1 FROM blocks",
-    )
-    .fetch_one(&mut *tx)
-    .await
-    .map_err(|e| format!("Failed to compute next block number: {}", e))?;
 
     let block = Block {
         block_number: block_number as u64,
@@ -494,7 +615,11 @@ pub async fn create_block_from_events(
 
     apply_peer_list_updates(state, &final_block).await;
 
-    tracing::info!(block = final_block.block_number, "block saved");
+    tracing::info!(
+        block = final_block.block_number,
+        events = final_block.events_count,
+        "block saved"
+    );
     Ok(final_block)
 }
 
@@ -536,8 +661,6 @@ async fn apply_peer_list_updates(state: &AppState, block: &Block) {
 }
 
 pub async fn try_create_block(state: Arc<AppState>) {
-    let policy = BlockPolicy::from_env();
-
     let nodes = match state.node_registry.get_all_nodes().await {
         Ok(nodes) => nodes,
         Err(e) => {
@@ -546,19 +669,21 @@ pub async fn try_create_block(state: Arc<AppState>) {
         }
     };
 
-    let next_block_number = sqlx::query_scalar::<_, i64>(
-        "SELECT COALESCE(MAX(block_number), 0) + 1 FROM blocks",
-    )
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(1);
+    let mut block_state = match load_block_state(&state.db).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!(error = %e, "block producer: failed to load block_state");
+            return;
+        }
+    };
 
+    let next_block_number = block_state.next_block_number;
     let alive_count = nodes
         .iter()
         .filter(|n| n.status == NodeStatus::Alive)
         .count();
     let (producer, designated, used_fallback) =
-        resolve_block_producer(&state, next_block_number as u64, &nodes);
+        resolve_block_producer(&state, next_block_number, &nodes);
 
     let force_producer = std::env::var("QUAZAR_FORCE_PRODUCER")
         .ok()
@@ -584,41 +709,62 @@ pub async fn try_create_block(state: Arc<AppState>) {
         node_id = %state.node_id,
         alive_nodes = alive_count,
         fallback = used_fallback,
-        min_events = policy.min_events,
-        max_wait_secs = policy.max_wait_secs,
+        required_events = block_state.next_required_events,
         "this node is block producer, evaluating pending events"
     );
 
-    let events = match collect_network_pending(&state).await {
-        Ok(events) => events,
+    if let Err(e) = collect_network_pending(&state).await {
+        tracing::error!(error = %e, "failed to collect network pending");
+        return;
+    }
+
+    let pending_count = match pending::count(&state.db).await {
+        Ok(c) => c as u64,
         Err(e) => {
-            tracing::error!(error = %e, "failed to collect network pending");
+            tracing::error!(error = %e, "failed to count pending events");
             return;
         }
     };
 
-    let (should_create, gate_reason) = block_creation_gate(&events, &policy);
+    let required = block_state.next_required_events;
+    let (should_create, gate_reason) = should_create_block(pending_count, required);
     if !should_create {
         tracing::info!(
             block = next_block_number,
-            pending = events.len(),
-            min_events = policy.min_events,
-            max_wait_secs = policy.max_wait_secs,
+            pending = pending_count,
+            required_events = required,
             reason = %gate_reason,
             "block creation threshold not met"
         );
         return;
     }
 
+    let take = required as usize;
+
     tracing::info!(
         block = next_block_number,
-        pending = events.len(),
+        pending = pending_count,
+        required_events = required,
+        take,
         reason = %gate_reason,
         "block creation threshold met, creating block"
     );
 
-    if let Err(e) = create_block_from_events(&state, events).await {
-        tracing::error!(error = %e, block = next_block_number, "failed to create block");
+    match create_block_from_events(&state, take).await {
+        Ok(block) => {
+            block_state.next_block_number = block.block_number;
+            block_state.update_after_block(block.events_count as u64);
+            if let Err(e) = save_block_state(&state.db, &block_state).await {
+                tracing::error!(
+                    error = %e,
+                    block = block.block_number,
+                    "block created but failed to persist block_state"
+                );
+            }
+        }
+        Err(e) => {
+            tracing::error!(error = %e, block = next_block_number, "failed to create block");
+        }
     }
 }
 
@@ -663,34 +809,68 @@ mod tests {
     }
 
     #[test]
-    fn block_creation_gate_respects_min_events_and_max_wait() {
-        let policy = BlockPolicy {
-            min_events: 3,
-            max_wait_secs: 30,
-            sync_interval_secs: 60,
-        };
-        let events: Vec<Event> = (0..2)
-            .map(|i| Event {
-                event_id: format!("e{i}"),
-                timestamp: Utc::now().timestamp(),
-                event_type: "Test".into(),
-                title: String::new(),
-                description: String::new(),
-                initiator: String::new(),
-                data: serde_json::json!({}),
-                previous_hash: "0".into(),
-                signatures: vec![],
-                hash: None,
-                public: true,
-            })
-            .collect();
+    fn required_events_for_block_follows_powers_of_two() {
+        assert_eq!(required_events_for_block(1), 1);
+        assert_eq!(required_events_for_block(2), 2);
+        assert_eq!(required_events_for_block(3), 4);
+        assert_eq!(required_events_for_block(4), 8);
+        assert_eq!(required_events_for_block(5), 16);
+    }
 
-        let (ok, reason) = block_creation_gate(&events, &policy);
-        assert!(!ok, "reason: {reason}");
+    #[test]
+    fn block_state_starts_at_one_required() {
+        let s = BlockState::new();
+        assert_eq!(s.next_block_number, 1);
+        assert_eq!(s.next_required_events, 1);
+        assert_eq!(s.last_block_size, 0);
+    }
 
-        let mut many = events.clone();
-        many.push(events[0].clone());
-        let (ok, reason) = block_creation_gate(&many, &policy);
-        assert!(ok, "reason: {reason}");
+    #[test]
+    fn block_state_geometric_progression_example() {
+        let mut s = BlockState::new();
+
+        // Block #1: need 1 → close with 1 → next requires 2
+        s.update_after_block(1);
+        assert_eq!(s.next_block_number, 2);
+        assert_eq!(s.next_required_events, 2);
+
+        // Block #2: need 2 → close with 2 → next requires 4
+        s.update_after_block(2);
+        assert_eq!(s.next_block_number, 3);
+        assert_eq!(s.next_required_events, 4);
+
+        // Block #3: need 4 → close with 4 → next requires 8
+        s.update_after_block(4);
+        assert_eq!(s.next_block_number, 4);
+        assert_eq!(s.next_required_events, 8);
+    }
+
+    #[test]
+    fn block_state_from_last_block_reconstructs() {
+        let s = BlockState::from_last_block(3, 4);
+        assert_eq!(s.next_block_number, 4);
+        assert_eq!(s.next_required_events, 8);
+        assert_eq!(s.last_block_size, 4);
+    }
+
+    #[test]
+    fn should_create_block_only_when_enough_pending() {
+        let (ok, _) = should_create_block(0, 1);
+        assert!(!ok);
+
+        let (ok, _) = should_create_block(1, 1);
+        assert!(ok);
+
+        let (ok, _) = should_create_block(1, 2);
+        assert!(!ok);
+
+        let (ok, _) = should_create_block(2, 2);
+        assert!(ok);
+
+        let (ok, _) = should_create_block(3, 4);
+        assert!(!ok);
+
+        let (ok, _) = should_create_block(4, 4);
+        assert!(ok);
     }
 }

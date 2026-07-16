@@ -3,6 +3,12 @@ use crate::models::Event;
 use serde_json::Value;
 use sqlx::PgPool;
 
+/// Canonical display form of the reserved founder name (QZ-1).
+pub const FOUNDER_DISPLAY_NAME: &str = "Successful";
+
+/// Lowercase key used for reserved-name checks and uniqueness.
+pub const FOUNDER_NAME_KEY: &str = "successful";
+
 #[derive(Debug)]
 pub enum ValidationError {
     InvalidEventType(String),
@@ -30,6 +36,41 @@ impl ValidationError {
     }
 }
 
+/// Trim + lowercase for storage and case-insensitive comparison.
+pub fn normalize_citizen_name(raw: &str) -> String {
+    raw.trim().to_lowercase()
+}
+
+pub fn is_reserved_citizen_name(name: &str) -> bool {
+    normalize_citizen_name(name) == FOUNDER_NAME_KEY
+}
+
+/// Validate citizen login/name and return the normalized (lowercase) form for storage.
+///
+/// Rules: 1–13 Latin letters only (A–Z / a–z); no digits, spaces, or punctuation;
+/// `Successful` is reserved for the founder.
+pub fn normalize_and_validate_citizen_name(raw: &str) -> Result<String, &'static str> {
+    let name = normalize_citizen_name(raw);
+    let result = if name.is_empty() || name.len() > 13 {
+        Err("Имя должно быть от 1 до 13 символов")
+    } else if !name.chars().all(|c| c.is_ascii_alphabetic()) {
+        Err("Имя должно содержать только латинские буквы (A–Z, a–z)")
+    } else if is_reserved_citizen_name(&name) {
+        Err("Имя Successful зарезервировано за основателем")
+    } else {
+        Ok(name)
+    };
+
+    if let Err(reason) = &result {
+        tracing::warn!(
+            name = %raw.trim(),
+            reason = %reason,
+            "rejected invalid citizen name"
+        );
+    }
+    result
+}
+
 pub struct EventValidator;
 
 impl EventValidator {
@@ -41,17 +82,12 @@ impl EventValidator {
     }
 
     pub fn validate_citizen_name(name: &str, existing_names: &[String]) -> Result<(), ValidationError> {
-        if name.is_empty() {
-            return Err(ValidationError::InvalidCitizenName(
-                "Name cannot be empty".to_string(),
-            ));
-        }
-        if !name.chars().all(|c| c.is_ascii_alphabetic()) {
-            return Err(ValidationError::InvalidCitizenName(
-                "Name must contain only Latin letters".to_string(),
-            ));
-        }
-        if existing_names.contains(&name.to_string()) {
+        let normalized = normalize_and_validate_citizen_name(name)
+            .map_err(|msg| ValidationError::InvalidCitizenName(msg.to_string()))?;
+        if existing_names
+            .iter()
+            .any(|n| normalize_citizen_name(n) == normalized)
+        {
             return Err(ValidationError::DuplicateCitizenName);
         }
         Ok(())
@@ -331,6 +367,23 @@ impl EventValidator {
                     ))?;
                 Ok(())
             }
+            QuazarEventType::ChatHistoryAdded => {
+                Self::require_str(data, "archive_id")?;
+                Self::require_str(data, "session_id")?;
+                Self::require_str(data, "user_id")?;
+                Self::require_str(data, "compressed_data")?;
+                if data.get("original_size").and_then(|v| v.as_i64()).is_none() {
+                    return Err(ValidationError::MissingRequiredField(
+                        "original_size".to_string(),
+                    ));
+                }
+                if data.get("compressed_size").and_then(|v| v.as_i64()).is_none() {
+                    return Err(ValidationError::MissingRequiredField(
+                        "compressed_size".to_string(),
+                    ));
+                }
+                Ok(())
+            }
         }
     }
 
@@ -472,6 +525,34 @@ mod tests {
     use super::*;
 
     #[test]
+    fn normalize_and_validate_accepts_single_letter() {
+        assert_eq!(normalize_and_validate_citizen_name("A").unwrap(), "a");
+    }
+
+    #[test]
+    fn normalize_and_validate_lowercases() {
+        assert_eq!(normalize_and_validate_citizen_name("  Alice  ").unwrap(), "alice");
+    }
+
+    #[test]
+    fn normalize_and_validate_rejects_digits() {
+        assert!(normalize_and_validate_citizen_name("alice1").is_err());
+    }
+
+    #[test]
+    fn normalize_and_validate_rejects_too_long() {
+        assert!(normalize_and_validate_citizen_name("abcdefghijklmn").is_err());
+    }
+
+    #[test]
+    fn normalize_and_validate_rejects_reserved_successful() {
+        let err = normalize_and_validate_citizen_name("Successful").unwrap_err();
+        assert!(err.contains("Successful"));
+        assert!(normalize_and_validate_citizen_name("SUCCESSFUL").is_err());
+        assert!(normalize_and_validate_citizen_name("successful").is_err());
+    }
+
+    #[test]
     fn validate_citizen_name_rejects_empty() {
         let err = EventValidator::validate_citizen_name("", &[]).unwrap_err();
         assert!(matches!(err, ValidationError::InvalidCitizenName(_)));
@@ -484,8 +565,8 @@ mod tests {
     }
 
     #[test]
-    fn validate_citizen_name_rejects_duplicate() {
-        let existing = vec!["alice".to_string()];
+    fn validate_citizen_name_rejects_duplicate_case_insensitive() {
+        let existing = vec!["Alice".to_string()];
         let err = EventValidator::validate_citizen_name("alice", &existing).unwrap_err();
         assert!(matches!(err, ValidationError::DuplicateCitizenName));
     }
@@ -493,5 +574,11 @@ mod tests {
     #[test]
     fn validate_citizen_name_accepts_unique_latin() {
         assert!(EventValidator::validate_citizen_name("bob", &["alice".to_string()]).is_ok());
+    }
+
+    #[test]
+    fn validate_citizen_name_rejects_reserved() {
+        let err = EventValidator::validate_citizen_name(FOUNDER_DISPLAY_NAME, &[]).unwrap_err();
+        assert!(matches!(err, ValidationError::InvalidCitizenName(_)));
     }
 }

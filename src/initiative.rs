@@ -385,6 +385,11 @@ pub async fn vote_on_initiative(
     initiative_id: &str,
     req: VoteRequest,
 ) -> Result<InitiativeRow, InitiativeError> {
+    if !auth.can_vote() {
+        return Err(InitiativeError::bad_request(
+            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+        ));
+    }
     let voter_id = resolve_auth_citizen_id(auth, &state.db).await?;
     ensure_can_participate(&state.db, &voter_id).await?;
 
@@ -500,6 +505,11 @@ pub async fn vote_handler(
 ) -> impl IntoResponse {
     if auth.is_node {
         return response::forbidden("Node credentials cannot vote");
+    }
+    if !auth.can_vote() {
+        return response::forbidden(
+            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+        );
     }
 
     match vote_on_initiative(state, &auth, &id, req).await {

@@ -12,7 +12,7 @@ if [ -f "$ROOT/.env" ]; then
 fi
 
 export DATABASE_URL="${DATABASE_URL:-postgres://quazar:quazar@localhost:5432/quazar}"
-export QUAZAR_MASTER_KEY="${QUAZAR_MASTER_KEY:-QUAZAR_MASTER_KEY_CI}"
+export QUAZAR_API_KEY="${QUAZAR_API_KEY:-QUAZAR_API_KEY_CI}"
 export QUAZAR_NODE_SECRET="${QUAZAR_NODE_SECRET:-QUAZAR_NODE_SECRET_CI}"
 export QUAZAR_REG_SECRET="${QUAZAR_REG_SECRET:-QUAZAR_REG_SECRET_CI}"
 export QUAZAR_PORT="${QUAZAR_PORT:-8080}"
@@ -34,7 +34,7 @@ echo "$BLOCKS" | grep -q '"status":"success"'
 echo "$BLOCKS" | grep -q '"data"'
 echo "OK: GET /blocks ApiResponse"
 
-NODES=$(curl -sf "$BASE_URL/nodes" -H "Authorization: Bearer $QUAZAR_MASTER_KEY")
+NODES=$(curl -sf "$BASE_URL/nodes" -H "Authorization: Bearer $QUAZAR_API_KEY")
 echo "$NODES" | grep -q '"status":"success"'
 echo "OK: GET /nodes ApiResponse"
 

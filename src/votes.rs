@@ -47,7 +47,7 @@ pub async fn create_vote(
     Json(req): Json<CreateVoteRequest>,
 ) -> impl IntoResponse {
     if !auth.can_manage_citizens() {
-        return response::forbidden("Only Aiya and Guardian can start votes");
+        return response::forbidden("Only Aiya, Founder, Mayor and Guardian can start votes (Agent: read-only)");
     }
     if req.title.trim().is_empty() || req.description.trim().is_empty() {
         return response::bad_request("title and description are required");
@@ -108,7 +108,7 @@ pub async fn finalize_vote(
     Json(req): Json<FinalizeVoteRequest>,
 ) -> impl IntoResponse {
     if !auth.can_manage_citizens() {
-        return response::forbidden("Only Aiya and Guardian can finalize votes");
+        return response::forbidden("Only Aiya, Founder, Mayor and Guardian can finalize votes (Agent: read-only)");
     }
     if req.vote_id.trim().is_empty() {
         return response::bad_request("vote_id is required");

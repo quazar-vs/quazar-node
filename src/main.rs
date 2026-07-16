@@ -13,6 +13,8 @@ use tracing_subscriber::EnvFilter;
 
 mod auth;
 mod auth_login;
+mod agent_permissions;
+mod applications;
 mod block_producer;
 mod blockchain;
 mod candidacy;
@@ -20,6 +22,7 @@ mod channel;
 mod chat;
 mod citizen;
 mod citizenship_application;
+mod citizenship_portal;
 mod db;
 mod email;
 mod exchange;
@@ -29,6 +32,7 @@ mod handlers;
 mod http;
 mod initiative;
 mod keys;
+mod mayor;
 mod models;
 mod nodes;
 mod pending;
@@ -44,8 +48,11 @@ mod votes;
 #[cfg(test)]
 mod integration_tests;
 
-use auth::{init_master_key, init_node_secret, init_reg_secret, master_key, node_secret, reg_secret, KeyStore};
+use auth::{init_node_secret, init_reg_secret, node_secret, reg_secret, KeyStore};
 use auth_login::{check_password_handler, login_handler, set_password_handler, sync_test_passwords};
+use agent_permissions::{
+    grant_permissions_handler, list_permissions_handler, revoke_permission_handler,
+};
 use citizenship_application::citizenship_application_handler;
 use register_verify::{send_code_handler, verify_code_handler};
 use crypto::assert_production_secrets;
@@ -58,8 +65,9 @@ use channel::{
     post_message_handler, status_handler, ws_handler, ChannelHub,
 };
 use chat::{
-    admin_send_message_handler, gossip_chat_message_handler, list_messages_handler,
-    search_db_handler, search_messages_handler, send_message_handler,
+    admin_send_message_handler, background_chat_archive, gossip_chat_message_handler,
+    list_history_handler, list_messages_handler, get_session_handler, search_db_handler,
+    search_messages_handler, send_message_handler,
 };
 use initiative::{
     get_initiative_handler, list_initiatives_handler, propose_handler as propose_initiative_handler,
@@ -68,6 +76,11 @@ use initiative::{
 use referendum::{
     announce_handler, get_referendum_handler, list_referendums_handler,
     vote_handler as vote_referendum_handler,
+};
+use mayor::{
+    create_election_handler, endorse_handler, finalize_handler, get_election_handler,
+    list_elections_handler, nominate_handler as mayor_nominate_handler,
+    start_election_handler, vote_handler as mayor_vote_handler,
 };
 use handlers::background_sync;
 use http::{auth_middleware, build_cors_layer, rate_limit_middleware};
@@ -92,10 +105,9 @@ fn init_tracing() {
 async fn main() {
     let _ = dotenvy::dotenv();
     init_tracing();
-    init_master_key();
     init_node_secret();
     init_reg_secret();
-    assert_production_secrets(master_key(), node_secret(), reg_secret());
+    assert_production_secrets(node_secret(), reg_secret());
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://quazar:quazar@localhost:5432/quazar".to_string());
@@ -183,6 +195,11 @@ async fn main() {
         background_sync(state_clone).await;
     });
 
+    let state_chat = state.clone();
+    tokio::spawn(async move {
+        background_chat_archive(state_chat).await;
+    });
+
     let public_routes = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/auth/check", get(check_password_handler))
@@ -192,8 +209,20 @@ async fn main() {
             "/api/citizenship-application",
             post(citizenship_application_handler),
         )
+        .route("/api/application", post(citizenship_portal::submit_application))
+        .route(
+            "/api/application/verify",
+            post(citizenship_portal::verify_application_code),
+        )
+        .route(
+            "/api/application/:id",
+            get(citizenship_portal::get_application_status),
+        )
         .route("/api/public/stats", get(public_stats_handler))
         .route("/health", get(health_handler))
+        .route("/citizen/apply", post(apply_for_citizenship))
+        .route("/citizen/apply/citizenship", post(apply_for_citizenship))
+        .route("/citizen/verify-email", post(verify_citizenship_email))
         .route("/api/channel/connect", post(connect_handler))
         .route("/api/channel/disconnect", post(disconnect_handler))
         .route("/api/channel/messages", post(post_message_handler))
@@ -208,6 +237,8 @@ async fn main() {
         .route("/initiative/:id", get(get_initiative_handler))
         .route("/referendum/list", get(list_referendums_handler))
         .route("/referendum/:id", get(get_referendum_handler))
+        .route("/mayor/list", get(list_elections_handler))
+        .route("/mayor/:id", get(get_election_handler))
         .route("/chat/admin/send", post(admin_send_message_handler))
         .with_state(state.clone());
 
@@ -251,12 +282,28 @@ async fn main() {
         .route("/keys/internal/revoke", post(keys::internal_revoke_key))
         .route("/citizen/register", post(register_citizen))
         .route("/citizen/list", get(list_citizens))
+        .route("/citizen/search", get(search_citizens))
+        .route("/citizen/pending", get(list_pending_applications))
+        .route("/citizen/apply/role", post(apply_for_role))
+        .route("/api/applications", get(applications::list_applications))
+        .route(
+            "/api/application/:id/approve",
+            post(citizenship_portal::approve_application),
+        )
+        .route(
+            "/api/application/:id/reject",
+            post(citizenship_portal::reject_application),
+        )
+        .route("/citizen/key", post(generate_api_key))
+        .route("/citizen/keys", get(list_api_keys))
+        .route("/citizen/key/:id", delete(revoke_api_key))
         .route("/citizen/:id", get(get_citizen))
         .route("/citizen/:id/status", patch(update_status))
         .route("/citizen/:id/role", patch(update_role))
+        .route("/citizen/:id/verify", post(verify_agent))
+        .route("/citizen/:id/approve", post(approve_citizen))
         .route("/citizen/:id/passport", post(issue_passport))
         .route("/citizen/:id/passport/revoke", post(revoke_passport))
-        .route("/citizen/search", get(search_citizens))
         .route("/candidacy/nominate", post(nominate_handler))
         .route("/candidacy/:id/vote", post(vote_handler))
         .route("/candidacy/:id/appoint", post(appoint_handler))
@@ -264,9 +311,25 @@ async fn main() {
         .route("/initiative/:id/vote", post(vote_initiative_handler))
         .route("/referendum/announce", post(announce_handler))
         .route("/referendum/:id/vote", post(vote_referendum_handler))
+        .route("/mayor/election", post(create_election_handler))
+        .route("/mayor/nominate", post(mayor_nominate_handler))
+        .route("/mayor/endorse", post(endorse_handler))
+        .route("/mayor/:id/start", post(start_election_handler))
+        .route("/mayor/:id/vote", post(mayor_vote_handler))
+        .route("/mayor/:id/finalize", post(finalize_handler))
         .route("/chat/messages", get(list_messages_handler))
         .route("/chat/search", get(search_messages_handler))
         .route("/chat/send", post(send_message_handler))
+        .route("/chat/session", get(get_session_handler))
+        .route("/chat/history", get(list_history_handler))
+        .route(
+            "/admin/agent/:id/permissions",
+            get(list_permissions_handler).post(grant_permissions_handler),
+        )
+        .route(
+            "/admin/agent/:id/permissions/:perm",
+            delete(revoke_permission_handler),
+        )
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .route_layer(middleware::from_fn(rate_limit_middleware))
         .with_state(state.clone());

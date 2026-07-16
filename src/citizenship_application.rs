@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::email::{send_citizenship_application, SmtpConfig};
 use crate::response::{self, ApiResponse};
+use crate::validator::normalize_and_validate_citizen_name;
 use crate::AppState;
 
 const ADMIN_EMAIL: &str = "quazarvs@gmail.com";
@@ -43,13 +44,13 @@ pub async fn citizenship_application_handler(
     State(_state): State<Arc<AppState>>,
     Json(req): Json<CitizenshipApplicationRequest>,
 ) -> impl IntoResponse {
-    let name = req.name.trim();
+    let name = match normalize_and_validate_citizen_name(&req.name) {
+        Ok(n) => n,
+        Err(msg) => return response::bad_request(msg),
+    };
     let email = req.email.trim();
     let reason = req.reason.trim();
 
-    if name.is_empty() {
-        return response::bad_request("Укажите имя");
-    }
     if email.is_empty() {
         return response::bad_request("Укажите email");
     }
@@ -67,7 +68,7 @@ pub async fn citizenship_application_handler(
         );
     };
 
-    if let Err(e) = send_citizenship_application(&smtp, ADMIN_EMAIL, name, email, reason).await {
+    if let Err(e) = send_citizenship_application(&smtp, ADMIN_EMAIL, &name, email, reason).await {
         tracing::error!(applicant = %email, error = %e, "failed to send citizenship application email");
         return response::internal_error(
             "Не удалось отправить заявку. Попробуйте позже или напишите на quazarvs@gmail.com",

@@ -24,6 +24,7 @@ pub async fn apply_event_projections_in_tx(
             "LawVoteResult" => apply_law_vote_result(tx, event).await?,
             "VoteCast" => apply_vote_cast(tx, event).await?,
             "ElectionAnnounced" => apply_election_announced(tx, event).await?,
+            "ChatHistoryAdded" => apply_chat_history_added(tx, event).await?,
             _ => {}
         }
     }
@@ -230,7 +231,7 @@ async fn apply_citizen_updated(
             .map_err(|e| format!("CitizenUpdated role projection failed for {}: {}", citizen_id, e))?;
 
         sqlx::query(
-            "UPDATE api_keys SET role = $1 WHERE citizen_name = (SELECT name FROM citizens WHERE id = $2)",
+            "UPDATE api_keys SET role = $1 WHERE citizen_id = $2",
         )
         .bind(role.as_str())
         .bind(citizen_id)
@@ -332,6 +333,8 @@ async fn apply_candidate_approved(
     event: &Event,
 ) -> Result<(), String> {
     let candidacy_id = require_str(&event.data, "candidacy_id")?;
+    let citizen_id = require_str(&event.data, "citizen_id")?;
+    let target_role = require_str(&event.data, "target_role")?;
 
     sqlx::query(
         "UPDATE candidacies SET status = 'Approved', approved_at = to_timestamp($1) WHERE id = $2 AND status = 'Active'",
@@ -341,6 +344,30 @@ async fn apply_candidate_approved(
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("CandidateApproved projection failed: {}", e))?;
+
+    // Register Candidate (role) with nominated target_role.
+    sqlx::query(
+        r#"
+        UPDATE citizens
+        SET role = $1, candidate_type = $2, target_role = $3
+        WHERE id = $4
+        "#,
+    )
+    .bind(Role::Candidate.as_str())
+    .bind(crate::types::CandidateType::Role.as_str())
+    .bind(target_role)
+    .bind(citizen_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("CandidateApproved citizen candidacy register failed: {}", e))?;
+
+    sqlx::query(
+        "UPDATE api_keys SET is_active = FALSE WHERE citizen_id = $1 AND is_active = TRUE",
+    )
+    .bind(citizen_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("CandidateApproved api_keys deactivate failed: {}", e))?;
 
     tracing::info!(candidacy_id = %candidacy_id, event_id = %event.event_id, "CandidateApproved projected");
     Ok(())
@@ -365,7 +392,7 @@ async fn apply_candidate_appointed(
     .await
     .map_err(|e| format!("CandidateAppointed candidacy update failed: {}", e))?;
 
-    sqlx::query("UPDATE citizens SET role = $1 WHERE id = $2")
+    sqlx::query("UPDATE citizens SET role = $1, candidate_type = NULL, target_role = NULL WHERE id = $2")
         .bind(role.as_str())
         .bind(citizen_id)
         .execute(&mut **tx)
@@ -373,7 +400,7 @@ async fn apply_candidate_appointed(
         .map_err(|e| format!("CandidateAppointed role projection failed: {}", e))?;
 
     sqlx::query(
-        "UPDATE api_keys SET role = $1 WHERE citizen_name = (SELECT name FROM citizens WHERE id = $2)",
+        "UPDATE api_keys SET role = $1 WHERE citizen_id = $2",
     )
     .bind(role.as_str())
     .bind(citizen_id)
@@ -587,5 +614,91 @@ async fn apply_election_announced(
     .map_err(|e| format!("ElectionAnnounced projection failed: {}", e))?;
 
     tracing::info!(election_id = %election_id, event_id = %event.event_id, "ElectionAnnounced projected");
+    Ok(())
+}
+
+async fn apply_chat_history_added(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let archive_id = require_str(&event.data, "archive_id")?;
+    let session_id = require_str(&event.data, "session_id")?;
+    let user_id = require_str(&event.data, "user_id")?;
+    let compressed_hex = require_str(&event.data, "compressed_data")?;
+    let original_size = require_i64(&event.data, "original_size")? as i32;
+    let compressed_size = require_i64(&event.data, "compressed_size")? as i32;
+
+    let compressed_data = hex::decode(compressed_hex)
+        .map_err(|e| format!("ChatHistoryAdded: invalid compressed_data hex: {}", e))?;
+
+    // Ensure citizen exists (skip if unknown — archive still stored once citizen appears via other events)
+    let citizen_exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM citizens WHERE id = $1)",
+    )
+    .bind(user_id)
+    .fetch_one(&mut **tx)
+    .await
+    .map_err(|e| format!("ChatHistoryAdded citizen check failed: {}", e))?;
+
+    if !citizen_exists {
+        tracing::warn!(
+            user_id = %user_id,
+            event_id = %event.event_id,
+            "ChatHistoryAdded skipped: citizen not found"
+        );
+        return Ok(());
+    }
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_sessions (id, user_id, started_at, last_activity, is_active)
+        VALUES ($1, $2, to_timestamp($3), to_timestamp($3), FALSE)
+        ON CONFLICT (id) DO UPDATE SET
+            is_active = FALSE,
+            last_activity = GREATEST(chat_sessions.last_activity, EXCLUDED.last_activity)
+        "#,
+    )
+    .bind(session_id)
+    .bind(user_id)
+    .bind(event.timestamp as f64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("ChatHistoryAdded session upsert failed: {}", e))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO chat_archives (
+            id, session_id, compressed_data, original_size, compressed_size,
+            created_at, event_id, is_synced
+        )
+        VALUES ($1, $2, $3, $4, $5, to_timestamp($6), $7, TRUE)
+        ON CONFLICT (id) DO UPDATE SET
+            event_id = COALESCE(chat_archives.event_id, EXCLUDED.event_id),
+            is_synced = TRUE
+        "#,
+    )
+    .bind(archive_id)
+    .bind(session_id)
+    .bind(&compressed_data)
+    .bind(original_size)
+    .bind(compressed_size)
+    .bind(event.timestamp as f64)
+    .bind(&event.event_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("ChatHistoryAdded archive insert failed: {}", e))?;
+
+    sqlx::query("DELETE FROM chat_messages WHERE session_id = $1")
+        .bind(session_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("ChatHistoryAdded message cleanup failed: {}", e))?;
+
+    tracing::info!(
+        archive_id = %archive_id,
+        session_id = %session_id,
+        event_id = %event.event_id,
+        "ChatHistoryAdded projected"
+    );
     Ok(())
 }

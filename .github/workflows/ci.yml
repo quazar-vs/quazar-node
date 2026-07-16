@@ -29,7 +29,6 @@ jobs:
 
     env:
       DATABASE_URL: postgres://quazar:quazar@localhost:5432/quazar
-      QUAZAR_MASTER_KEY: QUAZAR_MASTER_KEY_CI
       QUAZAR_NODE_SECRET: QUAZAR_NODE_SECRET_CI
       QUAZAR_REG_SECRET: QUAZAR_REG_SECRET_CI
       QUAZAR_INIT_TEST_KEYS: "false"

@@ -330,7 +330,7 @@ fn require_aiya(auth: &AuthContext) -> SvodResult<()> {
         ))
     } else {
         Err(SvodError::Forbidden(
-            "Only Aiya can manage the service catalog".to_string(),
+            "Only Aiya and Founder can manage the service catalog (Agent: read-only)".to_string(),
         ))
     }
 }

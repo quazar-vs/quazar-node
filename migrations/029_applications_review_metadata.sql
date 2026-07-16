@@ -1,0 +1,5 @@
+ALTER TABLE applications
+    ADD COLUMN IF NOT EXISTS review_note TEXT,
+    ADD COLUMN IF NOT EXISTS reviewed_by TEXT,
+    ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ;
+

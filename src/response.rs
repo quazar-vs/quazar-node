@@ -55,6 +55,14 @@ pub fn bad_request(message: impl Into<String>) -> Response {
     err_response(StatusCode::BAD_REQUEST, message)
 }
 
+pub fn not_found(message: impl Into<String>) -> Response {
+    err_response(StatusCode::NOT_FOUND, message)
+}
+
+pub fn too_many_requests(message: impl Into<String>) -> Response {
+    err_response(StatusCode::TOO_MANY_REQUESTS, message)
+}
+
 pub fn internal_error(message: impl Into<String>) -> Response {
     err_response(StatusCode::INTERNAL_SERVER_ERROR, message)
 }

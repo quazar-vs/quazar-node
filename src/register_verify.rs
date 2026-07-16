@@ -31,11 +31,11 @@ static CODES: LazyLock<Mutex<HashMap<String, PendingCode>>> =
 static IP_SEND_COUNTS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
-fn normalize_email(email: &str) -> String {
+pub fn normalize_email(email: &str) -> String {
     email.trim().to_lowercase()
 }
 
-fn is_valid_email(email: &str) -> bool {
+pub fn is_valid_email(email: &str) -> bool {
     let email = email.trim();
     if email.len() < 5 || email.len() > 254 {
         return false;
@@ -49,6 +49,80 @@ fn is_valid_email(email: &str) -> bool {
         && !email.contains(char::is_whitespace)
 }
 
+/// Send a 6-digit code to `email` (rate-limited by IP). Used by register and citizenship apply.
+/// Returns the issued code so callers (e.g. citizenship apply) can persist it.
+pub async fn issue_verification_code(email: &str, ip: &str) -> Result<String, String> {
+    let email = normalize_email(email);
+    if !is_valid_email(&email) {
+        return Err("Введите корректный email-адрес".to_string());
+    }
+    check_ip_rate_limit(ip)?;
+
+    let Some(smtp) = SmtpConfig::from_env() else {
+        return Err("Отправка email не настроена на сервере".to_string());
+    };
+
+    let now = Instant::now();
+    {
+        let mut codes = CODES.lock().expect("verification codes lock");
+        purge_expired_codes(&mut codes);
+        if let Some(existing) = codes.get(&email) {
+            if now.duration_since(existing.last_sent_at) < RESEND_COOLDOWN {
+                return Err(
+                    "Код уже отправлен. Подождите минуту перед повторной отправкой.".to_string(),
+                );
+            }
+        }
+    }
+
+    let code = generate_code();
+    send_verification_code(&smtp, &email, &code)
+        .await
+        .map_err(|e| format!("Не удалось отправить письмо: {e}"))?;
+
+    {
+        let mut codes = CODES.lock().expect("verification codes lock");
+        codes.insert(
+            email.clone(),
+            PendingCode {
+                code: code.clone(),
+                expires_at: now + CODE_TTL,
+                last_sent_at: now,
+            },
+        );
+    }
+    record_ip_send(ip);
+    Ok(code)
+}
+
+/// Consume a previously issued verification code. Removes it on success.
+pub fn consume_verification_code(email: &str, code: &str) -> Result<(), String> {
+    let email = normalize_email(email);
+    let code = code.trim();
+    if !is_valid_email(&email) {
+        return Err("Введите корректный email-адрес".to_string());
+    }
+    if !code.chars().all(|c| c.is_ascii_digit()) || code.len() != 6 {
+        return Err("Код должен состоять из 6 цифр".to_string());
+    }
+
+    let mut codes = CODES.lock().expect("verification codes lock");
+    purge_expired_codes(&mut codes);
+
+    let Some(pending) = codes.get(&email) else {
+        return Err("Код не найден. Запросите новый код.".to_string());
+    };
+    if pending.expires_at <= Instant::now() {
+        codes.remove(&email);
+        return Err("Код истёк. Запросите новый код.".to_string());
+    }
+    if pending.code != code {
+        return Err("Неверный код. Проверьте письмо и попробуйте снова.".to_string());
+    }
+    codes.remove(&email);
+    Ok(())
+}
+
 fn generate_code() -> String {
     format!("{:06}", uuid::Uuid::new_v4().as_u128() % 1_000_000)
 }
@@ -59,11 +133,10 @@ fn purge_expired_codes(codes: &mut HashMap<String, PendingCode>) {
 }
 
 fn check_ip_rate_limit(ip: &str) -> Result<(), String> {
-    let counts = IP_SEND_COUNTS.lock().expect("ip send counts lock");
+    let mut counts = IP_SEND_COUNTS.lock().expect("ip send counts lock");
     let now = Instant::now();
     let hour = Duration::from_secs(3600);
 
-    let mut counts = counts;
     counts.retain(|_, (_, started_at)| now.duration_since(*started_at) < hour);
 
     let entry = counts.get(ip).copied().unwrap_or((0, now));
@@ -75,6 +148,7 @@ fn check_ip_rate_limit(ip: &str) -> Result<(), String> {
     if count >= MAX_SENDS_PER_IP_PER_HOUR {
         return Err("Слишком много запросов. Попробуйте позже.".to_string());
     }
+    let _ = (count, started_at);
     Ok(())
 }
 
@@ -149,65 +223,36 @@ pub async fn send_code_handler(
     };
 
     let email = normalize_email(&req.email);
-    if !is_valid_email(&email) {
-        return response::bad_request("Введите корректный email-адрес");
-    }
-
     let ip = client_ip(connect_info.as_ref());
-    if let Err(message) = check_ip_rate_limit(&ip) {
-        return response::err_response(axum::http::StatusCode::TOO_MANY_REQUESTS, message);
-    }
 
-    let Some(smtp) = SmtpConfig::from_env() else {
-        tracing::error!("GMAIL_USER / GMAIL_APP_PASSWORD not configured");
-        return response::internal_error(
-            "Отправка email не настроена на сервере. Обратитесь к администратору.",
-        );
-    };
-
-    let now = Instant::now();
-    {
-        let mut codes = CODES.lock().expect("verification codes lock");
-        purge_expired_codes(&mut codes);
-        if let Some(existing) = codes.get(&email) {
-            if now.duration_since(existing.last_sent_at) < RESEND_COOLDOWN {
-                return response::bad_request(
-                    "Код уже отправлен. Подождите минуту перед повторной отправкой.",
+    match issue_verification_code(&email, &ip).await {
+        Ok(_code) => {
+            tracing::info!(to = %email, client_ip = %ip, "verification code sent");
+            Json(ApiResponse::success(SendCodeResponse {
+                message: "Код отправлен на ваш email".to_string(),
+                expires_in_secs: CODE_TTL.as_secs(),
+            }))
+            .into_response()
+        }
+        Err(message) => {
+            if message.contains("не настроена") {
+                tracing::error!("GMAIL_USER / GMAIL_APP_PASSWORD not configured");
+                return response::internal_error(
+                    "Отправка email не настроена на сервере. Обратитесь к администратору.",
                 );
             }
+            if message.contains("Слишком много") {
+                return response::err_response(axum::http::StatusCode::TOO_MANY_REQUESTS, message);
+            }
+            if message.contains("Не удалось отправить") {
+                tracing::error!(to = %email, error = %message, "failed to send verification email");
+                return response::internal_error(
+                    "Не удалось отправить письмо. Попробуйте позже или напишите на quazarvs@gmail.com",
+                );
+            }
+            response::bad_request(message)
         }
     }
-
-    let code = generate_code();
-
-    if let Err(e) = send_verification_code(&smtp, &email, &code).await {
-        tracing::error!(to = %email, error = %e, "failed to send verification email");
-        return response::internal_error(
-            "Не удалось отправить письмо. Попробуйте позже или напишите на quazarvs@gmail.com",
-        );
-    }
-
-    {
-        let mut codes = CODES.lock().expect("verification codes lock");
-        codes.insert(
-            email.clone(),
-            PendingCode {
-                code: code.clone(),
-                expires_at: now + CODE_TTL,
-                last_sent_at: now,
-            },
-        );
-    }
-
-    record_ip_send(&ip);
-
-    tracing::info!(to = %email, client_ip = %ip, "verification code sent");
-
-    Json(ApiResponse::success(SendCodeResponse {
-        message: "Код отправлен на ваш email".to_string(),
-        expires_in_secs: CODE_TTL.as_secs(),
-    }))
-    .into_response()
 }
 
 pub async fn verify_code_handler(
@@ -219,38 +264,13 @@ pub async fn verify_code_handler(
         Err(response) => return response,
     };
 
-    let email = normalize_email(&req.email);
-    let code = req.code.trim();
-
-    if !is_valid_email(&email) {
-        return response::bad_request("Введите корректный email-адрес");
+    match consume_verification_code(&req.email, &req.code) {
+        Ok(()) => Json(ApiResponse::success(VerifyCodeResponse {
+            message: "Email подтверждён".to_string(),
+        }))
+        .into_response(),
+        Err(message) => response::bad_request(message),
     }
-    if !code.chars().all(|c| c.is_ascii_digit()) || code.len() != 6 {
-        return response::bad_request("Код должен состоять из 6 цифр");
-    }
-
-    let mut codes = CODES.lock().expect("verification codes lock");
-    purge_expired_codes(&mut codes);
-
-    let Some(pending) = codes.get(&email) else {
-        return response::bad_request("Код не найден. Запросите новый код.");
-    };
-
-    if pending.expires_at <= Instant::now() {
-        codes.remove(&email);
-        return response::bad_request("Код истёк. Запросите новый код.");
-    }
-
-    if pending.code != code {
-        return response::bad_request("Неверный код. Проверьте письмо и попробуйте снова.");
-    }
-
-    codes.remove(&email);
-
-    Json(ApiResponse::success(VerifyCodeResponse {
-        message: "Email подтверждён".to_string(),
-    }))
-    .into_response()
 }
 
 #[cfg(test)]

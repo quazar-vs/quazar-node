@@ -34,20 +34,18 @@ curl http://localhost:8080/status
 
 | Переменная | Описание |
 |------------|----------|
-| `QUAZAR_MASTER_KEY` | Мастер API-ключ (обязателен) |
 | `QUAZAR_NODE_SECRET` | Секрет для P2P: `GET /events`, `GET /blocks`, `POST /events/gossip` |
 | `QUAZAR_REG_SECRET` | Секрет для `reg_sig_*` (CitizenAdded); **не равен** node secret |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `QUAZAR_NODE_ID` | ID узла |
 | `QUAZAR_NODE_URL` | Публичный URL узла |
 | `QUAZAR_BOOTSTRAP_PEERS` | Пиры при старте: `id@url,id2@url2` |
-| `QUAZAR_BLOCK_MIN_EVENTS` | Минимум событий для блока (default: 3) |
-| `QUAZAR_BLOCK_MAX_WAIT_SECS` | Макс. ожидание перед блоком (default: 30) |
+| `QUAZAR_SYNC_INTERVAL_SECS` | Интервал фоновой синхронизации с пирами (default: 60); блоки создаются только при накоплении 2^(n-1) событий для блока #n |
 | `QUAZAR_RATE_LIMIT_RPS` | Rate limit на защищённых роутах (default: 60) |
 | `QUAZAR_CORS_ORIGINS` | CORS origins (через запятую); `*` = permissive; без значения = dev defaults |
 | `RUST_LOG` | Уровень логов (`info`, `debug`) |
 | `QUAZAR_STRICT_SECRETS` | `true` — ошибка при дефолтных секретах |
-| `QUAZAR_DISABLE_MASTER_KEY` | `true` — отключить master key |
+| `QUAZAR_API_KEYS` | Доп. ключи при старте: `ключ:Роль:имя_гражданина` (через запятую) |
 | `QUAZAR_INIT_TEST_KEYS` | `true` — синхронизировать тестовые ключи в PostgreSQL |
 | `GMAIL_USER` | Gmail-адрес отправителя (например `quazarvs@gmail.com`) |
 | `GMAIL_APP_PASSWORD` | [App Password](https://myaccount.google.com/apppasswords) для SMTP |
@@ -82,13 +80,18 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 - `/chat/*` — чат граждан (per-node SQL, без блокчейна)
 - `/svod/*` — **Свод Оснований для Созидания** (реестр услуг/товов для биржи, валюта КВАЗИ / QZ)
 - `/exchange/*` — биржа услуг (предложения только по услугам из Свода)
-- `POST /keys`, `GET /keys`, `POST /keys/revoke` — управление API-ключами (Aiya/master), хранятся в PostgreSQL
-- `POST /keys/sync` — выровнять `api_keys.role` по реестру `citizens` (Aiya/master); возвращает `{ "updated": N }`
+- `POST /keys`, `GET /keys`, `POST /keys/revoke` — управление API-ключами (Aiya / Founder), хранятся в PostgreSQL
+- `POST /keys/sync` — выровнять `api_keys.role` по реестру `citizens` (Aiya / Founder); возвращает `{ "updated": N }`
 - `POST /auth/login`, `GET /auth/check` — публичный вход по паролю и проверка наличия пароля
 - `POST /auth/register/send-code`, `POST /auth/register/verify-code` — отправка и проверка кода регистрации с лендинга (Gmail SMTP, см. `GMAIL_*`)
 - `POST /auth/set-password` — установка/смена пароля (требуется API-ключ гражданина)
 
-Авторизация: `Authorization: Bearer <API_KEY>` или заголовок `X-API-Key`.
+Авторизация: `Authorization: Bearer <API_KEY>` или заголовок `X-API-Key`.  
+Для примеров ниже задайте ключ с правами Aiya/Founder, например через `QUAZAR_API_KEYS` в `.env`:
+
+```bash
+export QUAZAR_API_KEY="your_aiya_or_founder_key"
+```
 
 ### Регистрация граждан и статус `pending`
 
@@ -102,24 +105,24 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 ```bash
 # 1. Регистрация (ответ: registration_status = "pending")
 curl -s -X POST http://localhost:8080/citizen/register \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"name": "alice", "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f8077986", "role": "Citizen", "birth_place": "TestCity"}' | jq .
 
 # 2. Дождаться появления в реестре (status = "pending", passport_issued = false)
 curl -s http://localhost:8080/citizen/list \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" | jq '.data.citizens[] | select(.name=="alice")'
+  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq '.data.citizens[] | select(.name=="alice")'
 
-# 3. Выдача паспорта (Aiya / master)
+# 3. Выдача паспорта (Aiya / Founder)
 ALICE_ID="<uuid из списка>"
 curl -s -X POST "http://localhost:8080/citizen/${ALICE_ID}/passport" \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"expires_in_days": 365}' | jq .
 
 # 4. После подтверждения в блоке: status = "active", passport_issued = true
 curl -s "http://localhost:8080/citizen/${ALICE_ID}" \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" | jq '.data | {status, passport_issued}'
+  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq '.data | {status, passport_issued}'
 ```
 
 Ошибки для `pending`:
@@ -149,7 +152,7 @@ API-ключ передаётся **только в заголовке**, не �
 
 ```bash
 curl -X POST http://localhost:8080/event \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "event_id": "my_event_1",
@@ -180,7 +183,7 @@ curl -X POST http://localhost:8080/event \
 | `/candidacy/:id/vote` | POST | Citizen+ (active) |
 | `/candidacy/:id` | GET | Публичный |
 | `/candidacy/list` | GET | Публичный |
-| `/candidacy/:id/appoint` | POST | Aiya / master |
+| `/candidacy/:id/appoint` | POST | Aiya / Founder |
 
 События в блокчейне: `CandidateNominated`, `CandidateVoted`, `CandidateApproved`, `CandidateAppointed`.
 
@@ -204,7 +207,7 @@ curl -s "http://localhost:8080/candidacy/list?status=Active" | jq .
 
 # Назначить утверждённого кандидата (Айя)
 curl -s -X POST http://localhost:8080/candidacy/CANDIDACY-UUID/appoint \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" | jq .
+  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq .
 ```
 
 ### Инициативы (`/initiative`)
@@ -240,7 +243,7 @@ curl -s "http://localhost:8080/initiative/list?status=Proposed" | jq .
 
 | Эндпоинт | Метод | Права |
 |----------|-------|-------|
-| `/referendum/announce` | POST | Aiya / master |
+| `/referendum/announce` | POST | Aiya / Founder |
 | `/referendum/:id/vote` | POST | Citizen+ (active) |
 | `/referendum/:id` | GET | Публичный |
 | `/referendum/list` | GET | Публичный |
@@ -249,7 +252,7 @@ curl -s "http://localhost:8080/initiative/list?status=Proposed" | jq .
 
 ```bash
 curl -s -X POST http://localhost:8080/referendum/announce \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"title": "Отмена налога", "description": "Обоснование", "target_decision": "Закон о налогах"}' | jq .
 
@@ -268,18 +271,18 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 | `/svod` | GET | API key (любая роль) |
 | `/svod/categories` | GET | API key |
 | `/svod/service/:code` | GET | API key |
-| `/svod/admin/service` | POST | Aiya / master |
-| `/svod/admin/service/:code` | PUT | Aiya / master |
-| `/svod/admin/service/:code` | DELETE | Aiya / master (отключить услугу) |
+| `/svod/admin/service` | POST | Aiya / Founder |
+| `/svod/admin/service/:code` | PUT | Aiya / Founder |
+| `/svod/admin/service/:code` | DELETE | Aiya / Founder (отключить услугу) |
 
 ```bash
 # Каталог услуг
 curl -s http://localhost:8080/svod \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" | jq .
+  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq .
 
 # Добавить услугу (Aiya)
 curl -s -X POST http://localhost:8080/svod/admin/service \
-  -H "Authorization: Bearer $QUAZAR_MASTER_KEY" \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "code": "DESIGN_UI",
