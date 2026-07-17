@@ -90,6 +90,45 @@ impl NodeRegistry {
 
         Ok(rows.into_iter().map(Node::from).collect())
     }
+
+    /// One random peer with status `alive` (online for P2P), excluding `exclude_id`.
+    pub async fn pick_random_alive_peer_excluding(
+        &self,
+        exclude_id: &str,
+    ) -> Result<Option<Node>, sqlx::Error> {
+        let row = sqlx::query_as::<_, NodeRow>(
+            r#"
+            SELECT id, url, public_key, status, last_seen, version
+            FROM nodes
+            WHERE status = 'alive' AND id <> $1 AND TRIM(url) <> ''
+            ORDER BY RANDOM()
+            LIMIT 1
+            "#,
+        )
+        .bind(exclude_id)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        Ok(row.map(Node::from))
+    }
+}
+
+/// Peer address as in `QUAZAR_BOOTSTRAP_PEERS` (`id@url`).
+pub fn format_peer_address(id: &str, url: &str) -> String {
+    format!("{}@{}", id.trim(), url.trim())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn format_peer_address_matches_bootstrap_style() {
+        assert_eq!(
+            format_peer_address("QZ-NODE-2", "http://node:8080"),
+            "QZ-NODE-2@http://node:8080"
+        );
+    }
 }
 
 #[derive(sqlx::FromRow)]

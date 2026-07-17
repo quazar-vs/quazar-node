@@ -839,6 +839,119 @@ pub fn build_chat_history_added_event(
     }
 }
 
+pub fn build_node_started_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    node_id: &str,
+    url: &str,
+    version: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "NodeStarted".to_string(),
+        title: format!("Узел {} в сети", node_id),
+        description: format!(
+            "Узел мэра {} ({}) зарегистрирован; заявка {}",
+            node_id, citizen_name, application_id
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "application_id": application_id,
+            "citizen_id": citizen_id,
+            "citizen_name": citizen_name,
+            "node_id": node_id,
+            "url": url,
+            "version": version,
+            "status": "alive",
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_node_started_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    node_id: &str,
+    url: &str,
+    version: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_node_started_event(
+        event_id,
+        application_id,
+        citizen_id,
+        citizen_name,
+        node_id,
+        url,
+        version,
+        initiator,
+        timestamp,
+    ))
+}
+
+pub fn build_mayor_confirmed_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    node_id: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "MayorConfirmed".to_string(),
+        title: format!("Подтверждение мэра {}", citizen_name),
+        description: format!(
+            "Узел {} синхронизирован; гражданин {} назначен мэром (заявка {})",
+            node_id, citizen_name, application_id
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "application_id": application_id,
+            "citizen_id": citizen_id,
+            "citizen_name": citizen_name,
+            "node_id": node_id,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_confirmed_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    node_id: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_confirmed_event(
+        event_id,
+        application_id,
+        citizen_id,
+        citizen_name,
+        node_id,
+        initiator,
+        timestamp,
+    ))
+}
+
 pub fn build_signed_chat_history_added_event(
     event_id: &str,
     archive_id: &str,

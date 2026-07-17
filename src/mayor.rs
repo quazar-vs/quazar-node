@@ -2,18 +2,31 @@ use std::sync::Arc;
 
 use axum::{
     extract::{Extension, Path, Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
+use tokio::time;
 use uuid::Uuid;
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, KeyStore};
+use crate::block_producer;
+use crate::blockchain::{build_signed_mayor_confirmed_event, build_signed_node_started_event};
+use crate::gossip;
+use crate::models::Event;
+use crate::node_generator::{
+    allocate_mayor_node_id, format_secret_for_package, generate_node_secret_hex,
+    network_reg_secret_for_package, peer_url_from_sync_peer, resolve_network_id,
+    resolve_network_version, MayorNodePackageParams,
+};
+use crate::pending;
+use crate::nodes::{Node, NodeStatus};
 use crate::response::{self, ApiResponse};
 use crate::types::Role;
+use crate::validator::EventValidator;
 use crate::AppState;
 
 /// Absolute majority: floor(n/2)+1 == 50%+1 of cast votes.
@@ -79,6 +92,45 @@ impl CandidateStatus {
             CandidateStatus::Winner => "Winner",
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MayorApplyRequest {
+    pub ip: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MayorApplyResponse {
+    pub application_id: String,
+    /// Assigned P2P sync peer (`id@url`, same format as `QUAZAR_BOOTSTRAP_PEERS`).
+    pub sync_peer: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MayorApplicationStatusResponse {
+    pub status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_id: Option<String>,
+    pub message: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MayorSetupPackageQuery {
+    pub ip: String,
+    pub api_key: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MayorSetupPackageResponse {
+    pub node_id: String,
+    pub node_secret: String,
+    pub reg_secret: String,
+    pub peer_url: String,
+    pub qz_id: String,
+    pub citizen_name: String,
+    pub api_key: String,
+    pub network_id: String,
+    pub version: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -910,7 +962,1254 @@ pub async fn list_elections(
         .map_err(|e| MayorError::Database(e.to_string()))
 }
 
-// --- HTTP handlers ---
+const MAYOR_APPLICATION_ACTIVE_STATUSES: &[&str] = &["pending", "approved", "confirmed"];
+
+/// How often the background task scans for expired pending mayor applications.
+pub const MAYOR_APPLICATION_EXPIRY_INTERVAL: std::time::Duration =
+    std::time::Duration::from_secs(5 * 60);
+
+#[derive(Debug, Default, Clone, Copy)]
+pub struct ExpireMayorApplicationsResult {
+    pub applications_timed_out: u64,
+    pub citizens_role_reset: u64,
+}
+
+/// Mark pending mayor applications past `expires_at` as `timed_out` and reset citizen role
+/// when they are not Mayor (idempotent for citizens already on role Citizen).
+pub async fn expire_pending_mayor_applications(
+    pool: &PgPool,
+) -> Result<ExpireMayorApplicationsResult, sqlx::Error> {
+    let mayor_role = Role::Mayor.as_str();
+    let citizen_role = Role::Citizen.as_str();
+
+    let row: (i64, i64) = sqlx::query_as(
+        r#"
+        WITH expired AS (
+            UPDATE mayor_applications
+            SET status = 'timed_out'
+            WHERE status = 'pending' AND expires_at < NOW()
+            RETURNING id, citizen_id
+        ),
+        reverted AS (
+            UPDATE citizens c
+            SET role = $1
+            FROM expired e
+            WHERE c.id = e.citizen_id AND c.role <> $2
+            RETURNING c.id
+        ),
+        _keys AS (
+            UPDATE api_keys k
+            SET role = $1
+            FROM reverted r
+            WHERE k.citizen_id = r.id AND k.is_active = TRUE AND k.role <> $2
+            RETURNING k.id
+        )
+        SELECT
+            (SELECT COUNT(*)::BIGINT FROM expired),
+            (SELECT COUNT(*)::BIGINT FROM reverted)
+        "#,
+    )
+    .bind(citizen_role)
+    .bind(mayor_role)
+    .fetch_one(pool)
+    .await?;
+
+    Ok(ExpireMayorApplicationsResult {
+        applications_timed_out: row.0.max(0) as u64,
+        citizens_role_reset: row.1.max(0) as u64,
+    })
+}
+
+pub async fn background_mayor_application_expiry(state: Arc<AppState>) {
+    let mut interval = time::interval(MAYOR_APPLICATION_EXPIRY_INTERVAL);
+    loop {
+        interval.tick().await;
+        tracing::debug!("mayor application expiry tick");
+        match expire_pending_mayor_applications(&state.db).await {
+            Ok(result) if result.applications_timed_out > 0 => {
+                tracing::info!(
+                    expired_applications = result.applications_timed_out,
+                    citizens_role_reset = result.citizens_role_reset,
+                    "expired pending mayor applications"
+                );
+            }
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(error = %e, "expire pending mayor applications failed");
+            }
+        }
+    }
+}
+
+fn is_valid_node_ip(ip: &str) -> bool {
+    let s = ip.trim();
+    if s.is_empty() || s.len() > 512 {
+        return false;
+    }
+    if s.chars().any(|c| c.is_whitespace()) {
+        return false;
+    }
+    s.chars().any(|c| c.is_ascii_digit())
+}
+
+async fn resolve_apply_citizen(
+    auth: &AuthContext,
+    pool: &PgPool,
+) -> Result<String, MayorError> {
+    if auth.is_node {
+        return Err(MayorError::forbidden(
+            "Учётные данные узла не могут подавать заявку мэра",
+        ));
+    }
+    if auth.role.is_agent() {
+        return Err(MayorError::forbidden(
+            auth.insufficient_permissions_message().to_string(),
+        ));
+    }
+
+    let citizen_id = auth.resolve_account_id(pool).await;
+    let row: Option<(String, String)> =
+        sqlx::query_as("SELECT id, status FROM citizens WHERE id = $1")
+            .bind(&citizen_id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let (id, status) =
+        row.ok_or_else(|| MayorError::bad_request("Гражданин не найден в реестре"))?;
+    if status != "active" {
+        return Err(MayorError::bad_request(format!(
+            "Подать заявку может только активный гражданин (текущий статус: {status})"
+        )));
+    }
+    Ok(id)
+}
+
+async fn mayor_application_ip_taken(pool: &PgPool, node_ip: &str) -> Result<bool, MayorError> {
+    let taken: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM mayor_applications
+            WHERE node_ip = $1 AND status = ANY($2)
+        )",
+    )
+    .bind(node_ip)
+    .bind(MAYOR_APPLICATION_ACTIVE_STATUSES)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+    Ok(taken)
+}
+
+/// Pick a sync peer for a new mayor node application.
+///
+/// Strategy: uniform random among registry nodes with status `alive` (same as gossip / block sync),
+/// excluding this node's id. If no other alive peer exists, fall back to this node
+/// (`QUAZAR_NODE_ID` @ `QUAZAR_NODE_URL`) so single-node dev can still apply.
+async fn select_mayor_sync_peer(state: &AppState) -> Result<String, MayorError> {
+    use crate::nodes::format_peer_address;
+
+    let peer = state
+        .node_registry
+        .pick_random_alive_peer_excluding(&state.node_id)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    if let Some(node) = peer {
+        return Ok(format_peer_address(&node.id, &node.url));
+    }
+
+    let url = std::env::var("QUAZAR_NODE_URL")
+        .unwrap_or_else(|_| "http://localhost:8080".to_string());
+    Ok(format_peer_address(&state.node_id, &url))
+}
+
+async fn citizen_has_active_mayor_application(
+    pool: &PgPool,
+    citizen_id: &str,
+) -> Result<bool, MayorError> {
+    let exists: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM mayor_applications
+            WHERE citizen_id = $1 AND status = ANY($2)
+        )",
+    )
+    .bind(citizen_id)
+    .bind(MAYOR_APPLICATION_ACTIVE_STATUSES)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+    Ok(exists)
+}
+
+pub async fn apply_for_mayor_node(
+    state: Arc<AppState>,
+    auth: &AuthContext,
+    req: MayorApplyRequest,
+) -> Result<MayorApplyResponse, MayorError> {
+    let citizen_id = resolve_apply_citizen(auth, &state.db).await?;
+
+    let node_ip = req.ip.trim().to_string();
+    if !is_valid_node_ip(&node_ip) {
+        return Err(MayorError::bad_request(
+            "Укажите корректный IP-адрес или адрес узла",
+        ));
+    }
+
+    if mayor_application_ip_taken(&state.db, &node_ip).await? {
+        return Err(MayorError::bad_request(
+            "Этот IP уже занят другой заявкой на узел мэра",
+        ));
+    }
+
+    if citizen_has_active_mayor_application(&state.db, &citizen_id).await? {
+        return Err(MayorError::bad_request(
+            "У вас уже есть активная заявка на узел мэра",
+        ));
+    }
+
+    let application_id = Uuid::new_v4();
+    let now = Utc::now();
+    let expires_at = now + Duration::hours(24);
+    let sync_peer = select_mayor_sync_peer(&state).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO mayor_applications (id, citizen_id, node_ip, sync_peer, status, created_at, expires_at)
+        VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+        "#,
+    )
+    .bind(application_id)
+    .bind(&citizen_id)
+    .bind(&node_ip)
+    .bind(&sync_peer)
+    .bind(now)
+    .bind(expires_at)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(db_err) = &e {
+            if db_err.constraint() == Some("idx_mayor_applications_node_ip_active")
+                || db_err.constraint() == Some("idx_mayor_applications_citizen_active")
+            {
+                return MayorError::bad_request(
+                    "Заявка не создана: IP или гражданин уже участвуют в активной заявке",
+                );
+            }
+        }
+        MayorError::Database(e.to_string())
+    })?;
+
+    Ok(MayorApplyResponse {
+        application_id: application_id.to_string(),
+        sync_peer,
+    })
+}
+
+fn russian_hours_word(hours: i64) -> &'static str {
+    let n = hours.abs();
+    let last_two = n % 100;
+    if (11..=14).contains(&last_two) {
+        return "часов";
+    }
+    match n % 10 {
+        1 => "час",
+        2 | 3 | 4 => "часа",
+        _ => "часов",
+    }
+}
+
+pub fn mayor_application_status_message(
+    status: &str,
+    node_id: Option<&str>,
+    expires_at: chrono::DateTime<Utc>,
+    now: chrono::DateTime<Utc>,
+) -> String {
+    match status {
+        "pending" => {
+            let hours = (expires_at - now).num_hours().max(0);
+            if hours == 0 {
+                return "Узел ещё не запущен. Осталось менее часа.".to_string();
+            }
+            format!(
+                "Узел ещё не запущен. Осталось {} {}.",
+                hours,
+                russian_hours_word(hours)
+            )
+        }
+        "approved" => {
+            if let Some(id) = node_id.filter(|s| !s.is_empty()) {
+                format!(
+                    "Узел {id} зарегистрирован. Завершите установку и дождитесь подтверждения синхронизации с сетью."
+                )
+            } else {
+                "Узел зарегистрирован. Завершите установку и дождитесь подтверждения синхронизации с сетью."
+                    .to_string()
+            }
+        }
+        "confirmed" => {
+            if let Some(id) = node_id.filter(|s| !s.is_empty()) {
+                format!("Узел {id} успешно подключён к сети Quazar.")
+            } else {
+                "Узел мэра успешно подключён к сети Quazar.".to_string()
+            }
+        }
+        "timed_out" => {
+            "Срок действия заявки истёк. Подайте новую заявку через /api/mayor/apply.".to_string()
+        }
+        other => format!("Статус заявки: {other}."),
+    }
+}
+
+pub async fn get_mayor_application_status(
+    pool: &PgPool,
+    application_id: Uuid,
+) -> Result<MayorApplicationStatusResponse, MayorError> {
+    let row: Option<(String, Option<String>, chrono::DateTime<Utc>)> = sqlx::query_as(
+        r#"
+        SELECT status, node_id, expires_at
+        FROM mayor_applications
+        WHERE id = $1
+        "#,
+    )
+    .bind(application_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let (status, node_id, expires_at) =
+        row.ok_or_else(|| MayorError::not_found("Заявка на узел мэра не найдена"))?;
+
+    let message =
+        mayor_application_status_message(&status, node_id.as_deref(), expires_at, Utc::now());
+
+    Ok(MayorApplicationStatusResponse {
+        status,
+        node_id,
+        message,
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct PendingMayorApplicationRow {
+    id: uuid::Uuid,
+    citizen_id: String,
+    sync_peer: Option<String>,
+    node_id: Option<String>,
+    node_secret: Option<String>,
+}
+
+fn resolve_setup_api_key(
+    query: &MayorSetupPackageQuery,
+    headers: &HeaderMap,
+) -> Result<String, MayorError> {
+    if let Some(key) = query
+        .api_key
+        .as_ref()
+        .map(|k| k.trim())
+        .filter(|k| !k.is_empty())
+    {
+        return Ok(key.to_string());
+    }
+
+    if let Some(auth) = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(rest) = auth.strip_prefix("Bearer ") {
+            let key = rest.trim();
+            if !key.is_empty() {
+                return Ok(key.to_string());
+            }
+        }
+    }
+
+    if let Some(key) = headers
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        return Ok(key.to_string());
+    }
+
+    Err(MayorError::forbidden("Укажите api_key в query или заголовке Authorization / X-API-Key"))
+}
+
+pub async fn build_mayor_setup_package(
+    state: Arc<AppState>,
+    node_ip: &str,
+    raw_api_key: &str,
+) -> Result<MayorSetupPackageResponse, MayorError> {
+    let ip = node_ip.trim();
+    if !is_valid_node_ip(ip) {
+        return Err(MayorError::bad_request(
+            "Укажите корректный IP-адрес или адрес узла",
+        ));
+    }
+
+    let key_data = KeyStore::validate_key(&state.db, raw_api_key)
+        .await
+        .ok_or_else(|| MayorError::forbidden("Неверный или неактивный API key"))?;
+
+    if key_data.citizen_id.is_empty() {
+        return Err(MayorError::forbidden("API key не привязан к гражданину"));
+    }
+
+    let app = sqlx::query_as::<_, PendingMayorApplicationRow>(
+        r#"
+        SELECT id, citizen_id, sync_peer, node_id, node_secret
+        FROM mayor_applications
+        WHERE node_ip = $1 AND status = 'pending'
+        LIMIT 1
+        "#,
+    )
+    .bind(ip)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?
+    .ok_or_else(|| {
+        MayorError::not_found("Заявка на узел мэра для этого IP не найдена или не в статусе pending")
+    })?;
+
+    if app.citizen_id != key_data.citizen_id {
+        return Err(MayorError::forbidden(
+            "API key не принадлежит гражданину этой заявки",
+        ));
+    }
+
+    let citizen_name: String = sqlx::query_scalar("SELECT name FROM citizens WHERE id = $1")
+        .bind(&app.citizen_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Гражданин заявки не найден"))?;
+
+    let mut node_id = app.node_id.clone();
+    let mut node_secret = app.node_secret.clone();
+    let mut sync_peer = app.sync_peer.clone();
+
+    if node_id.as_deref().unwrap_or("").is_empty() {
+        node_id = Some(
+            allocate_mayor_node_id(&state.db)
+                .await
+                .map_err(|e| MayorError::Database(e.to_string()))?,
+        );
+    }
+    if node_secret.as_deref().unwrap_or("").is_empty() {
+        node_secret = Some(generate_node_secret_hex());
+    }
+    if sync_peer.as_deref().unwrap_or("").is_empty() {
+        sync_peer = Some(select_mayor_sync_peer(&state).await?);
+    }
+
+    let node_id = node_id.expect("node_id set");
+    let node_secret = node_secret.expect("node_secret set");
+    let sync_peer = sync_peer.expect("sync_peer set");
+    let peer_url = peer_url_from_sync_peer(&sync_peer);
+    let now = Utc::now();
+
+    sqlx::query(
+        r#"
+        UPDATE mayor_applications
+        SET node_id = $1,
+            node_secret = $2,
+            sync_peer = $3,
+            package_delivered_at = $4
+        WHERE id = $5 AND status = 'pending'
+        "#,
+    )
+    .bind(&node_id)
+    .bind(&node_secret)
+    .bind(&sync_peer)
+    .bind(now)
+    .bind(app.id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let network_id = resolve_network_id(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+    let version = resolve_network_version(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    Ok(MayorSetupPackageResponse {
+        node_id: node_id.clone(),
+        node_secret: format_secret_for_package(&node_secret),
+        reg_secret: network_reg_secret_for_package(),
+        peer_url,
+        qz_id: app.citizen_id,
+        citizen_name,
+        api_key: raw_api_key.to_string(),
+        network_id,
+        version,
+    })
+}
+
+pub async fn deliver_mayor_node_package(
+    state: Arc<AppState>,
+    auth: &AuthContext,
+    application_id: Uuid,
+) -> Result<MayorNodePackageParams, MayorError> {
+    let citizen_id = resolve_apply_citizen(auth, &state.db).await?;
+
+    let app = sqlx::query_as::<_, PendingMayorApplicationRow>(
+        r#"
+        SELECT id, citizen_id, sync_peer, node_id, node_secret
+        FROM mayor_applications
+        WHERE id = $1
+        "#,
+    )
+    .bind(application_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?
+    .ok_or_else(|| MayorError::not_found("Заявка на узел мэра не найдена"))?;
+
+    if app.citizen_id != citizen_id {
+        return Err(MayorError::forbidden(
+            "Пакет установки доступен только автору заявки",
+        ));
+    }
+
+    let status: String = sqlx::query_scalar("SELECT status FROM mayor_applications WHERE id = $1")
+        .bind(application_id)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    if !matches!(status.as_str(), "pending" | "approved") {
+        return Err(MayorError::bad_request(format!(
+            "Пакет недоступен для статуса заявки: {status}"
+        )));
+    }
+
+    let mut node_id = app.node_id.clone();
+    let mut node_secret = app.node_secret.clone();
+    let mut sync_peer = app.sync_peer.clone();
+
+    if node_id.as_deref().unwrap_or("").is_empty() {
+        node_id = Some(
+            allocate_mayor_node_id(&state.db)
+                .await
+                .map_err(|e| MayorError::Database(e.to_string()))?,
+        );
+    }
+    if node_secret.as_deref().unwrap_or("").is_empty() {
+        node_secret = Some(generate_node_secret_hex());
+    }
+    if sync_peer.as_deref().unwrap_or("").is_empty() {
+        sync_peer = Some(select_mayor_sync_peer(&state).await?);
+    }
+
+    let node_id = node_id.expect("node_id set");
+    let node_secret = node_secret.expect("node_secret set");
+    let sync_peer = sync_peer.expect("sync_peer set");
+    let peer_url = peer_url_from_sync_peer(&sync_peer);
+
+    if app.node_id.as_deref() != Some(node_id.as_str())
+        || app.node_secret.as_deref() != Some(node_secret.as_str())
+    {
+        sqlx::query(
+            r#"
+            UPDATE mayor_applications
+            SET node_id = $1,
+                node_secret = $2,
+                sync_peer = $3,
+                package_delivered_at = COALESCE(package_delivered_at, NOW())
+            WHERE id = $4
+            "#,
+        )
+        .bind(&node_id)
+        .bind(&node_secret)
+        .bind(&sync_peer)
+        .bind(application_id)
+        .execute(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+    }
+
+    let network_id = resolve_network_id(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+    let version = resolve_network_version(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    Ok(MayorNodePackageParams {
+        node_id,
+        node_secret: format_secret_for_package(&node_secret),
+        reg_secret: network_reg_secret_for_package(),
+        network_id,
+        version,
+        sync_peer,
+        peer_url,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MayorNodeStartedRequest {
+    pub node_id: String,
+    pub node_secret: String,
+    #[serde(default)]
+    pub url: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MayorNodeStartedResponse {
+    pub application_id: String,
+    pub node_id: String,
+    pub event_id: String,
+    pub status: String,
+}
+
+fn resolve_register_node_url(provided: Option<&str>, node_ip: &str) -> String {
+    if let Some(u) = provided.map(str::trim).filter(|s| !s.is_empty()) {
+        return u.to_string();
+    }
+    let ip = node_ip.trim();
+    if ip.starts_with("http://") || ip.starts_with("https://") {
+        return ip.to_string();
+    }
+    format!("http://{ip}:8080")
+}
+
+fn network_register_base_url() -> Option<String> {
+    if let Ok(u) = std::env::var("QUAZAR_NETWORK_URL") {
+        let u = u.trim().trim_end_matches('/').to_string();
+        if !u.is_empty() {
+            return Some(u);
+        }
+    }
+    let bootstrap = std::env::var("QUAZAR_BOOTSTRAP_PEERS").ok()?;
+    for entry in bootstrap.split(',') {
+        let entry = entry.trim();
+        if entry.is_empty() {
+            continue;
+        }
+        let (_, url) = entry.split_once('@')?;
+        return Some(url.trim().trim_end_matches('/').to_string());
+    }
+    None
+}
+
+/// STEP 7: joining mayor node registers with the network using application credentials.
+pub async fn register_mayor_node_started(
+    state: Arc<AppState>,
+    req: MayorNodeStartedRequest,
+) -> Result<MayorNodeStartedResponse, MayorError> {
+    let node_id = req.node_id.trim();
+    if node_id.is_empty() {
+        return Err(MayorError::bad_request("node_id обязателен"));
+    }
+    if req.node_secret.trim().is_empty() {
+        return Err(MayorError::bad_request("node_secret обязателен"));
+    }
+
+    let app = sqlx::query_as::<_, MayorConfirmApplicationRow>(
+        r#"
+        SELECT id, citizen_id, node_ip, node_id, node_secret, status, package_delivered_at
+        FROM mayor_applications
+        WHERE node_id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(node_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?
+    .ok_or_else(|| MayorError::not_found("Заявка для этого node_id не найдена"))?;
+
+    let stored_secret = app
+        .node_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| MayorError::bad_request("У заявки не задан node_secret"))?;
+
+    if !node_secrets_match(stored_secret, &req.node_secret) {
+        return Err(MayorError::forbidden("Неверный node_secret"));
+    }
+
+    if app.package_delivered_at.is_none() {
+        return Err(MayorError::bad_request(
+            "Пакет установки ещё не выдан (package_delivered_at)",
+        ));
+    }
+
+    match app.status.as_str() {
+        "pending" | "approved" => {}
+        "confirmed" => {
+            return Err(MayorError::bad_request(
+                "Заявка уже подтверждена (confirmed)",
+            ));
+        }
+        "timed_out" => {
+            return Err(MayorError::bad_request("Срок заявки истёк"));
+        }
+        other => {
+            return Err(MayorError::bad_request(format!(
+                "Регистрация недоступна для статуса заявки: {other}"
+            )));
+        }
+    }
+
+    let citizen_name: String = sqlx::query_scalar("SELECT name FROM citizens WHERE id = $1")
+        .bind(&app.citizen_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Гражданин заявки не найден"))?;
+
+    let node_url = resolve_register_node_url(req.url.as_deref(), &app.node_ip);
+    let version = resolve_network_version(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+    let now = Utc::now();
+
+    let peer = Node {
+        id: node_id.to_string(),
+        url: node_url.clone(),
+        public_key: None,
+        status: NodeStatus::Alive,
+        last_seen: now,
+        version: version.clone(),
+    };
+    state
+        .node_registry
+        .upsert_node(&peer)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    sqlx::query(
+        r#"
+        UPDATE mayor_applications
+        SET status = 'approved'
+        WHERE id = $1 AND status IN ('pending', 'approved')
+        "#,
+    )
+    .bind(app.id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let event_id = format!("node_started_{}_{}", node_id, now.timestamp());
+    let event = build_signed_node_started_event(
+        &event_id,
+        &app.id.to_string(),
+        &app.citizen_id,
+        &citizen_name,
+        node_id,
+        &node_url,
+        &version,
+        &state.node_id,
+        now.timestamp(),
+    );
+
+    submit_mayor_pending_event(state.clone(), event).await?;
+
+    Ok(MayorNodeStartedResponse {
+        application_id: app.id.to_string(),
+        node_id: node_id.to_string(),
+        event_id,
+        status: "approved".to_string(),
+    })
+}
+
+pub async fn mayor_node_started_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MayorNodeStartedRequest>,
+) -> impl IntoResponse {
+    match register_mayor_node_started(state, req).await {
+        Ok(resp) => Json(ApiResponse::success(resp)).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+/// On startup, a new mayor node POSTs to the bootstrap network URL to register (STEP 7).
+pub async fn register_mayor_node_with_network_on_startup(state: Arc<AppState>) {
+    if state.node_id == "QZ-NODE" {
+        return;
+    }
+
+    let Some(base) = network_register_base_url() else {
+        return;
+    };
+
+    let secret = match std::env::var("QUAZAR_NODE_SECRET") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => return,
+    };
+
+    let node_url = std::env::var("QUAZAR_NODE_URL").unwrap_or_else(|_| {
+        resolve_register_node_url(None, "127.0.0.1")
+    });
+
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+
+    let url = format!("{base}/api/mayor/node-started");
+    let body = serde_json::json!({
+        "node_id": state.node_id,
+        "node_secret": secret,
+        "url": node_url,
+    });
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "mayor node-started startup: http client");
+            return;
+        }
+    };
+
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!(url = %url, node_id = %state.node_id, "mayor node registered with network");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(http = %status, body = %text, url = %url, "mayor node-started request failed");
+        }
+        Err(e) => tracing::warn!(error = %e, url = %url, "mayor node-started request error"),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct MayorConfirmRequest {
+    pub node_id: String,
+    pub node_secret: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MayorConfirmResponse {
+    pub application_id: String,
+    pub event_id: String,
+    pub status: String,
+}
+
+fn normalize_node_secret(secret: &str) -> String {
+    let s = secret.trim();
+    let s = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")).unwrap_or(s);
+    s.to_lowercase()
+}
+
+fn node_secrets_match(stored: &str, provided: &str) -> bool {
+    normalize_node_secret(stored) == normalize_node_secret(provided)
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct MayorConfirmApplicationRow {
+    id: Uuid,
+    citizen_id: String,
+    node_ip: String,
+    node_id: Option<String>,
+    node_secret: Option<String>,
+    status: String,
+    package_delivered_at: Option<chrono::DateTime<Utc>>,
+}
+
+async fn network_block_count(pool: &PgPool) -> Result<i64, MayorError> {
+    sqlx::query_scalar("SELECT COUNT(*)::BIGINT FROM blocks")
+        .fetch_one(pool)
+        .await
+        .map(|n: i64| n)
+        .map_err(|e| MayorError::Database(e.to_string()))
+}
+
+async fn fetch_peer_block_count(peer_url: &str) -> Result<i64, MayorError> {
+    let base = peer_url.trim().trim_end_matches('/');
+    let url = format!("{base}/status");
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(8))
+        .build()
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| MayorError::bad_request(format!("Не удалось опросить узел ({url}): {e}")))?;
+
+    if !resp.status().is_success() {
+        return Err(MayorError::bad_request(format!(
+            "Узел вернул HTTP {} на /status",
+            resp.status()
+        )));
+    }
+
+    let body: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| MayorError::bad_request(format!("Некорректный ответ /status: {e}")))?;
+
+    let blocks = body
+        .get("data")
+        .and_then(|d| d.get("blocks"))
+        .and_then(|v| v.as_i64())
+        .or_else(|| body.get("blocks").and_then(|v| v.as_i64()))
+        .ok_or_else(|| MayorError::bad_request("Ответ /status не содержит поле blocks"))?;
+
+    Ok(blocks)
+}
+
+/// Verifies the mayor node is registered, package was delivered, and chain height matches the network.
+pub async fn verify_mayor_node_synced(
+    state: &AppState,
+    app: &MayorConfirmApplicationRow,
+) -> Result<(), MayorError> {
+    if app.package_delivered_at.is_none() {
+        return Err(MayorError::bad_request(
+            "Пакет установки ещё не выдан (package_delivered_at)",
+        ));
+    }
+
+    let node_id = app
+        .node_id
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| MayorError::bad_request("У заявки не назначен node_id"))?;
+
+    let network_blocks = network_block_count(&state.db).await?;
+
+    let node_row: Option<(String, String, chrono::DateTime<Utc>)> = sqlx::query_as(
+        "SELECT url, status, last_seen FROM nodes WHERE id = $1",
+    )
+    .bind(node_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let (node_url, node_status, last_seen) = node_row.ok_or_else(|| {
+        MayorError::bad_request("Узел ещё не зарегистрирован в сети (ожидается NodeStarted)")
+    })?;
+
+    if node_status != "alive" {
+        return Err(MayorError::bad_request(format!(
+            "Узел {node_id} не в статусе alive (текущий: {node_status})"
+        )));
+    }
+
+    let stale_cutoff = Utc::now() - chrono::Duration::minutes(15);
+    if last_seen < stale_cutoff {
+        return Err(MayorError::bad_request(
+            "Узел не отмечен как недавно активный (last_seen > 15 мин)",
+        ));
+    }
+
+    let peer_blocks = if state.node_id == node_id {
+        network_blocks
+    } else {
+        let url = if node_url.trim().is_empty() {
+            format!("http://{}:8080", app.node_ip.trim())
+        } else {
+            node_url
+        };
+        fetch_peer_block_count(&url).await?
+    };
+
+    if network_blocks > 0 && peer_blocks < network_blocks {
+        return Err(MayorError::bad_request(format!(
+            "Узел не синхронизирован: blocks={peer_blocks}, ожидается >= {network_blocks}"
+        )));
+    }
+
+    Ok(())
+}
+
+async fn submit_mayor_pending_event(
+    state: Arc<AppState>,
+    event: Event,
+) -> Result<(), MayorError> {
+    EventValidator::validate_event(&event, &state.db)
+        .await
+        .map_err(|e| MayorError::bad_request(e.message()))?;
+
+    match pending::insert(&state.db, &event).await {
+        Ok(pending::PendingInsertResult::Inserted) => {}
+        Ok(pending::PendingInsertResult::AlreadyExists) => return Ok(()),
+        Err(e) => return Err(MayorError::Database(e.to_string())),
+    }
+
+    let state_gossip = state.clone();
+    let event_gossip = event.clone();
+    tokio::spawn(async move {
+        gossip::push_pending_to_peers(&state_gossip, &event_gossip).await;
+    });
+
+    let state_clone = state.clone();
+    tokio::spawn(async move {
+        block_producer::try_create_block(state_clone).await;
+    });
+
+    Ok(())
+}
+
+/// Confirms mayorship after STEP 7 register + sync. Bypasses election/candidacy via `MayorConfirmed`.
+pub async fn confirm_mayor_node(
+    state: Arc<AppState>,
+    node_id: &str,
+    node_secret: &str,
+) -> Result<MayorConfirmResponse, MayorError> {
+    let node_id = node_id.trim();
+    if node_id.is_empty() {
+        return Err(MayorError::bad_request("node_id обязателен"));
+    }
+    if node_secret.trim().is_empty() {
+        return Err(MayorError::bad_request("node_secret обязателен"));
+    }
+
+    let app = sqlx::query_as::<_, MayorConfirmApplicationRow>(
+        r#"
+        SELECT id, citizen_id, node_ip, node_id, node_secret, status, package_delivered_at
+        FROM mayor_applications
+        WHERE node_id = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(node_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?
+    .ok_or_else(|| MayorError::not_found("Заявка для этого node_id не найдена"))?;
+
+    let stored_secret = app
+        .node_secret
+        .as_deref()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| MayorError::bad_request("У заявки не задан node_secret"))?;
+
+    if !node_secrets_match(stored_secret, node_secret) {
+        return Err(MayorError::forbidden("Неверный node_secret"));
+    }
+
+    if app.status == "confirmed" {
+        return Ok(MayorConfirmResponse {
+            application_id: app.id.to_string(),
+            event_id: format!("mayor_confirmed_{}", app.id),
+            status: "confirmed".to_string(),
+        });
+    }
+
+    if app.status != "approved" {
+        return Err(MayorError::bad_request(format!(
+            "Подтверждение доступно только после регистрации узла (статус approved, сейчас: {})",
+            app.status
+        )));
+    }
+
+    verify_mayor_node_synced(&state, &app).await?;
+
+    let citizen_name: String = sqlx::query_scalar("SELECT name FROM citizens WHERE id = $1")
+        .bind(&app.citizen_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Гражданин заявки не найден"))?;
+
+    let event_id = format!("mayor_confirmed_{}", app.id);
+    let timestamp = Utc::now().timestamp();
+    let event = build_signed_mayor_confirmed_event(
+        &event_id,
+        &app.id.to_string(),
+        &app.citizen_id,
+        &citizen_name,
+        node_id,
+        &state.node_id,
+        timestamp,
+    );
+
+    submit_mayor_pending_event(state, event).await?;
+
+    Ok(MayorConfirmResponse {
+        application_id: app.id.to_string(),
+        event_id,
+        status: "pending_confirmation".to_string(),
+    })
+}
+
+/// Called after STEP 7 `NodeStarted` on the coordinating node (same checks, no secret re-check).
+pub async fn try_confirm_mayor_after_node_started(
+    state: Arc<AppState>,
+    node_id: &str,
+) -> Result<Option<MayorConfirmResponse>, MayorError> {
+    let row: Option<(String, String)> = sqlx::query_as(
+        "SELECT node_secret, status FROM mayor_applications WHERE node_id = $1",
+    )
+    .bind(node_id.trim())
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let Some((secret, status)) = row else {
+        return Ok(None);
+    };
+
+    if status == "confirmed" {
+        return Ok(None);
+    }
+    if status != "approved" {
+        return Ok(None);
+    }
+
+    let resp = confirm_mayor_node(state, node_id, &secret).await?;
+    Ok(Some(resp))
+}
+
+pub async fn mayor_confirm_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MayorConfirmRequest>,
+) -> impl IntoResponse {
+    match confirm_mayor_node(state, &req.node_id, &req.node_secret).await {
+        Ok(resp) => Json(ApiResponse::success(resp)).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+/// New mayor nodes request confirmation from bootstrap after background sync.
+pub async fn maybe_request_mayor_confirmation_on_startup(state: Arc<AppState>) {
+    if std::env::var("QUAZAR_BOOTSTRAP_PEERS")
+        .map(|v| v.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return;
+    }
+
+    let node_id = state.node_id.clone();
+    let secret = match std::env::var("QUAZAR_NODE_SECRET") {
+        Ok(s) if !s.trim().is_empty() => s,
+        _ => return,
+    };
+
+    let status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM mayor_applications WHERE node_id = $1",
+    )
+    .bind(&node_id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    if status.as_deref() != Some("approved") {
+        return;
+    }
+
+    let policy = block_producer::BlockPolicy::from_env();
+    let wait_secs = policy.sync_interval_secs.saturating_mul(2).max(30);
+    tokio::time::sleep(std::time::Duration::from_secs(wait_secs)).await;
+
+    let bootstrap = std::env::var("QUAZAR_BOOTSTRAP_PEERS").unwrap_or_default();
+    let Some(first) = bootstrap.split(',').map(str::trim).find(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some((_peer_id, peer_url)) = first.split_once('@') else {
+        tracing::warn!(entry = %first, "cannot request mayor confirm: invalid bootstrap format");
+        return;
+    };
+
+    let url = format!(
+        "{}/api/mayor/confirm",
+        peer_url.trim().trim_end_matches('/')
+    );
+    let body = serde_json::json!({
+        "node_id": node_id,
+        "node_secret": secret,
+    });
+
+    let client = match reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, "mayor confirm startup: http client");
+            return;
+        }
+    };
+
+    match client.post(&url).json(&body).send().await {
+        Ok(resp) if resp.status().is_success() => {
+            tracing::info!(url = %url, "mayor confirmation requested from bootstrap");
+        }
+        Ok(resp) => {
+            let status = resp.status();
+            let text = resp.text().await.unwrap_or_default();
+            tracing::warn!(http = %status, body = %text, "mayor confirm request failed");
+        }
+        Err(e) => tracing::warn!(error = %e, url = %url, "mayor confirm request error"),
+    }
+}
+
+pub async fn mayor_setup_package_handler(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<MayorSetupPackageQuery>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
+    let api_key = match resolve_setup_api_key(&query, &headers) {
+        Ok(k) => k,
+        Err(e) => return e.to_response().into_response(),
+    };
+    match build_mayor_setup_package(state, &query.ip, &api_key).await {
+        Ok(pkg) => Json(ApiResponse::success(pkg)).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+// --- HTTP handlers (elections) ---
+
+pub async fn mayor_apply_handler(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MayorApplyRequest>,
+) -> impl IntoResponse {
+    match apply_for_mayor_node(state, &auth, req).await {
+        Ok(resp) => (StatusCode::CREATED, Json(ApiResponse::success(resp))).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+pub async fn mayor_application_status_handler(
+    State(state): State<Arc<AppState>>,
+    Path(application_id): Path<String>,
+) -> impl IntoResponse {
+    let application_id = match Uuid::parse_str(application_id.trim()) {
+        Ok(id) => id,
+        Err(_) => {
+            return MayorError::bad_request("Некорректный идентификатор заявки")
+                .to_response()
+                .into_response();
+        }
+    };
+
+    match get_mayor_application_status(&state.db, application_id).await {
+        Ok(resp) => Json(ApiResponse::success(resp)).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+pub async fn mayor_package_handler(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let application_id = match Uuid::parse_str(id.trim()) {
+        Ok(u) => u,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error("Некорректный идентификатор заявки")),
+            )
+                .into_response();
+        }
+    };
+    match deliver_mayor_node_package(state, &auth, application_id).await {
+        Ok(params) => Json(ApiResponse::success(params)).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
 
 pub async fn create_election_handler(
     Extension(auth): Extension<AuthContext>,
@@ -1009,6 +2308,7 @@ pub async fn list_elections_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::TimeZone;
 
     #[test]
     fn absolute_majority_is_fifty_percent_plus_one() {
@@ -1057,5 +2357,37 @@ mod tests {
         assert!(!agent.can_vote());
         let citizen = AuthContext::from_api_key("alice".into(), Role::Citizen);
         assert!(citizen.can_vote_in_election());
+    }
+
+    #[test]
+    fn node_secret_normalization_matches_install_script() {
+        assert!(node_secrets_match("0xAbCd", "abcd"));
+        assert!(node_secrets_match("0xABCD", "0xabcd"));
+        assert!(!node_secrets_match("abcd", "abce"));
+    }
+
+    #[test]
+    fn mayor_application_status_messages() {
+        let now = Utc.with_ymd_and_hms(2026, 1, 1, 12, 0, 0).unwrap();
+        let expires = now + Duration::hours(23);
+        let msg = mayor_application_status_message("pending", None, expires, now);
+        assert!(msg.contains("23"));
+        assert!(msg.contains("Узел ещё не запущен"));
+
+        let approved = mayor_application_status_message(
+            "approved",
+            Some("QZ-NODE-3"),
+            expires,
+            now,
+        );
+        assert!(approved.contains("QZ-NODE-3"));
+        assert!(approved.contains("синхронизации"));
+
+        let confirmed =
+            mayor_application_status_message("confirmed", Some("QZ-NODE-3"), expires, now);
+        assert!(confirmed.contains("успешно"));
+
+        let timed_out = mayor_application_status_message("timed_out", None, expires, now);
+        assert!(timed_out.contains("истёк"));
     }
 }

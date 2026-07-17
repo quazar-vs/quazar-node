@@ -102,7 +102,12 @@ fn is_public_auth_path(path: &str) -> bool {
 
 /// Application endpoints: `/api/application*` — 10 req/min per IP.
 fn is_public_application_path(path: &str) -> bool {
-    path == "/api/application" || path.starts_with("/api/application/")
+    path == "/api/application"
+        || path.starts_with("/api/application/")
+        || path == "/api/mayor/setup-package"
+        || path.starts_with("/api/mayor/status/")
+        || path == "/api/mayor/node-started"
+        || path == "/api/mayor/confirm"
 }
 
 /// Other abuse-sensitive public endpoints — 20 req/min per IP.

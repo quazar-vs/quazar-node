@@ -38,6 +38,7 @@ mod initiative;
 mod keys;
 mod mayor;
 mod models;
+mod node_generator;
 mod nodes;
 mod pending;
 mod projection;
@@ -83,7 +84,9 @@ use referendum::{
 };
 use mayor::{
     create_election_handler, endorse_handler, finalize_handler, get_election_handler,
-    list_elections_handler, nominate_handler as mayor_nominate_handler,
+    list_elections_handler, mayor_application_status_handler, mayor_apply_handler,
+    mayor_confirm_handler, mayor_node_started_handler, mayor_package_handler,
+    mayor_setup_package_handler, nominate_handler as mayor_nominate_handler,
     start_election_handler, vote_handler as mayor_vote_handler,
 };
 use handlers::background_sync;
@@ -244,6 +247,13 @@ async fn main() {
         .route("/referendum/:id", get(get_referendum_handler))
         .route("/mayor/list", get(list_elections_handler))
         .route("/mayor/:id", get(get_election_handler))
+        .route("/api/mayor/setup-package", get(mayor_setup_package_handler))
+        .route(
+            "/api/mayor/status/:id",
+            get(mayor_application_status_handler),
+        )
+        .route("/api/mayor/node-started", post(mayor_node_started_handler))
+        .route("/api/mayor/confirm", post(mayor_confirm_handler))
         .route("/chat/admin/send", post(admin_send_message_handler))
         // Public abuse limits: register/apply 5/min, auth/application 10/min,
         // channel/search/admin-send 20/min (per IP).
@@ -328,6 +338,8 @@ async fn main() {
         .route("/mayor/:id/start", post(start_election_handler))
         .route("/mayor/:id/vote", post(mayor_vote_handler))
         .route("/mayor/:id/finalize", post(finalize_handler))
+        .route("/api/mayor/apply", post(mayor_apply_handler))
+        .route("/api/mayor/:id/package", get(mayor_package_handler))
         .route("/chat/messages", get(list_messages_handler))
         .route("/chat/search", get(search_messages_handler))
         .route("/chat/send", post(send_message_handler))
