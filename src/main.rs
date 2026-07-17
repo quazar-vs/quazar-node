@@ -313,11 +313,14 @@ async fn main() {
         .route("/citizen/:id/passport", post(issue_passport))
         .route("/citizen/:id/passport/revoke", post(revoke_passport))
         .route("/candidacy/nominate", post(nominate_handler))
+        // vote body: {"vote": "For" | "Against"}
         .route("/candidacy/:id/vote", post(vote_handler))
         .route("/candidacy/:id/appoint", post(appoint_handler))
         .route("/initiative/propose", post(propose_initiative_handler))
+        // vote body: {"vote": "For" | "Against"}
         .route("/initiative/:id/vote", post(vote_initiative_handler))
         .route("/referendum/announce", post(announce_handler))
+        // vote body: {"vote": "For" | "Against"}
         .route("/referendum/:id/vote", post(vote_referendum_handler))
         .route("/mayor/election", post(create_election_handler))
         .route("/mayor/nominate", post(mayor_nominate_handler))

@@ -266,8 +266,8 @@ async fn apply_candidate_nominated(
 
     sqlx::query(
         r#"
-        INSERT INTO candidacies (id, citizen_id, target_role, status, votes_for, votes_against, votes_abstain, threshold, nominator_id, created_at)
-        VALUES ($1, $2, $3, 'Active', 0, 0, 0, $4, $5, to_timestamp($6))
+        INSERT INTO candidacies (id, citizen_id, target_role, status, votes_for, votes_against, threshold, nominator_id, created_at)
+        VALUES ($1, $2, $3, 'Active', 0, 0, $4, $5, to_timestamp($6))
         ON CONFLICT (id) DO NOTHING
         "#,
     )
@@ -314,8 +314,7 @@ async fn apply_candidate_voted(
         r#"
         UPDATE candidacies SET
             votes_for = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'For'),
-            votes_against = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'Against'),
-            votes_abstain = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'Abstain')
+            votes_against = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'Against')
         WHERE id = $1
         "#,
     )
@@ -428,8 +427,8 @@ async fn apply_law_proposed(
 
     sqlx::query(
         r#"
-        INSERT INTO initiatives (id, title, description, status, proposer_id, votes_for, votes_against, votes_abstain, threshold, created_at)
-        VALUES ($1, $2, $3, 'Proposed', $4, 0, 0, 0, $5, to_timestamp($6))
+        INSERT INTO initiatives (id, title, description, status, proposer_id, votes_for, votes_against, threshold, created_at)
+        VALUES ($1, $2, $3, 'Proposed', $4, 0, 0, $5, to_timestamp($6))
         ON CONFLICT (id) DO NOTHING
         "#,
     )
@@ -528,8 +527,7 @@ async fn apply_vote_cast(
             r#"
             UPDATE initiatives SET
                 votes_for = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'For'),
-                votes_against = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'Against'),
-                votes_abstain = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'Abstain')
+                votes_against = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'Against')
             WHERE id = $1
             "#,
         )
@@ -567,8 +565,7 @@ async fn apply_vote_cast(
                 r#"
                 UPDATE referendums SET
                     votes_for = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'For'),
-                    votes_against = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'Against'),
-                    votes_abstain = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'Abstain')
+                    votes_against = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'Against')
                 WHERE id = $1
                 "#,
             )
@@ -598,8 +595,8 @@ async fn apply_election_announced(
 
     sqlx::query(
         r#"
-        INSERT INTO referendums (id, title, description, target_decision, status, announcer_id, votes_for, votes_against, votes_abstain, created_at)
-        VALUES ($1, $2, $3, $4, 'Active', $5, 0, 0, 0, to_timestamp($6))
+        INSERT INTO referendums (id, title, description, target_decision, status, announcer_id, votes_for, votes_against, created_at)
+        VALUES ($1, $2, $3, $4, 'Active', $5, 0, 0, to_timestamp($6))
         ON CONFLICT (id) DO NOTHING
         "#,
     )

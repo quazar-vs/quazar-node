@@ -22,7 +22,7 @@ use crate::gossip;
 use crate::models::Event;
 use crate::pending;
 use crate::response::{self, ApiResponse};
-use crate::types::Role;
+use crate::types::{is_role_candidacy_target, Role};
 use crate::validator::EventValidator;
 use crate::AppState;
 
@@ -61,7 +61,6 @@ impl CandidacyStatus {
 pub enum CandidacyVoteChoice {
     For,
     Against,
-    Abstain,
 }
 
 impl CandidacyVoteChoice {
@@ -69,7 +68,6 @@ impl CandidacyVoteChoice {
         match self {
             CandidacyVoteChoice::For => "For",
             CandidacyVoteChoice::Against => "Against",
-            CandidacyVoteChoice::Abstain => "Abstain",
         }
     }
 
@@ -77,7 +75,6 @@ impl CandidacyVoteChoice {
         match s {
             "For" => Some(CandidacyVoteChoice::For),
             "Against" => Some(CandidacyVoteChoice::Against),
-            "Abstain" => Some(CandidacyVoteChoice::Abstain),
             _ => None,
         }
     }
@@ -109,7 +106,6 @@ pub struct CandidacyRow {
     pub status: String,
     pub votes_for: i32,
     pub votes_against: i32,
-    pub votes_abstain: i32,
     pub threshold: i32,
     pub nominator_id: String,
     pub nominator_name: String,
@@ -154,10 +150,6 @@ pub fn approval_threshold(citizen_count: i64) -> i32 {
     }
     let votes = (citizen_count * APPROVAL_PERCENT + 99) / 100;
     votes.max(1) as i32
-}
-
-pub fn is_elevated_role(role: &str) -> bool {
-    crate::types::is_governance_role_str(role) || role == "Mayor"
 }
 
 async fn citizen_count(pool: &PgPool) -> Result<i64, CandidacyError> {
@@ -252,7 +244,6 @@ const CANDIDACY_SELECT: &str = r#"
         c.status,
         c.votes_for,
         c.votes_against,
-        c.votes_abstain,
         c.threshold,
         c.nominator_id,
         nom.name AS nominator_name,
@@ -302,9 +293,9 @@ pub async fn nominate_candidate(
     ensure_can_participate(&state.db, &nominator_id).await?;
 
     let target_role = req.target_role.trim().to_string();
-    if !is_elevated_role(&target_role) {
+    if !is_role_candidacy_target(&target_role) {
         return Err(CandidacyError::bad_request(
-            "target_role must be Guardian, Judge, Aiya, or Mayor",
+            "target_role must be Citizen, Guardian, Judge, Aiya, or Mayor",
         ));
     }
     if Role::from_str(&target_role).is_none() {
@@ -326,8 +317,8 @@ pub async fn nominate_candidate(
     let now = Utc::now();
 
     sqlx::query(
-        "INSERT INTO candidacies (id, citizen_id, target_role, status, votes_for, votes_against, votes_abstain, threshold, nominator_id, created_at)
-         VALUES ($1, $2, $3, 'Active', 0, 0, 0, $4, $5, $6)",
+        "INSERT INTO candidacies (id, citizen_id, target_role, status, votes_for, votes_against, threshold, nominator_id, created_at)
+         VALUES ($1, $2, $3, 'Active', 0, 0, $4, $5, $6)",
     )
     .bind(&candidacy_id)
     .bind(&cid)
@@ -366,8 +357,7 @@ async fn refresh_vote_counts(pool: &PgPool, candidacy_id: &str) -> Result<(), Ca
         r#"
         UPDATE candidacies SET
             votes_for = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'For'),
-            votes_against = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'Against'),
-            votes_abstain = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'Abstain')
+            votes_against = (SELECT COUNT(*)::int FROM candidacy_votes WHERE candidacy_id = $1 AND vote = 'Against')
         WHERE id = $1
         "#,
     )
@@ -457,7 +447,7 @@ pub async fn vote_for_candidate(
     ensure_can_participate(&state.db, &voter_id).await?;
 
     let choice = CandidacyVoteChoice::from_str(req.vote.trim())
-        .ok_or_else(|| CandidacyError::bad_request("vote must be For, Against, or Abstain"))?;
+        .ok_or_else(|| CandidacyError::bad_request("vote must be For or Against"))?;
 
     let candidacy = fetch_candidacy(&state.db, candidacy_id).await?;
     if candidacy.status != CandidacyStatus::Active.as_str() {
@@ -729,12 +719,13 @@ mod tests {
     }
 
     #[test]
-    fn elevated_roles_only() {
-        assert!(is_elevated_role("Guardian"));
-        assert!(is_elevated_role("Judge"));
-        assert!(is_elevated_role("Aiya"));
-        assert!(is_elevated_role("Mayor"));
-        assert!(!is_elevated_role("Citizen"));
+    fn role_candidacy_targets() {
+        assert!(is_role_candidacy_target("Citizen"));
+        assert!(is_role_candidacy_target("Guardian"));
+        assert!(is_role_candidacy_target("Judge"));
+        assert!(is_role_candidacy_target("Aiya"));
+        assert!(is_role_candidacy_target("Mayor"));
+        assert!(!is_role_candidacy_target("Founder"));
     }
 
     #[test]

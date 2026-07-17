@@ -56,7 +56,6 @@ impl InitiativeStatus {
 pub enum InitiativeVoteChoice {
     For,
     Against,
-    Abstain,
 }
 
 impl InitiativeVoteChoice {
@@ -64,7 +63,6 @@ impl InitiativeVoteChoice {
         match self {
             InitiativeVoteChoice::For => "For",
             InitiativeVoteChoice::Against => "Against",
-            InitiativeVoteChoice::Abstain => "Abstain",
         }
     }
 
@@ -72,7 +70,6 @@ impl InitiativeVoteChoice {
         match s {
             "For" => Some(InitiativeVoteChoice::For),
             "Against" => Some(InitiativeVoteChoice::Against),
-            "Abstain" => Some(InitiativeVoteChoice::Abstain),
             _ => None,
         }
     }
@@ -104,7 +101,6 @@ pub struct InitiativeRow {
     pub proposer_name: String,
     pub votes_for: i32,
     pub votes_against: i32,
-    pub votes_abstain: i32,
     pub threshold: i32,
     pub created_at: chrono::DateTime<Utc>,
     pub passed_at: Option<chrono::DateTime<Utc>>,
@@ -240,7 +236,6 @@ const INITIATIVE_SELECT: &str = r#"
         p.name AS proposer_name,
         i.votes_for,
         i.votes_against,
-        i.votes_abstain,
         i.threshold,
         i.created_at,
         i.passed_at
@@ -263,8 +258,7 @@ async fn refresh_vote_counts(pool: &PgPool, initiative_id: &str) -> Result<(), I
         r#"
         UPDATE initiatives SET
             votes_for = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'For'),
-            votes_against = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'Against'),
-            votes_abstain = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'Abstain')
+            votes_against = (SELECT COUNT(*)::int FROM initiative_votes WHERE initiative_id = $1 AND vote = 'Against')
         WHERE id = $1
         "#,
     )
@@ -294,8 +288,8 @@ pub async fn propose_initiative(
     let now = Utc::now();
 
     sqlx::query(
-        "INSERT INTO initiatives (id, title, description, status, proposer_id, votes_for, votes_against, votes_abstain, threshold, created_at)
-         VALUES ($1, $2, $3, 'Proposed', $4, 0, 0, 0, $5, $6)",
+        "INSERT INTO initiatives (id, title, description, status, proposer_id, votes_for, votes_against, threshold, created_at)
+         VALUES ($1, $2, $3, 'Proposed', $4, 0, 0, $5, $6)",
     )
     .bind(&initiative_id)
     .bind(&title)
@@ -394,7 +388,7 @@ pub async fn vote_on_initiative(
     ensure_can_participate(&state.db, &voter_id).await?;
 
     let choice = InitiativeVoteChoice::from_str(req.vote.trim())
-        .ok_or_else(|| InitiativeError::bad_request("vote must be For, Against, or Abstain"))?;
+        .ok_or_else(|| InitiativeError::bad_request("vote must be For or Against"))?;
 
     let initiative = fetch_initiative(&state.db, initiative_id).await?;
     if initiative.status != InitiativeStatus::Proposed.as_str() {

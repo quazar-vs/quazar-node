@@ -51,7 +51,6 @@ impl ReferendumStatus {
 pub enum ReferendumVoteChoice {
     For,
     Against,
-    Abstain,
 }
 
 impl ReferendumVoteChoice {
@@ -59,7 +58,6 @@ impl ReferendumVoteChoice {
         match self {
             ReferendumVoteChoice::For => "For",
             ReferendumVoteChoice::Against => "Against",
-            ReferendumVoteChoice::Abstain => "Abstain",
         }
     }
 
@@ -67,7 +65,6 @@ impl ReferendumVoteChoice {
         match s {
             "For" => Some(ReferendumVoteChoice::For),
             "Against" => Some(ReferendumVoteChoice::Against),
-            "Abstain" => Some(ReferendumVoteChoice::Abstain),
             _ => None,
         }
     }
@@ -101,7 +98,6 @@ pub struct ReferendumRow {
     pub announcer_name: String,
     pub votes_for: i32,
     pub votes_against: i32,
-    pub votes_abstain: i32,
     pub created_at: chrono::DateTime<Utc>,
     pub completed_at: Option<chrono::DateTime<Utc>>,
 }
@@ -222,7 +218,6 @@ const REFERENDUM_SELECT: &str = r#"
         a.name AS announcer_name,
         r.votes_for,
         r.votes_against,
-        r.votes_abstain,
         r.created_at,
         r.completed_at
     FROM referendums r
@@ -244,8 +239,7 @@ async fn refresh_vote_counts(pool: &PgPool, referendum_id: &str) -> Result<(), R
         r#"
         UPDATE referendums SET
             votes_for = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'For'),
-            votes_against = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'Against'),
-            votes_abstain = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'Abstain')
+            votes_against = (SELECT COUNT(*)::int FROM referendum_votes WHERE referendum_id = $1 AND vote = 'Against')
         WHERE id = $1
         "#,
     )
@@ -282,8 +276,8 @@ pub async fn announce_referendum(
     let now = Utc::now();
 
     sqlx::query(
-        "INSERT INTO referendums (id, title, description, target_decision, status, announcer_id, votes_for, votes_against, votes_abstain, created_at)
-         VALUES ($1, $2, $3, $4, 'Active', $5, 0, 0, 0, $6)",
+        "INSERT INTO referendums (id, title, description, target_decision, status, announcer_id, votes_for, votes_against, created_at)
+         VALUES ($1, $2, $3, $4, 'Active', $5, 0, 0, $6)",
     )
     .bind(&referendum_id)
     .bind(&title)
@@ -328,7 +322,7 @@ pub async fn vote_on_referendum(
     ensure_can_participate(&state.db, &voter_id).await?;
 
     let choice = ReferendumVoteChoice::from_str(req.vote.trim())
-        .ok_or_else(|| ReferendumError::bad_request("vote must be For, Against, or Abstain"))?;
+        .ok_or_else(|| ReferendumError::bad_request("vote must be For or Against"))?;
 
     let referendum = fetch_referendum(&state.db, referendum_id).await?;
     if referendum.status != ReferendumStatus::Active.as_str() {

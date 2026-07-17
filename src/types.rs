@@ -130,7 +130,7 @@ impl CandidateType {
 
 /// Roles that may appear as `target_role` for a role candidacy.
 pub fn is_role_candidacy_target(role: &str) -> bool {
-    matches!(role, "Guardian" | "Judge" | "Aiya" | "Mayor")
+    matches!(role, "Citizen" | "Guardian" | "Judge" | "Aiya" | "Mayor")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -328,11 +328,11 @@ mod tests {
 
     #[test]
     fn role_candidacy_targets() {
+        assert!(is_role_candidacy_target("Citizen"));
         assert!(is_role_candidacy_target("Guardian"));
         assert!(is_role_candidacy_target("Judge"));
         assert!(is_role_candidacy_target("Aiya"));
         assert!(is_role_candidacy_target("Mayor"));
-        assert!(!is_role_candidacy_target("Citizen"));
         assert!(!is_role_candidacy_target("Founder"));
         assert!(!is_role_candidacy_target("Agent"));
     }

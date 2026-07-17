@@ -1,4 +1,4 @@
-use crate::types::{CityData, QuazarEventType};
+use crate::types::{is_role_candidacy_target, CityData, QuazarEventType};
 use crate::models::Event;
 use serde_json::Value;
 use sqlx::PgPool;
@@ -180,10 +180,17 @@ impl EventValidator {
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .ok_or(ValidationError::MissingRequiredField("citizen_id".to_string()))?;
-                data.get("choice")
+                let choice = data
+                    .get("choice")
                     .and_then(|v| v.as_str())
                     .filter(|s| !s.is_empty())
                     .ok_or(ValidationError::MissingRequiredField("choice".to_string()))?;
+                if !matches!(choice, "For" | "Against") {
+                    return Err(ValidationError::DataValidationFailed(format!(
+                        "Invalid vote choice: {}",
+                        choice
+                    )));
+                }
                 Ok(())
             }
             QuazarEventType::CitizenRemoved | QuazarEventType::CitizenUpdated => {
@@ -334,7 +341,7 @@ impl EventValidator {
                 Self::require_str(data, "target_role")?;
                 Self::require_str(data, "nominator_id")?;
                 let role = Self::require_str(data, "target_role")?;
-                if !matches!(role, "Guardian" | "Judge" | "Aiya") {
+                if !is_role_candidacy_target(role) {
                     return Err(ValidationError::DataValidationFailed(format!(
                         "Invalid target_role for candidacy: {}",
                         role
@@ -346,7 +353,7 @@ impl EventValidator {
                 Self::require_str(data, "candidacy_id")?;
                 Self::require_str(data, "citizen_id")?;
                 let vote = Self::require_str(data, "vote")?;
-                if !matches!(vote, "For" | "Against" | "Abstain") {
+                if !matches!(vote, "For" | "Against") {
                     return Err(ValidationError::DataValidationFailed(format!(
                         "Invalid vote: {}",
                         vote

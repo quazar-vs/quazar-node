@@ -1707,7 +1707,7 @@ pub async fn apply_for_role(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "target_role must be Guardian, Judge, Aiya, or Mayor".to_string(),
+                "target_role must be Citizen, Guardian, Judge, Aiya, or Mayor".to_string(),
             )),
         )
             .into_response();
@@ -1820,13 +1820,23 @@ pub async fn verify_citizenship_email(
     .flatten();
 
     let Some((citizen_id, role, already, stored_code, expires)) = row else {
-        return (
-            StatusCode::NOT_FOUND,
-            Json(ApiResponse::error(
-                "Заявка с этим email не найдена".to_string(),
-            )),
-        )
-            .into_response();
+        // Нет заявки: принимаем код из POST /auth/register/send-code (in-memory).
+        return match consume_verification_code(&email, &code) {
+            Ok(()) => (
+                StatusCode::OK,
+                Json(ApiResponse::success(VerifyEmailResponse {
+                    citizen_id: String::new(),
+                    email_verified: true,
+                    message: "Email подтверждён".to_string(),
+                })),
+            )
+                .into_response(),
+            Err(err) => (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(err)),
+            )
+                .into_response(),
+        };
     };
 
     if already {

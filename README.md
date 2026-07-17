@@ -182,12 +182,12 @@ curl -X POST http://localhost:8080/event \
 
 ### Кандидатуры на роли (`/candidacy`)
 
-Граждане выдвигают кандидатов на роли **Guardian**, **Judge**, **Aiya**. Другие граждане голосуют (`For` / `Against` / `Abstain`). При наборе **5% голосов «За»** от числа всех граждан кандидатура автоматически переходит в статус **Approved**. Назначение на роль выполняет только **Айя**.
+Граждане выдвигают кандидатов на роли **Guardian**, **Judge**, **Aiya**. Другие граждане голосуют (`For` / `Against`). При наборе **5% голосов «За»** от числа всех граждан кандидатура автоматически переходит в статус **Approved**. Назначение на роль выполняет только **Айя**.
 
 | Эндпоинт | Метод | Права |
 |----------|-------|-------|
 | `/candidacy/nominate` | POST | Citizen+ (active) |
-| `/candidacy/:id/vote` | POST | Citizen+ (active) |
+| `/candidacy/:id/vote` | POST | Citizen+ (active); body: `{"vote":"For"}` или `{"vote":"Against"}` |
 | `/candidacy/:id` | GET | Публичный |
 | `/candidacy/list` | GET | Публичный |
 | `/candidacy/:id/appoint` | POST | Aiya / Founder |
@@ -219,12 +219,12 @@ curl -s -X POST http://localhost:8080/candidacy/CANDIDACY-UUID/appoint \
 
 ### Инициативы (`/initiative`)
 
-Граждане предлагают законопроекты (инициативы). Другие граждане голосуют (`For` / `Against` / `Abstain`). При наборе **5% голосов «За»** инициатива автоматически переходит в статус **Passed**.
+Граждане предлагают законопроекты (инициативы). Другие граждане голосуют (`For` / `Against`). При наборе **5% голосов «За»** инициатива автоматически переходит в статус **Passed**.
 
 | Эндпоинт | Метод | Права |
 |----------|-------|-------|
 | `/initiative/propose` | POST | Citizen+ (active) |
-| `/initiative/:id/vote` | POST | Citizen+ (active) |
+| `/initiative/:id/vote` | POST | Citizen+ (active); body: `{"vote":"For"}` или `{"vote":"Against"}` |
 | `/initiative/:id` | GET | Публичный |
 | `/initiative/list` | GET | Публичный |
 
@@ -251,7 +251,7 @@ curl -s "http://localhost:8080/initiative/list?status=Proposed" | jq .
 | Эндпоинт | Метод | Права |
 |----------|-------|-------|
 | `/referendum/announce` | POST | Aiya / Founder |
-| `/referendum/:id/vote` | POST | Citizen+ (active) |
+| `/referendum/:id/vote` | POST | Citizen+ (active); body: `{"vote":"For"}` или `{"vote":"Against"}` |
 | `/referendum/:id` | GET | Публичный |
 | `/referendum/list` | GET | Публичный |
 
