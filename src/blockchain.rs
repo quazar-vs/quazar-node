@@ -952,6 +952,58 @@ pub fn build_signed_mayor_confirmed_event(
     ))
 }
 
+pub fn build_mayor_application_timed_out_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    previous_status: &str,
+    restored_status: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "MayorApplicationTimedOut".to_string(),
+        title: format!("Истечение заявки мэра {}", application_id),
+        description: format!(
+            "Заявка {} гражданина {} истекла; статус {} → {}",
+            application_id, citizen_id, previous_status, restored_status
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "application_id": application_id,
+            "citizen_id": citizen_id,
+            "previous_status": previous_status,
+            "restored_status": restored_status,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_application_timed_out_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    previous_status: &str,
+    restored_status: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_application_timed_out_event(
+        event_id,
+        application_id,
+        citizen_id,
+        previous_status,
+        restored_status,
+        initiator,
+        timestamp,
+    ))
+}
+
 pub fn build_signed_chat_history_added_event(
     event_id: &str,
     archive_id: &str,

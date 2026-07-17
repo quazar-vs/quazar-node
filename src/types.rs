@@ -182,6 +182,7 @@ pub enum QuazarEventType {
     CandidateAppointed,
     CityRegistered,
     ChatHistoryAdded,
+    MayorApplicationTimedOut,
 }
 
 impl std::fmt::Display for QuazarEventType {
@@ -240,6 +241,7 @@ impl QuazarEventType {
             "CandidateAppointed" => Ok(QuazarEventType::CandidateAppointed),
             "CityRegistered" => Ok(QuazarEventType::CityRegistered),
             "ChatHistoryAdded" => Ok(QuazarEventType::ChatHistoryAdded),
+            "MayorApplicationTimedOut" => Ok(QuazarEventType::MayorApplicationTimedOut),
             _ => Err(format!("Unknown event type: {}", s)),
         }
     }

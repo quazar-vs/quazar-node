@@ -391,6 +391,13 @@ impl EventValidator {
                 }
                 Ok(())
             }
+            QuazarEventType::MayorApplicationTimedOut => {
+                Self::require_str(data, "application_id")?;
+                Self::require_str(data, "citizen_id")?;
+                Self::require_str(data, "previous_status")?;
+                Self::require_str(data, "restored_status")?;
+                Ok(())
+            }
         }
     }
 

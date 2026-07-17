@@ -14,7 +14,10 @@ use uuid::Uuid;
 
 use crate::auth::{AuthContext, KeyStore};
 use crate::block_producer;
-use crate::blockchain::{build_signed_mayor_confirmed_event, build_signed_node_started_event};
+use crate::blockchain::{
+    build_signed_mayor_application_timed_out_event, build_signed_mayor_confirmed_event,
+    build_signed_node_started_event,
+};
 use crate::gossip;
 use crate::models::Event;
 use crate::node_generator::{
@@ -125,6 +128,9 @@ pub struct MayorSetupPackageResponse {
     pub node_id: String,
     pub node_secret: String,
     pub reg_secret: String,
+    /// Full bootstrap peer entry: `id@url` (preferred for QUAZAR_BOOTSTRAP_PEERS).
+    pub sync_peer: String,
+    /// Base URL extracted from sync_peer (no node id).
     pub peer_url: String,
     pub qz_id: String,
     pub citizen_name: String,
@@ -974,50 +980,125 @@ pub struct ExpireMayorApplicationsResult {
     pub citizens_role_reset: u64,
 }
 
-/// Mark pending mayor applications past `expires_at` as `timed_out` and reset citizen role
-/// when they are not Mayor (idempotent for citizens already on role Citizen).
-pub async fn expire_pending_mayor_applications(
-    pool: &PgPool,
-) -> Result<ExpireMayorApplicationsResult, sqlx::Error> {
-    let mayor_role = Role::Mayor.as_str();
-    let citizen_role = Role::Citizen.as_str();
+/// Restore role after a mayor node application times out.
+///
+/// - Mayor (re-application) → keep Mayor
+/// - Candidate (citizenship) → keep Candidate
+/// - Mayor candidate / Citizen / anything else → Citizen
+pub fn restored_role_after_mayor_application_timeout(previous_role: &str) -> &'static str {
+    match previous_role {
+        r if r == Role::Mayor.as_str() => Role::Mayor.as_str(),
+        r if r == Role::Candidate.as_str() => Role::Candidate.as_str(),
+        _ => Role::Citizen.as_str(),
+    }
+}
 
-    let row: (i64, i64) = sqlx::query_as(
+#[derive(Debug, sqlx::FromRow)]
+struct ExpiredMayorApplicationRow {
+    id: Uuid,
+    citizen_id: String,
+    previous_role: String,
+}
+
+/// Mark pending mayor applications past `expires_at` as `timed_out`, restore citizen role
+/// per [`restored_role_after_mayor_application_timeout`], and emit `MayorApplicationTimedOut`.
+pub async fn expire_pending_mayor_applications(
+    state: Arc<AppState>,
+) -> Result<ExpireMayorApplicationsResult, sqlx::Error> {
+    let rows = sqlx::query_as::<_, ExpiredMayorApplicationRow>(
         r#"
-        WITH expired AS (
-            UPDATE mayor_applications
-            SET status = 'timed_out'
-            WHERE status = 'pending' AND expires_at < NOW()
-            RETURNING id, citizen_id
-        ),
-        reverted AS (
-            UPDATE citizens c
-            SET role = $1
-            FROM expired e
-            WHERE c.id = e.citizen_id AND c.role <> $2
-            RETURNING c.id
-        ),
-        _keys AS (
-            UPDATE api_keys k
-            SET role = $1
-            FROM reverted r
-            WHERE k.citizen_id = r.id AND k.is_active = TRUE AND k.role <> $2
-            RETURNING k.id
-        )
-        SELECT
-            (SELECT COUNT(*)::BIGINT FROM expired),
-            (SELECT COUNT(*)::BIGINT FROM reverted)
+        SELECT a.id, a.citizen_id, c.role AS previous_role
+        FROM mayor_applications a
+        JOIN citizens c ON c.id = a.citizen_id
+        WHERE a.status = 'pending' AND a.expires_at < NOW()
+        ORDER BY a.expires_at ASC
         "#,
     )
-    .bind(citizen_role)
-    .bind(mayor_role)
-    .fetch_one(pool)
+    .fetch_all(&state.db)
     .await?;
 
-    Ok(ExpireMayorApplicationsResult {
-        applications_timed_out: row.0.max(0) as u64,
-        citizens_role_reset: row.1.max(0) as u64,
-    })
+    let mut result = ExpireMayorApplicationsResult::default();
+    let timestamp = Utc::now().timestamp();
+
+    for row in rows {
+        let restored = restored_role_after_mayor_application_timeout(&row.previous_role);
+        let previous_status = row.previous_role.clone();
+
+        let updated = sqlx::query(
+            r#"
+            UPDATE mayor_applications
+            SET status = 'timed_out'
+            WHERE id = $1 AND status = 'pending'
+            "#,
+        )
+        .bind(row.id)
+        .execute(&state.db)
+        .await?;
+
+        if updated.rows_affected() == 0 {
+            continue;
+        }
+        result.applications_timed_out += 1;
+
+        if previous_status != restored {
+            let role_upd = sqlx::query(
+                r#"
+                UPDATE citizens
+                SET role = $1
+                WHERE id = $2 AND role = $3
+                "#,
+            )
+            .bind(restored)
+            .bind(&row.citizen_id)
+            .bind(&previous_status)
+            .execute(&state.db)
+            .await?;
+
+            if role_upd.rows_affected() > 0 {
+                sqlx::query(
+                    r#"
+                    UPDATE api_keys
+                    SET role = $1
+                    WHERE citizen_id = $2 AND is_active = TRUE
+                    "#,
+                )
+                .bind(restored)
+                .bind(&row.citizen_id)
+                .execute(&state.db)
+                .await?;
+                result.citizens_role_reset += 1;
+            }
+        }
+
+        tracing::info!(
+            application_id = %row.id,
+            citizen_id = %row.citizen_id,
+            previous_status = %previous_status,
+            restored_status = %restored,
+            "mayor application timed out"
+        );
+
+        let event_id = format!("mayor_application_timed_out_{}", row.id);
+        let event = build_signed_mayor_application_timed_out_event(
+            &event_id,
+            &row.id.to_string(),
+            &row.citizen_id,
+            &previous_status,
+            restored,
+            &state.node_id,
+            timestamp,
+        );
+
+        if let Err(e) = submit_mayor_pending_event(state.clone(), event).await {
+            tracing::warn!(
+                application_id = %row.id,
+                error = ?e,
+                "failed to emit MayorApplicationTimedOut"
+            );
+        }
+    }
+
+    Ok(result)
 }
 
 pub async fn background_mayor_application_expiry(state: Arc<AppState>) {
@@ -1025,7 +1106,7 @@ pub async fn background_mayor_application_expiry(state: Arc<AppState>) {
     loop {
         interval.tick().await;
         tracing::debug!("mayor application expiry tick");
-        match expire_pending_mayor_applications(&state.db).await {
+        match expire_pending_mayor_applications(state.clone()).await {
             Ok(result) if result.applications_timed_out > 0 => {
                 tracing::info!(
                     expired_applications = result.applications_timed_out,
@@ -1039,6 +1120,13 @@ pub async fn background_mayor_application_expiry(state: Arc<AppState>) {
             }
         }
     }
+}
+
+/// Spawn the mayor application timeout worker (every 5 minutes).
+pub fn start_mayor_timeout_worker(state: Arc<AppState>) {
+    tokio::spawn(async move {
+        background_mayor_application_expiry(state).await;
+    });
 }
 
 fn is_valid_node_ip(ip: &str) -> bool {
@@ -1438,6 +1526,7 @@ pub async fn build_mayor_setup_package(
         node_id: node_id.clone(),
         node_secret: format_secret_for_package(&node_secret),
         reg_secret: network_reg_secret_for_package(),
+        sync_peer,
         peer_url,
         qz_id: app.citizen_id,
         citizen_name,
@@ -2389,5 +2478,34 @@ mod tests {
 
         let timed_out = mayor_application_status_message("timed_out", None, expires, now);
         assert!(timed_out.contains("истёк"));
+    }
+
+    #[test]
+    fn restored_role_after_timeout_keeps_mayor_and_candidate() {
+        assert_eq!(
+            restored_role_after_mayor_application_timeout("Mayor"),
+            "Mayor"
+        );
+        assert_eq!(
+            restored_role_after_mayor_application_timeout("Candidate"),
+            "Candidate"
+        );
+        assert_eq!(
+            restored_role_after_mayor_application_timeout("Citizen"),
+            "Citizen"
+        );
+        // «Кандидат в мэры» / прочие роли → Гражданин
+        assert_eq!(
+            restored_role_after_mayor_application_timeout("Guardian"),
+            "Citizen"
+        );
+        assert_eq!(
+            restored_role_after_mayor_application_timeout("Agent"),
+            "Citizen"
+        );
+        assert_eq!(
+            restored_role_after_mayor_application_timeout(""),
+            "Citizen"
+        );
     }
 }

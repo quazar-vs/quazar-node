@@ -87,7 +87,7 @@ use mayor::{
     list_elections_handler, mayor_application_status_handler, mayor_apply_handler,
     mayor_confirm_handler, mayor_node_started_handler, mayor_package_handler,
     mayor_setup_package_handler, nominate_handler as mayor_nominate_handler,
-    start_election_handler, vote_handler as mayor_vote_handler,
+    start_election_handler, start_mayor_timeout_worker, vote_handler as mayor_vote_handler,
 };
 use handlers::background_sync;
 use http::{auth_middleware, build_cors_layer, public_rate_limit_middleware, rate_limit_middleware};
@@ -206,6 +206,8 @@ async fn main() {
     tokio::spawn(async move {
         background_chat_archive(state_chat).await;
     });
+
+    start_mayor_timeout_worker(state.clone());
 
     let public_routes = Router::new()
         .route("/auth/login", post(login_handler))
