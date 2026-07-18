@@ -49,7 +49,7 @@ curl http://localhost:8080/status
 | `RECAPTCHA_SECRET_KEY` | Секретный ключ; сервер проверяет токен через `https://www.google.com/recaptcha/api/siteverify` |
 | `RECAPTCHA_MIN_SCORE` | Мин. score для v3 (default `0.5`); игнорируется для v2 |
 | `RECAPTCHA_EXPECTED_ACTION` | Опционально: ожидаемое `action` в ответе v3 |
-| `QUAZAR_TRUSTED_PROXIES` | IP/CIDR прокси через запятую; только от них доверяется `X-Forwarded-For` / `X-Real-IP` |
+| `QUAZAR_TRUSTED_PROXIES` | Доп. IP/CIDR прокси (через запятую) для `X-Forwarded-For` / `X-Real-IP`. Основной источник — таблица `nodes` (`alive`, без локальных адресов); env нужен для локального nginx (`127.0.0.1`), которого нет в реестре |
 | `QUAZAR_API_KEYS` | Доп. ключи при старте: `ключ:Роль:имя_гражданина` (через запятую) |
 | `QUAZAR_INIT_TEST_KEYS` | `true` — синхронизировать тестовые ключи в PostgreSQL |
 | `GMAIL_USER` | Gmail-адрес отправителя (например `quazarvs@gmail.com`) |

@@ -528,6 +528,7 @@ async fn candidacy_nomination_vote_approve_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
     });
 
     let nominator_auth = AuthContext::from_api_key(format!("candn{n}"), Role::Citizen);
@@ -749,6 +750,7 @@ async fn chat_send_and_list_messages() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
     });
 
     let auth = AuthContext::from_api_key(citizen_name.clone(), Role::Citizen);
@@ -852,6 +854,7 @@ async fn chat_gossip_insert_is_idempotent() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
     });
 
     let resp = gossip::receive_gossip_chat_message(&state, message.clone())
@@ -911,6 +914,7 @@ async fn initiative_propose_and_vote_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
     });
 
     let proposer_auth = AuthContext::from_api_key(proposer_name.clone(), Role::Citizen);
@@ -986,6 +990,7 @@ async fn referendum_announce_and_vote_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
     });
 
     let aiya_auth = AuthContext::from_api_key("aiya".into(), Role::Aiya);
@@ -1072,6 +1077,7 @@ async fn password_login_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
     });
 
     let check_before = check_password_handler(
@@ -1229,6 +1235,7 @@ async fn pending_citizen_login_blocked_until_passport() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
     });
 
     let pending_login = login_handler(

@@ -19,8 +19,8 @@
 # .env
 RECAPTCHA_SITE_KEY=...
 RECAPTCHA_SECRET_KEY=...
-# за reverse-proxy:
-QUAZAR_TRUSTED_PROXIES=127.0.0.1,::1,10.0.0.0/8
+# за reverse-proxy (локальный nginx; пиры из `nodes` подхватываются автоматически):
+QUAZAR_TRUSTED_PROXIES=127.0.0.1,::1
 ```
 
 ## Логин

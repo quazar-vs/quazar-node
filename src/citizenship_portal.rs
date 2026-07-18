@@ -198,7 +198,8 @@ pub async fn submit_application(
     Json(req): Json<SubmitApplicationRequest>,
 ) -> impl IntoResponse {
     // Client-side attackers can still hammer the endpoint; keep a cheap per-IP throttle.
-    let ip = client_ip::resolve_from_connect(&headers, Some(&connect));
+    let trusted = state.trusted_proxies.snapshot().await;
+    let ip = client_ip::resolve_from_connect(&headers, Some(&connect), &trusted);
     if !allow_submit(&ip) {
         return response::too_many_requests(
             "Слишком часто. Подождите минуту и попробуйте снова.",

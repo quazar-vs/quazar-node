@@ -104,6 +104,8 @@ pub struct AppState {
     node_registry: Arc<NodeRegistry>,
     pub node_id: String,
     pub channel_hub: Arc<ChannelHub>,
+    /// Trusted proxies for XFF: `nodes` registry (non-local) + `QUAZAR_TRUSTED_PROXIES`.
+    pub trusted_proxies: client_ip::TrustedProxyCache,
 }
 
 fn init_tracing() {
@@ -194,11 +196,13 @@ async fn main() {
         }
     }
 
+    let trusted_proxies = client_ip::TrustedProxyCache::new(pool.clone());
     let state = Arc::new(AppState {
         db: pool,
         node_registry,
         node_id,
         channel_hub: Arc::new(ChannelHub::new()),
+        trusted_proxies,
     });
 
     let state_clone = state.clone();
@@ -263,7 +267,10 @@ async fn main() {
         .route("/chat/admin/send", post(admin_send_message_handler))
         // Public abuse limits: register/apply 5/min, auth/application 10/min,
         // channel/search/admin-send 20/min (per IP).
-        .route_layer(middleware::from_fn(public_rate_limit_middleware))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            public_rate_limit_middleware,
+        ))
         .with_state(state.clone());
 
     let protected_routes = Router::new()
@@ -360,7 +367,10 @@ async fn main() {
             delete(revoke_permission_handler),
         )
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
-        .route_layer(middleware::from_fn(rate_limit_middleware))
+        .route_layer(middleware::from_fn_with_state(
+            state.clone(),
+            rate_limit_middleware,
+        ))
         .with_state(state.clone());
 
     let app = Router::new()

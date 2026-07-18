@@ -606,8 +606,12 @@ fn detect_digital_applicant(
     false
 }
 
-fn apply_client_ip(headers: &HeaderMap, connect: Option<&ConnectInfo<SocketAddr>>) -> String {
-    crate::client_ip::resolve_from_connect(headers, connect)
+fn apply_client_ip(
+    headers: &HeaderMap,
+    connect: Option<&ConnectInfo<SocketAddr>>,
+    trusted: &crate::client_ip::TrustedNets,
+) -> String {
+    crate::client_ip::resolve_from_connect(headers, connect, trusted)
 }
 
 async fn get_citizen_by_name(pool: &PgPool, name: &str) -> Result<Option<Citizen>, CitizenError> {
@@ -1605,7 +1609,8 @@ pub async fn apply_for_citizenship(
             }
         }
     } else {
-        let ip = apply_client_ip(&headers, connect.as_ref());
+        let trusted = state.trusted_proxies.snapshot().await;
+        let ip = apply_client_ip(&headers, connect.as_ref(), &trusted);
         let email_addr = email.clone().expect("human email required");
         match issue_verification_code(&email_addr, &ip).await {
             Ok(code) => {

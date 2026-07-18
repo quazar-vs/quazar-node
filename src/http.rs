@@ -126,12 +126,15 @@ fn rate_limit_exceeded(path: &str, ip: &str) -> Response {
         .into_response()
 }
 
-fn client_ip(req: &axum::http::Request<axum::body::Body>) -> String {
+fn client_ip(
+    req: &axum::http::Request<axum::body::Body>,
+    trusted: &crate::client_ip::TrustedNets,
+) -> String {
     let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
         .map(|ConnectInfo(addr)| *addr);
-    crate::client_ip::resolve_client_ip(req.headers(), peer)
+    crate::client_ip::resolve_client_ip(req.headers(), peer, trusted)
 }
 
 fn strict_secrets_enabled() -> bool {
@@ -223,8 +226,13 @@ fn allows_pending_citizen(path: &str) -> bool {
     parts.len() >= 3 && parts[0] == "citizen" && parts[2] == "passport"
 }
 
-pub async fn rate_limit_middleware(req: axum::http::Request<axum::body::Body>, next: Next) -> Response {
-    let ip = client_ip(&req);
+pub async fn rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
+    req: axum::http::Request<axum::body::Body>,
+    next: Next,
+) -> Response {
+    let trusted = state.trusted_proxies.snapshot().await;
+    let ip = client_ip(&req, &trusted);
     let path = req.uri().path();
     if rate_limiter().check_key(&ip).is_err() {
         return rate_limit_exceeded(path, &ip);
@@ -234,10 +242,12 @@ pub async fn rate_limit_middleware(req: axum::http::Request<axum::body::Body>, n
 
 /// Stricter per-minute limits for public auth / register / application routes.
 pub async fn public_rate_limit_middleware(
+    State(state): State<Arc<AppState>>,
     req: axum::http::Request<axum::body::Body>,
     next: Next,
 ) -> Response {
-    let ip = client_ip(&req);
+    let trusted = state.trusted_proxies.snapshot().await;
+    let ip = client_ip(&req, &trusted);
     let path = req.uri().path();
 
     let limiter = if is_public_register_path(path) {
