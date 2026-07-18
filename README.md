@@ -40,7 +40,7 @@ curl http://localhost:8080/status
 | `QUAZAR_REG_SECRET` | Секрет для `reg_sig_*` (CitizenAdded); **не равен** node secret |
 | `DATABASE_URL` | PostgreSQL connection string |
 | `QUAZAR_NODE_ID` | ID узла |
-| `QUAZAR_NODE_URL` | Публичный URL узла |
+| `QUAZAR_NODE_URL` | Публичный URL узла для пиров (например `https://api.quazar.website`); не `http://localhost:8080` |
 | `QUAZAR_BOOTSTRAP_PEERS` | Пиры при старте: `id@url,id2@url2` |
 | `QUAZAR_SYNC_INTERVAL_SECS` | Интервал фоновой синхронизации с пирами (default: 60); блоки создаются только при накоплении 2^(n-1) событий для блока #n |
 | `QUAZAR_RATE_LIMIT_RPS` | Rate limit на защищённых роутах (default: 60) |
