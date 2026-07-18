@@ -801,6 +801,342 @@ pub fn build_signed_election_announced_event(
     ))
 }
 
+/// Mayor election announced (`ElectionAnnounced` with `kind: "mayor"`).
+pub fn build_mayor_election_announced_event(
+    event_id: &str,
+    election_id: &str,
+    city_name: &str,
+    created_by: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "ElectionAnnounced".to_string(),
+        title: format!("Выборы мэра: {city_name}"),
+        description: format!("Объявлены выборы мэра города {city_name}"),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "kind": "mayor",
+            "election_id": election_id,
+            "city_name": city_name,
+            "created_by": created_by,
+            "status": "Nominating",
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_election_announced_event(
+    event_id: &str,
+    election_id: &str,
+    city_name: &str,
+    created_by: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_election_announced_event(
+        event_id,
+        election_id,
+        city_name,
+        created_by,
+        initiator,
+        timestamp,
+    ))
+}
+
+pub fn build_mayor_election_candidate_event(
+    event_id: &str,
+    election_id: &str,
+    candidate_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    nominated_by: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "ElectionCandidate".to_string(),
+        title: format!("Кандидат в мэры: {citizen_name}"),
+        description: format!(
+            "{citizen_name} номинирован на выборах мэра {election_id}"
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "kind": "mayor",
+            "action": "nominate",
+            "election_id": election_id,
+            "candidate_id": candidate_id,
+            "citizen_id": citizen_id,
+            "citizen_name": citizen_name,
+            "nominated_by": nominated_by,
+            "status": "Nominated",
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_election_candidate_event(
+    event_id: &str,
+    election_id: &str,
+    candidate_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    nominated_by: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_election_candidate_event(
+        event_id,
+        election_id,
+        candidate_id,
+        citizen_id,
+        citizen_name,
+        nominated_by,
+        initiator,
+        timestamp,
+    ))
+}
+
+pub fn build_mayor_election_endorse_event(
+    event_id: &str,
+    election_id: &str,
+    candidate_id: &str,
+    endorsement_id: &str,
+    endorser_id: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "ElectionCandidate".to_string(),
+        title: format!("Поддержка кандидата {candidate_id}"),
+        description: format!(
+            "Гражданин {endorser_id} поддержал кандидата {candidate_id} на выборах {election_id}"
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "kind": "mayor",
+            "action": "endorse",
+            "election_id": election_id,
+            "candidate_id": candidate_id,
+            "endorsement_id": endorsement_id,
+            "endorser_id": endorser_id,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_election_endorse_event(
+    event_id: &str,
+    election_id: &str,
+    candidate_id: &str,
+    endorsement_id: &str,
+    endorser_id: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_election_endorse_event(
+        event_id,
+        election_id,
+        candidate_id,
+        endorsement_id,
+        endorser_id,
+        initiator,
+        timestamp,
+    ))
+}
+
+pub fn build_mayor_election_vote_started_event(
+    event_id: &str,
+    election_id: &str,
+    vote_id: &str,
+    round: i32,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    let status = if round >= 2 { "Round2" } else { "Round1" };
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "ElectionVoteStarted".to_string(),
+        title: format!("Голосование за мэра: тур {round}"),
+        description: format!("Открыт тур {round} выборов мэра {election_id}"),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "kind": "mayor",
+            "election_id": election_id,
+            "vote_id": vote_id,
+            "round": round,
+            "status": status,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_election_vote_started_event(
+    event_id: &str,
+    election_id: &str,
+    vote_id: &str,
+    round: i32,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_election_vote_started_event(
+        event_id,
+        election_id,
+        vote_id,
+        round,
+        initiator,
+        timestamp,
+    ))
+}
+
+/// Mayor ballot as `VoteCast` with `kind: "mayor"` (choice stays `For` for validator compatibility).
+pub fn build_mayor_election_vote_cast_event(
+    event_id: &str,
+    election_id: &str,
+    ballot_id: &str,
+    round: i32,
+    voter_id: &str,
+    voter_name: &str,
+    candidate_id: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "VoteCast".to_string(),
+        title: format!("Голос на выборах мэра: {voter_name}"),
+        description: format!(
+            "{voter_name} проголосовал за кандидата {candidate_id} (тур {round})"
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "kind": "mayor",
+            "vote_id": election_id,
+            "election_id": election_id,
+            "ballot_id": ballot_id,
+            "citizen_id": voter_id,
+            "citizen_name": voter_name,
+            "choice": "For",
+            "candidate_id": candidate_id,
+            "round": round,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_election_vote_cast_event(
+    event_id: &str,
+    election_id: &str,
+    ballot_id: &str,
+    round: i32,
+    voter_id: &str,
+    voter_name: &str,
+    candidate_id: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_election_vote_cast_event(
+        event_id,
+        election_id,
+        ballot_id,
+        round,
+        voter_id,
+        voter_name,
+        candidate_id,
+        initiator,
+        timestamp,
+    ))
+}
+
+pub fn build_mayor_election_vote_result_event(
+    event_id: &str,
+    election_id: &str,
+    vote_id: &str,
+    round: i32,
+    outcome: &str,
+    winner_candidate_id: Option<&str>,
+    winner_id: Option<&str>,
+    winner_name: Option<&str>,
+    advanced_candidate_ids: &[String],
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "ElectionVoteResult".to_string(),
+        title: format!("Итог тура {round} выборов мэра"),
+        description: format!("Выборы {election_id}: {outcome}"),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "kind": "mayor",
+            "election_id": election_id,
+            "vote_id": vote_id,
+            "round": round,
+            "outcome": outcome,
+            "winner_candidate_id": winner_candidate_id,
+            "winner_id": winner_id,
+            "winner_name": winner_name,
+            "advanced_candidate_ids": advanced_candidate_ids,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_election_vote_result_event(
+    event_id: &str,
+    election_id: &str,
+    vote_id: &str,
+    round: i32,
+    outcome: &str,
+    winner_candidate_id: Option<&str>,
+    winner_id: Option<&str>,
+    winner_name: Option<&str>,
+    advanced_candidate_ids: &[String],
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_election_vote_result_event(
+        event_id,
+        election_id,
+        vote_id,
+        round,
+        outcome,
+        winner_candidate_id,
+        winner_id,
+        winner_name,
+        advanced_candidate_ids,
+        initiator,
+        timestamp,
+    ))
+}
+
 pub fn build_chat_history_added_event(
     event_id: &str,
     archive_id: &str,
@@ -1523,5 +1859,64 @@ mod tests {
         assert_eq!(event.event_type, "NodeStarted");
         assert_eq!(event.data["status"], "alive");
         assert_eq!(event.data["url"], "http://203.0.113.10:8080");
+    }
+
+    #[test]
+    fn mayor_election_announced_event_is_kind_mayor() {
+        let event = build_mayor_election_announced_event(
+            "election_announced_1",
+            "el-1",
+            "NeoTokyo",
+            "QZ-1",
+            "Aiya",
+            1_700_000_000,
+        );
+        assert_eq!(event.event_type, "ElectionAnnounced");
+        assert_eq!(event.data["kind"], "mayor");
+        assert_eq!(event.data["city_name"], "NeoTokyo");
+        assert_eq!(event.data["created_by"], "QZ-1");
+        assert_eq!(event.data["status"], "Nominating");
+    }
+
+    #[test]
+    fn mayor_election_vote_result_winner_carries_projection_fields() {
+        let event = build_mayor_election_vote_result_event(
+            "election_vote_result_1",
+            "el-1",
+            "el-1_r1_result",
+            1,
+            "winner",
+            Some("cand-1"),
+            Some("QZ-42"),
+            Some("MayorCandidate"),
+            &[],
+            "Aiya",
+            1_700_000_000,
+        );
+        assert_eq!(event.event_type, "ElectionVoteResult");
+        assert_eq!(event.data["kind"], "mayor");
+        assert_eq!(event.data["outcome"], "winner");
+        assert_eq!(event.data["winner_id"], "QZ-42");
+        assert_eq!(event.data["winner_candidate_id"], "cand-1");
+    }
+
+    #[test]
+    fn mayor_election_vote_cast_uses_vote_cast_type() {
+        let event = build_mayor_election_vote_cast_event(
+            "vote_1",
+            "el-1",
+            "ballot-1",
+            1,
+            "QZ-9",
+            "Voter",
+            "cand-1",
+            "Voter",
+            1_700_000_000,
+        );
+        assert_eq!(event.event_type, "VoteCast");
+        assert_eq!(event.data["kind"], "mayor");
+        assert_eq!(event.data["choice"], "For");
+        assert_eq!(event.data["candidate_id"], "cand-1");
+        assert_eq!(event.data["round"], 1);
     }
 }

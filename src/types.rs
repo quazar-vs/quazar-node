@@ -275,6 +275,22 @@ mod tests {
             QuazarEventType::from_str("MayorConfirmed").unwrap(),
             QuazarEventType::MayorConfirmed
         );
+        assert_eq!(
+            QuazarEventType::from_str("ElectionAnnounced").unwrap(),
+            QuazarEventType::ElectionAnnounced
+        );
+        assert_eq!(
+            QuazarEventType::from_str("ElectionCandidate").unwrap(),
+            QuazarEventType::ElectionCandidate
+        );
+        assert_eq!(
+            QuazarEventType::from_str("ElectionVoteStarted").unwrap(),
+            QuazarEventType::ElectionVoteStarted
+        );
+        assert_eq!(
+            QuazarEventType::from_str("ElectionVoteResult").unwrap(),
+            QuazarEventType::ElectionVoteResult
+        );
     }
 
     #[test]

@@ -16,6 +16,9 @@ use crate::auth::{AuthContext, KeyStore};
 use crate::block_producer;
 use crate::blockchain::{
     build_signed_mayor_application_timed_out_event, build_signed_mayor_confirmed_event,
+    build_signed_mayor_election_announced_event, build_signed_mayor_election_candidate_event,
+    build_signed_mayor_election_endorse_event, build_signed_mayor_election_vote_cast_event,
+    build_signed_mayor_election_vote_result_event, build_signed_mayor_election_vote_started_event,
     build_signed_node_started_event,
 };
 use crate::gossip;
@@ -423,9 +426,11 @@ async fn build_election_detail(pool: &PgPool, election_id: &str) -> Result<Elect
 }
 
 async fn appoint_mayor(
-    pool: &PgPool,
+    state: Arc<AppState>,
+    auth_name: &str,
     election_id: &str,
     candidate: &MayorCandidate,
+    round: i32,
 ) -> Result<MayorElection, MayorError> {
     let now = Utc::now();
 
@@ -436,7 +441,7 @@ async fn appoint_mayor(
     )
     .bind(CandidateStatus::Winner.as_str())
     .bind(&candidate.id)
-    .execute(pool)
+    .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
@@ -450,7 +455,7 @@ async fn appoint_mayor(
     .bind(CandidateStatus::Eliminated.as_str())
     .bind(election_id)
     .bind(&candidate.id)
-    .execute(pool)
+    .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
@@ -464,14 +469,14 @@ async fn appoint_mayor(
     .bind(Role::Citizen.as_str())
     .bind(Role::Mayor.as_str())
     .bind(&candidate.citizen_id)
-    .execute(pool)
+    .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
     sqlx::query("UPDATE citizens SET role = $1 WHERE id = $2")
         .bind(Role::Mayor.as_str())
         .bind(&candidate.citizen_id)
-        .execute(pool)
+        .execute(&state.db)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
 
@@ -483,7 +488,7 @@ async fn appoint_mayor(
     )
     .bind(Role::Mayor.as_str())
     .bind(&candidate.citizen_id)
-    .execute(pool)
+    .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
@@ -499,9 +504,26 @@ async fn appoint_mayor(
     .bind(&candidate.citizen_name)
     .bind(now)
     .bind(election_id)
-    .execute(pool)
+    .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let vote_id = format!("{election_id}_r{round}_result");
+    let event_id = format!("election_vote_result_{vote_id}");
+    let event = build_signed_mayor_election_vote_result_event(
+        &event_id,
+        election_id,
+        &vote_id,
+        round,
+        "winner",
+        Some(&candidate.id),
+        Some(&candidate.citizen_id),
+        Some(&candidate.citizen_name),
+        &[],
+        auth_name,
+        now.timestamp(),
+    );
+    submit_mayor_pending_event(state.clone(), event).await?;
 
     tracing::info!(
         election = %election_id,
@@ -509,7 +531,7 @@ async fn appoint_mayor(
         "mayor elected"
     );
 
-    fetch_election(pool, election_id).await
+    fetch_election(&state.db, election_id).await
 }
 
 pub async fn create_election(
@@ -549,19 +571,32 @@ pub async fn create_election(
     }
 
     let id = Uuid::new_v4().to_string();
+    let now = Utc::now();
     sqlx::query(
         r#"
-        INSERT INTO mayor_elections (id, city_name, status, current_round, created_by)
-        VALUES ($1, $2, $3, 0, $4)
+        INSERT INTO mayor_elections (id, city_name, status, current_round, created_by, created_at)
+        VALUES ($1, $2, $3, 0, $4, $5)
         "#,
     )
     .bind(&id)
     .bind(&city_name)
     .bind(ElectionStatus::Nominating.as_str())
     .bind(&creator_id)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let event_id = format!("election_announced_{id}");
+    let event = build_signed_mayor_election_announced_event(
+        &event_id,
+        &id,
+        &city_name,
+        &creator_id,
+        &auth.citizen_name,
+        now.timestamp(),
+    );
+    submit_mayor_pending_event(state.clone(), event).await?;
 
     fetch_election(&state.db, &id).await
 }
@@ -581,12 +616,13 @@ pub async fn nominate_candidate(
 
     let (citizen_id, citizen_name) = load_active_citizen(&state.db, &req.candidate_id).await?;
     let id = Uuid::new_v4().to_string();
+    let now = Utc::now();
 
     let inserted = sqlx::query(
         r#"
         INSERT INTO mayor_candidates (
-            id, election_id, citizen_id, citizen_name, nominated_by, status, endorsements
-        ) VALUES ($1, $2, $3, $4, $5, $6, 0)
+            id, election_id, citizen_id, citizen_name, nominated_by, status, endorsements, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, 0, $7)
         ON CONFLICT (election_id, citizen_id) DO NOTHING
         "#,
     )
@@ -596,6 +632,7 @@ pub async fn nominate_candidate(
     .bind(&citizen_name)
     .bind(&nominator_id)
     .bind(CandidateStatus::Nominated.as_str())
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
@@ -605,6 +642,19 @@ pub async fn nominate_candidate(
             "Этот гражданин уже номинирован на этих выборах",
         ));
     }
+
+    let event_id = format!("election_candidate_{id}");
+    let event = build_signed_mayor_election_candidate_event(
+        &event_id,
+        &req.election_id,
+        &id,
+        &citizen_id,
+        &citizen_name,
+        &nominator_id,
+        &auth.citizen_name,
+        now.timestamp(),
+    );
+    submit_mayor_pending_event(state.clone(), event).await?;
 
     sqlx::query_as::<_, MayorCandidate>(
         r#"
@@ -651,16 +701,18 @@ pub async fn endorse_candidate(
     }
 
     let endorsement_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
     let inserted = sqlx::query(
         r#"
-        INSERT INTO mayor_endorsements (id, candidate_id, citizen_id)
-        VALUES ($1, $2, $3)
+        INSERT INTO mayor_endorsements (id, candidate_id, citizen_id, created_at)
+        VALUES ($1, $2, $3, $4)
         ON CONFLICT (candidate_id, citizen_id) DO NOTHING
         "#,
     )
     .bind(&endorsement_id)
     .bind(&req.candidate_id)
     .bind(&endorser_id)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
@@ -670,6 +722,18 @@ pub async fn endorse_candidate(
     }
 
     refresh_endorsement_count(&state.db, &req.candidate_id).await?;
+
+    let event_id = format!("election_endorse_{endorsement_id}");
+    let event = build_signed_mayor_election_endorse_event(
+        &event_id,
+        &candidate.election_id,
+        &req.candidate_id,
+        &endorsement_id,
+        &endorser_id,
+        &auth.citizen_name,
+        now.timestamp(),
+    );
+    submit_mayor_pending_event(state.clone(), event).await?;
 
     sqlx::query_as::<_, MayorCandidate>(
         r#"
@@ -734,6 +798,18 @@ pub async fn start_round1(
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
+    let vote_id = format!("{election_id}_r1");
+    let event_id = format!("election_vote_started_{vote_id}");
+    let event = build_signed_mayor_election_vote_started_event(
+        &event_id,
+        election_id,
+        &vote_id,
+        1,
+        &auth.citizen_name,
+        now.timestamp(),
+    );
+    submit_mayor_pending_event(state.clone(), event).await?;
+
     fetch_election(&state.db, election_id).await
 }
 
@@ -788,10 +864,11 @@ pub async fn cast_vote(
         }
 
     let vote_id = Uuid::new_v4().to_string();
+    let now = Utc::now();
     let inserted = sqlx::query(
         r#"
-        INSERT INTO mayor_votes (id, election_id, round, voter_id, candidate_id)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO mayor_votes (id, election_id, round, voter_id, candidate_id, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6)
         ON CONFLICT (election_id, round, voter_id) DO NOTHING
         "#,
     )
@@ -800,6 +877,7 @@ pub async fn cast_vote(
     .bind(round)
     .bind(&voter_id)
     .bind(&req.candidate_id)
+    .bind(now)
     .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
@@ -807,6 +885,27 @@ pub async fn cast_vote(
     if inserted.rows_affected() == 0 {
         return Err(MayorError::bad_request("Вы уже голосовали в этом туре"));
     }
+
+    let voter_name: String = sqlx::query_scalar("SELECT name FROM citizens WHERE id = $1")
+        .bind(&voter_id)
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .unwrap_or_else(|| voter_id.clone());
+
+    let event_id = format!("election_vote_{election_id}_r{round}_{voter_id}");
+    let event = build_signed_mayor_election_vote_cast_event(
+        &event_id,
+        election_id,
+        &vote_id,
+        round,
+        &voter_id,
+        &voter_name,
+        &req.candidate_id,
+        &auth.citizen_name,
+        now.timestamp(),
+    );
+    submit_mayor_pending_event(state.clone(), event).await?;
 
     sqlx::query_as::<_, MayorVote>(
         r#"
@@ -873,13 +972,13 @@ pub async fn finalize_round(
     if round == 1 {
         let (leader, leader_votes) = &scored[0];
         if has_first_round_majority(*leader_votes, total) {
-            appoint_mayor(&state.db, election_id, leader).await?;
+            appoint_mayor(state.clone(), &auth.citizen_name, election_id, leader, round).await?;
             return build_election_detail(&state.db, election_id).await;
         }
 
         if scored.len() < 2 {
             // Single candidate leftover — appoint.
-            appoint_mayor(&state.db, election_id, leader).await?;
+            appoint_mayor(state.clone(), &auth.citizen_name, election_id, leader, round).await?;
             return build_election_detail(&state.db, election_id).await;
         }
 
@@ -917,11 +1016,35 @@ pub async fn finalize_round(
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
 
+        let vote_id = format!("{election_id}_r{round}_result");
+        let event_id = format!("election_vote_result_{vote_id}");
+        let event = build_signed_mayor_election_vote_result_event(
+            &event_id,
+            election_id,
+            &vote_id,
+            round,
+            "runoff",
+            None,
+            None,
+            None,
+            &top2,
+            &auth.citizen_name,
+            now.timestamp(),
+        );
+        submit_mayor_pending_event(state.clone(), event).await?;
+
         return build_election_detail(&state.db, election_id).await;
     }
 
     // Round 2 — plurality (ties broken by name order already applied).
-    appoint_mayor(&state.db, election_id, &scored[0].0).await?;
+    appoint_mayor(
+        state.clone(),
+        &auth.citizen_name,
+        election_id,
+        &scored[0].0,
+        round,
+    )
+    .await?;
     build_election_detail(&state.db, election_id).await
 }
 

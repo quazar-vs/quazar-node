@@ -187,9 +187,17 @@ impl EventValidator {
                     .ok_or(ValidationError::MissingRequiredField("choice".to_string()))?;
                 if !matches!(choice, "For" | "Against") {
                     return Err(ValidationError::DataValidationFailed(format!(
-                        "Invalid vote choice: {}",
+                        "Invalid vote: {}",
                         choice
                     )));
+                }
+                let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind == "mayor" {
+                    Self::require_str(data, "candidate_id")?;
+                    Self::require_str(data, "ballot_id")?;
+                    if data.get("round").and_then(|v| v.as_i64()).is_none() {
+                        return Err(ValidationError::MissingRequiredField("round".to_string()));
+                    }
                 }
                 Ok(())
             }
@@ -282,16 +290,44 @@ impl EventValidator {
             }
             QuazarEventType::ElectionAnnounced => {
                 Self::require_str(data, "election_id")?;
+                let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind == "mayor" {
+                    Self::require_str(data, "city_name")?;
+                    Self::require_str(data, "created_by")?;
+                }
                 Ok(())
             }
             QuazarEventType::ElectionCandidate => {
                 Self::require_str(data, "election_id")?;
                 Self::require_str(data, "candidate_id")?;
+                let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind == "mayor" {
+                    let action = data.get("action").and_then(|v| v.as_str()).unwrap_or("nominate");
+                    match action {
+                        "endorse" => {
+                            Self::require_str(data, "endorsement_id")?;
+                            Self::require_str(data, "endorser_id")?;
+                        }
+                        _ => {
+                            Self::require_str(data, "citizen_id")?;
+                            Self::require_str(data, "nominated_by")?;
+                        }
+                    }
+                }
                 Ok(())
             }
             QuazarEventType::ElectionVoteStarted | QuazarEventType::ElectionVoteResult => {
                 Self::require_str(data, "election_id")?;
                 Self::require_str(data, "vote_id")?;
+                let kind = data.get("kind").and_then(|v| v.as_str()).unwrap_or("");
+                if kind == "mayor" {
+                    if data.get("round").and_then(|v| v.as_i64()).is_none() {
+                        return Err(ValidationError::MissingRequiredField("round".to_string()));
+                    }
+                    if matches!(event_type, QuazarEventType::ElectionVoteResult) {
+                        Self::require_str(data, "outcome")?;
+                    }
+                }
                 Ok(())
             }
             QuazarEventType::AppointmentGuardian | QuazarEventType::AppointmentJudge => {

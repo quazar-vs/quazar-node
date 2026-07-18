@@ -26,6 +26,9 @@ pub async fn apply_event_projections_in_tx(
             "LawVoteResult" => apply_law_vote_result(tx, event).await?,
             "VoteCast" => apply_vote_cast(tx, event).await?,
             "ElectionAnnounced" => apply_election_announced(tx, event).await?,
+            "ElectionCandidate" => apply_election_candidate(tx, event).await?,
+            "ElectionVoteStarted" => apply_election_vote_started(tx, event).await?,
+            "ElectionVoteResult" => apply_election_vote_result(tx, event).await?,
             "ChatHistoryAdded" => apply_chat_history_added(tx, event).await?,
             _ => {}
         }
@@ -599,6 +602,15 @@ async fn apply_vote_cast(
     tx: &mut Transaction<'_, Postgres>,
     event: &Event,
 ) -> Result<(), String> {
+    let kind = event
+        .data
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if kind == "mayor" {
+        return apply_mayor_vote_cast(tx, event).await;
+    }
+
     let vote_id = require_str(&event.data, "vote_id")?;
     let citizen_id = require_str(&event.data, "citizen_id")?;
     let choice = require_str(&event.data, "choice")?;
@@ -690,6 +702,15 @@ async fn apply_election_announced(
     tx: &mut Transaction<'_, Postgres>,
     event: &Event,
 ) -> Result<(), String> {
+    let kind = event
+        .data
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if kind == "mayor" || event.data.get("city_name").and_then(|v| v.as_str()).is_some() {
+        return apply_mayor_election_announced(tx, event).await;
+    }
+
     let election_id = require_str(&event.data, "election_id")?;
     let title = require_str(&event.data, "title")?;
     let target_decision = require_str(&event.data, "target_decision")?;
@@ -717,6 +738,455 @@ async fn apply_election_announced(
     .map_err(|e| format!("ElectionAnnounced projection failed: {}", e))?;
 
     tracing::info!(election_id = %election_id, event_id = %event.event_id, "ElectionAnnounced projected");
+    Ok(())
+}
+
+async fn apply_election_candidate(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let kind = event
+        .data
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if kind != "mayor" {
+        return Ok(());
+    }
+    let action = event
+        .data
+        .get("action")
+        .and_then(|v| v.as_str())
+        .unwrap_or("nominate");
+    match action {
+        "endorse" => apply_mayor_election_endorse(tx, event).await,
+        _ => apply_mayor_election_nominate(tx, event).await,
+    }
+}
+
+async fn apply_election_vote_started(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let kind = event
+        .data
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if kind != "mayor" {
+        return Ok(());
+    }
+    apply_mayor_election_vote_started(tx, event).await
+}
+
+async fn apply_election_vote_result(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let kind = event
+        .data
+        .get("kind")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if kind != "mayor" {
+        return Ok(());
+    }
+    apply_mayor_election_vote_result(tx, event).await
+}
+
+async fn apply_mayor_election_announced(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let election_id = require_str(&event.data, "election_id")?;
+    let city_name = require_str(&event.data, "city_name")?;
+    let created_by = require_str(&event.data, "created_by")?;
+    let status = event
+        .data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Nominating");
+
+    sqlx::query(
+        r#"
+        INSERT INTO mayor_elections (id, city_name, status, current_round, created_by, created_at)
+        VALUES ($1, $2, $3, 0, $4, to_timestamp($5))
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(election_id)
+    .bind(city_name)
+    .bind(status)
+    .bind(created_by)
+    .bind(event.timestamp as f64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("Mayor ElectionAnnounced projection failed: {}", e))?;
+
+    tracing::info!(
+        election_id = %election_id,
+        city_name = %city_name,
+        event_id = %event.event_id,
+        "Mayor ElectionAnnounced projected"
+    );
+    Ok(())
+}
+
+async fn apply_mayor_election_nominate(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let election_id = require_str(&event.data, "election_id")?;
+    let candidate_id = require_str(&event.data, "candidate_id")?;
+    let citizen_id = require_str(&event.data, "citizen_id")?;
+    let citizen_name = event
+        .data
+        .get("citizen_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(citizen_id);
+    let nominated_by = require_str(&event.data, "nominated_by")?;
+    let status = event
+        .data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Nominated");
+
+    sqlx::query(
+        r#"
+        INSERT INTO mayor_candidates (
+            id, election_id, citizen_id, citizen_name, nominated_by, status, endorsements, created_at
+        ) VALUES ($1, $2, $3, $4, $5, $6, 0, to_timestamp($7))
+        ON CONFLICT (election_id, citizen_id) DO NOTHING
+        "#,
+    )
+    .bind(candidate_id)
+    .bind(election_id)
+    .bind(citizen_id)
+    .bind(citizen_name)
+    .bind(nominated_by)
+    .bind(status)
+    .bind(event.timestamp as f64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("Mayor ElectionCandidate nominate projection failed: {}", e))?;
+
+    tracing::info!(
+        election_id = %election_id,
+        candidate_id = %candidate_id,
+        event_id = %event.event_id,
+        "Mayor ElectionCandidate nominate projected"
+    );
+    Ok(())
+}
+
+async fn apply_mayor_election_endorse(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let candidate_id = require_str(&event.data, "candidate_id")?;
+    let endorsement_id = require_str(&event.data, "endorsement_id")?;
+    let endorser_id = require_str(&event.data, "endorser_id")?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO mayor_endorsements (id, candidate_id, citizen_id, created_at)
+        VALUES ($1, $2, $3, to_timestamp($4))
+        ON CONFLICT (candidate_id, citizen_id) DO NOTHING
+        "#,
+    )
+    .bind(endorsement_id)
+    .bind(candidate_id)
+    .bind(endorser_id)
+    .bind(event.timestamp as f64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("Mayor ElectionCandidate endorse projection failed: {}", e))?;
+
+    sqlx::query(
+        r#"
+        UPDATE mayor_candidates
+        SET endorsements = (
+            SELECT COUNT(*)::int FROM mayor_endorsements WHERE candidate_id = $1
+        )
+        WHERE id = $1
+        "#,
+    )
+    .bind(candidate_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("Mayor endorsement count refresh failed: {}", e))?;
+
+    tracing::info!(
+        candidate_id = %candidate_id,
+        endorser_id = %endorser_id,
+        event_id = %event.event_id,
+        "Mayor ElectionCandidate endorse projected"
+    );
+    Ok(())
+}
+
+async fn apply_mayor_election_vote_started(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let election_id = require_str(&event.data, "election_id")?;
+    let round = require_i64(&event.data, "round")? as i32;
+    let status = event
+        .data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or(if round >= 2 { "Round2" } else { "Round1" });
+
+    if round <= 1 {
+        sqlx::query(
+            r#"
+            UPDATE mayor_candidates SET status = 'Qualified'
+            WHERE election_id = $1 AND status IN ('Nominated', 'Qualified')
+            "#,
+        )
+        .bind(election_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteStarted qualify failed: {}", e))?;
+
+        sqlx::query(
+            r#"
+            UPDATE mayor_elections
+            SET status = $1, current_round = 1, round1_started_at = COALESCE(round1_started_at, to_timestamp($2))
+            WHERE id = $3 AND status IN ('Nominating', 'Round1')
+            "#,
+        )
+        .bind(status)
+        .bind(event.timestamp as f64)
+        .bind(election_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteStarted Round1 failed: {}", e))?;
+    } else {
+        sqlx::query(
+            r#"
+            UPDATE mayor_elections
+            SET status = $1, current_round = 2, round2_started_at = COALESCE(round2_started_at, to_timestamp($2))
+            WHERE id = $3 AND status IN ('Round1', 'Round2')
+            "#,
+        )
+        .bind(status)
+        .bind(event.timestamp as f64)
+        .bind(election_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteStarted Round2 failed: {}", e))?;
+    }
+
+    tracing::info!(
+        election_id = %election_id,
+        round = round,
+        event_id = %event.event_id,
+        "Mayor ElectionVoteStarted projected"
+    );
+    Ok(())
+}
+
+async fn apply_mayor_vote_cast(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let election_id = event
+        .data
+        .get("election_id")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .or_else(|| event.data.get("vote_id").and_then(|v| v.as_str()))
+        .ok_or_else(|| "election_id: missing election_id".to_string())?;
+    let ballot_id = require_str(&event.data, "ballot_id")?;
+    let voter_id = require_str(&event.data, "citizen_id")?;
+    let candidate_id = require_str(&event.data, "candidate_id")?;
+    let round = require_i64(&event.data, "round")? as i32;
+
+    sqlx::query(
+        r#"
+        INSERT INTO mayor_votes (id, election_id, round, voter_id, candidate_id, created_at)
+        VALUES ($1, $2, $3, $4, $5, to_timestamp($6))
+        ON CONFLICT (election_id, round, voter_id) DO NOTHING
+        "#,
+    )
+    .bind(ballot_id)
+    .bind(election_id)
+    .bind(round)
+    .bind(voter_id)
+    .bind(candidate_id)
+    .bind(event.timestamp as f64)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("Mayor VoteCast projection failed: {}", e))?;
+
+    tracing::info!(
+        election_id = %election_id,
+        voter = %voter_id,
+        candidate_id = %candidate_id,
+        round = round,
+        event_id = %event.event_id,
+        "Mayor VoteCast projected"
+    );
+    Ok(())
+}
+
+async fn apply_mayor_election_vote_result(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let election_id = require_str(&event.data, "election_id")?;
+    let outcome = require_str(&event.data, "outcome")?;
+    let round = require_i64(&event.data, "round")? as i32;
+
+    if outcome == "runoff" {
+        let advanced: Vec<String> = event
+            .data
+            .get("advanced_candidate_ids")
+            .and_then(|v| v.as_array())
+            .map(|arr| {
+                arr.iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        if !advanced.is_empty() {
+            sqlx::query(
+                r#"
+                UPDATE mayor_candidates
+                SET status = CASE
+                    WHEN id = ANY($1) THEN 'Advanced'
+                    ELSE 'Eliminated'
+                END
+                WHERE election_id = $2
+                "#,
+            )
+            .bind(&advanced)
+            .bind(election_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("Mayor ElectionVoteResult runoff candidates failed: {}", e))?;
+        }
+
+        sqlx::query(
+            r#"
+            UPDATE mayor_elections
+            SET status = 'Round2', current_round = 2,
+                round2_started_at = COALESCE(round2_started_at, to_timestamp($1))
+            WHERE id = $2 AND status IN ('Round1', 'Round2')
+            "#,
+        )
+        .bind(event.timestamp as f64)
+        .bind(election_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteResult runoff election failed: {}", e))?;
+
+        tracing::info!(
+            election_id = %election_id,
+            round = round,
+            event_id = %event.event_id,
+            "Mayor ElectionVoteResult runoff projected"
+        );
+        return Ok(());
+    }
+
+    if outcome == "winner" {
+        let winner_candidate_id = require_str(&event.data, "winner_candidate_id")?;
+        let winner_id = require_str(&event.data, "winner_id")?;
+        let winner_name = event
+            .data
+            .get("winner_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(winner_id);
+
+        sqlx::query(
+            r#"
+            UPDATE mayor_candidates SET status = 'Winner' WHERE id = $1
+            "#,
+        )
+        .bind(winner_candidate_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteResult winner candidate failed: {}", e))?;
+
+        sqlx::query(
+            r#"
+            UPDATE mayor_candidates
+            SET status = 'Eliminated'
+            WHERE election_id = $1 AND id <> $2 AND status <> 'Eliminated'
+            "#,
+        )
+        .bind(election_id)
+        .bind(winner_candidate_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteResult eliminate failed: {}", e))?;
+
+        sqlx::query(
+            r#"
+            UPDATE citizens SET role = $1
+            WHERE role = $2 AND id <> $3
+            "#,
+        )
+        .bind(Role::Citizen.as_str())
+        .bind(Role::Mayor.as_str())
+        .bind(winner_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteResult demote previous failed: {}", e))?;
+
+        sqlx::query("UPDATE citizens SET role = $1 WHERE id = $2")
+            .bind(Role::Mayor.as_str())
+            .bind(winner_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("Mayor ElectionVoteResult role failed: {}", e))?;
+
+        sqlx::query(
+            r#"
+            UPDATE api_keys SET role = $1
+            WHERE citizen_id = $2 AND is_active = TRUE
+            "#,
+        )
+        .bind(Role::Mayor.as_str())
+        .bind(winner_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteResult api_keys failed: {}", e))?;
+
+        sqlx::query(
+            r#"
+            UPDATE mayor_elections
+            SET status = 'Completed', winner_id = $1, winner_name = $2,
+                completed_at = COALESCE(completed_at, to_timestamp($3))
+            WHERE id = $4 AND status <> 'Cancelled'
+            "#,
+        )
+        .bind(winner_id)
+        .bind(winner_name)
+        .bind(event.timestamp as f64)
+        .bind(election_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("Mayor ElectionVoteResult complete failed: {}", e))?;
+
+        tracing::info!(
+            election_id = %election_id,
+            winner_id = %winner_id,
+            event_id = %event.event_id,
+            "Mayor ElectionVoteResult winner projected"
+        );
+        return Ok(());
+    }
+
+    tracing::warn!(
+        election_id = %election_id,
+        outcome = %outcome,
+        event_id = %event.event_id,
+        "Mayor ElectionVoteResult unknown outcome"
+    );
     Ok(())
 }
 
