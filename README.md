@@ -11,6 +11,8 @@ docker-compose up -d
 
 На системах с Docker Compose V2 (plugin) можно использовать `docker compose up -d`.
 
+Compose публикует API только на `127.0.0.1:8080` (не на все интерфейсы); для локального nginx задайте `QUAZAR_TRUSTED_PROXIES=127.0.0.1,::1`.
+
 Или через example-файл:
 
 ```bash
@@ -51,7 +53,7 @@ curl http://localhost:8080/status
 | `RECAPTCHA_EXPECTED_ACTION` | Опционально: ожидаемое `action` в ответе v3 |
 | `QUAZAR_TRUSTED_PROXIES` | Доп. IP/CIDR прокси (через запятую) для `X-Forwarded-For` / `X-Real-IP`. Основной источник — таблица `nodes` (`alive`, без локальных адресов); env нужен для локального nginx (`127.0.0.1`), которого нет в реестре |
 | `QUAZAR_API_KEYS` | Доп. ключи при старте: `ключ:Роль:имя_гражданина` (через запятую) |
-| `QUAZAR_INIT_TEST_KEYS` | `true` — синхронизировать тестовые ключи в PostgreSQL |
+| `QUAZAR_INIT_TEST_KEYS` | `true` — синхронизировать тестовые ключи в PostgreSQL; для prod-like оставляйте `false` |
 | `GMAIL_USER` | Gmail-адрес отправителя (например `quazarvs@gmail.com`) |
 | `GMAIL_APP_PASSWORD` | [App Password](https://myaccount.google.com/apppasswords) для SMTP |
 | `GMAIL_FROM_NAME` | Имя отправителя в письме (default: `Квазар`) |
