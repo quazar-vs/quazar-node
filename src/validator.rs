@@ -391,6 +391,19 @@ impl EventValidator {
                 }
                 Ok(())
             }
+            QuazarEventType::NodeStarted => {
+                Self::require_str(data, "application_id")?;
+                Self::require_str(data, "citizen_id")?;
+                Self::require_str(data, "node_id")?;
+                Self::require_str(data, "url")?;
+                Ok(())
+            }
+            QuazarEventType::MayorConfirmed => {
+                Self::require_str(data, "application_id")?;
+                Self::require_str(data, "citizen_id")?;
+                Self::require_str(data, "node_id")?;
+                Ok(())
+            }
             QuazarEventType::MayorApplicationTimedOut => {
                 Self::require_str(data, "application_id")?;
                 Self::require_str(data, "citizen_id")?;

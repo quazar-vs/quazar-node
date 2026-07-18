@@ -53,7 +53,10 @@ mod votes;
 #[cfg(test)]
 mod integration_tests;
 
-use auth::{init_node_secret, init_reg_secret, node_secret, reg_secret, KeyStore};
+use auth::{
+    assert_recaptcha_in_production, init_node_secret, init_reg_secret, node_secret, reg_secret,
+    KeyStore,
+};
 use auth_login::{check_password_handler, login_handler, set_password_handler, sync_test_passwords};
 use agent_permissions::{
     grant_permissions_handler, list_permissions_handler, revoke_permission_handler,
@@ -115,6 +118,7 @@ async fn main() {
     init_node_secret();
     init_reg_secret();
     assert_production_secrets(node_secret(), reg_secret());
+    assert_recaptcha_in_production();
 
     let database_url = std::env::var("DATABASE_URL")
         .unwrap_or_else(|_| "postgres://quazar:quazar@localhost:5432/quazar".to_string());

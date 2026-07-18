@@ -44,7 +44,7 @@ curl http://localhost:8080/status
 | `QUAZAR_RATE_LIMIT_RPS` | Rate limit на защищённых роутах (default: 60) |
 | `QUAZAR_CORS_ORIGINS` | CORS origins (через запятую); `*` = permissive; без значения = dev defaults |
 | `RUST_LOG` | Уровень логов (`info`, `debug`) |
-| `QUAZAR_STRICT_SECRETS` | `true` — ошибка при дефолтных секретах; также включает обязательный reCAPTCHA |
+| `QUAZAR_STRICT_SECRETS` | `true` — ошибка при дефолтных секретах; также требует оба ключа reCAPTCHA при старте |
 | `RECAPTCHA_SITE_KEY` | Публичный site key Google reCAPTCHA v2/v3 (для фронта / `GET /api/public-config`) |
 | `RECAPTCHA_SECRET_KEY` | Секретный ключ; сервер проверяет токен через `https://www.google.com/recaptcha/api/siteverify` |
 | `RECAPTCHA_MIN_SCORE` | Мин. score для v3 (default `0.5`); игнорируется для v2 |

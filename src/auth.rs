@@ -53,6 +53,25 @@ pub fn is_production() -> bool {
         .unwrap_or(false)
 }
 
+/// In STRICT mode both reCAPTCHA keys are mandatory at process start.
+pub fn assert_recaptcha_in_production() {
+    if !is_production() {
+        return;
+    }
+    let secret_ok = std::env::var("RECAPTCHA_SECRET_KEY")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    let site_ok = std::env::var("RECAPTCHA_SITE_KEY")
+        .map(|s| !s.trim().is_empty())
+        .unwrap_or(false);
+    if !secret_ok || !site_ok {
+        panic!(
+            "QUAZAR_STRICT_SECRETS: RECAPTCHA_SITE_KEY and RECAPTCHA_SECRET_KEY must both be set \
+             (public-config would otherwise advertise captcha without a usable site key)"
+        );
+    }
+}
+
 /// In production `RECAPTCHA_SECRET_KEY` is mandatory; in dev an empty/missing key is allowed.
 pub fn ensure_recaptcha_secret() -> Result<(), String> {
     let configured = std::env::var("RECAPTCHA_SECRET_KEY")

@@ -170,10 +170,8 @@ fi
 PKG="$HTTP_BODY"
 node_id="$(echo "$PKG" | jq -r '.data.node_id // empty')"
 node_secret="$(echo "$PKG" | jq -r '.data.node_secret // empty')"
-reg_secret="$(echo "$PKG" | jq -r '.data.reg_secret // empty')"
 sync_peer="$(echo "$PKG" | jq -r '.data.sync_peer // empty')"
 peer_url="$(echo "$PKG" | jq -r '.data.peer_url // empty')"
-pkg_api_key="$(echo "$PKG" | jq -r '.data.api_key // empty')"
 network_id="$(echo "$PKG" | jq -r '.data.network_id // empty')"
 pkg_version="$(echo "$PKG" | jq -r '.data.version // empty')"
 citizen_name="$(echo "$PKG" | jq -r '.data.citizen_name // empty')"
@@ -181,17 +179,21 @@ qz_id="$(echo "$PKG" | jq -r '.data.qz_id // empty')"
 
 [[ -n "$node_id" ]] || die "package missing node_id"
 [[ -n "$node_secret" ]] || die "package missing node_secret"
-[[ -n "$reg_secret" ]] || die "package missing reg_secret"
 
 # Keep package form for node-started; strip 0x for local env (node_secrets_match normalizes).
 node_secret_for_register="$node_secret"
 node_secret="$(strip_0x "$node_secret")"
-reg_secret="$(strip_0x "$reg_secret")"
 
-admin_key="$API_KEY"
-if [[ -n "$pkg_api_key" ]]; then
-  admin_key="$pkg_api_key"
+# Never use the network's QUAZAR_REG_SECRET — generate a local one for this mayor node.
+if command -v openssl >/dev/null 2>&1; then
+  reg_secret="$(openssl rand -hex 32)"
+else
+  reg_secret="$(head -c 32 /dev/urandom | xxd -p -c 256 | head -c 64)"
 fi
+[[ -n "$reg_secret" ]] || die "failed to generate local reg_secret"
+
+# API key was already supplied to fetch the package; do not echo it from the response.
+admin_key="$API_KEY"
 
 # QUAZAR_BOOTSTRAP_PEERS expects id@url (see README / main.rs bootstrap parser).
 bootstrap_peers=""
@@ -210,6 +212,20 @@ else
 fi
 node_url="http://${NODE_IP}:8080"
 
+# STRICT mode requires both reCAPTCHA keys at startup; leave unset unless provided.
+recaptcha_site="${RECAPTCHA_SITE_KEY:-}"
+recaptcha_secret="${RECAPTCHA_SECRET_KEY:-}"
+if [[ -n "$recaptcha_site" && -n "$recaptcha_secret" ]]; then
+  strict_secrets="true"
+else
+  strict_secrets="false"
+  if [[ -z "$recaptcha_site" && -z "$recaptcha_secret" ]]; then
+    echo "install-node: RECAPTCHA keys unset — QUAZAR_STRICT_SECRETS=false (set both keys to enable STRICT)" >&2
+  else
+    echo "install-node: warning: only one RECAPTCHA key set — STRICT disabled until both are present" >&2
+  fi
+fi
+
 echo "Writing ${ENV_FILE} (node_id=${node_id}, citizen=${citizen_name:-?}, qz_id=${qz_id:-?}) ..."
 
 umask 077
@@ -221,7 +237,7 @@ umask 077
   echo "DATABASE_URL=postgres://quazar:${postgres_password}@postgres:5432/quazar"
   echo "QUAZAR_NODE_SECRET=${node_secret}"
   echo "QUAZAR_REG_SECRET=${reg_secret}"
-  echo "QUAZAR_STRICT_SECRETS=true"
+  echo "QUAZAR_STRICT_SECRETS=${strict_secrets}"
   echo "QUAZAR_NODE_ID=${node_id}"
   echo "QUAZAR_NODE_URL=${node_url}"
   echo "QUAZAR_PORT=8080"
@@ -233,8 +249,8 @@ umask 077
   if [[ -n "$bootstrap_peers" ]]; then
     echo "QUAZAR_BOOTSTRAP_PEERS=${bootstrap_peers}"
   fi
-  echo "RECAPTCHA_SITE_KEY="
-  echo "RECAPTCHA_SECRET_KEY="
+  echo "RECAPTCHA_SITE_KEY=${recaptcha_site}"
+  echo "RECAPTCHA_SECRET_KEY=${recaptcha_secret}"
   echo "QUAZAR_TRUSTED_PROXIES="
   echo "RUST_LOG=info"
 } >"$ENV_FILE"

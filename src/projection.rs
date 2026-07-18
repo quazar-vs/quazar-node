@@ -19,6 +19,8 @@ pub async fn apply_event_projections_in_tx(
             "CandidateVoted" => apply_candidate_voted(tx, event).await?,
             "CandidateApproved" => apply_candidate_approved(tx, event).await?,
             "CandidateAppointed" => apply_candidate_appointed(tx, event).await?,
+            "NodeStarted" => apply_node_started(tx, event).await?,
+            "MayorConfirmed" => apply_mayor_confirmed(tx, event).await?,
             "LawProposed" => apply_law_proposed(tx, event).await?,
             "LawVoteStarted" => apply_law_vote_started(tx, event).await?,
             "LawVoteResult" => apply_law_vote_result(tx, event).await?,
@@ -408,6 +410,110 @@ async fn apply_candidate_appointed(
     .map_err(|e| format!("CandidateAppointed api_keys sync failed: {}", e))?;
 
     tracing::info!(candidacy_id = %candidacy_id, citizen_id = %citizen_id, event_id = %event.event_id, "CandidateAppointed projected");
+    Ok(())
+}
+
+async fn apply_node_started(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let application_id = require_str(&event.data, "application_id")?;
+    let node_id = require_str(&event.data, "node_id")?;
+    let url = require_str(&event.data, "url")?;
+    let version = event
+        .data
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("0.7.0");
+    let status = event
+        .data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or("alive");
+
+    sqlx::query(
+        r#"
+        UPDATE mayor_applications
+        SET status = 'approved'
+        WHERE id = $1::uuid AND status IN ('pending', 'approved')
+        "#,
+    )
+    .bind(application_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("NodeStarted application projection failed: {}", e))?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO nodes (id, url, public_key, status, last_seen, version, created_at)
+        VALUES ($1, $2, '', $3, to_timestamp($4), $5, to_timestamp($4))
+        ON CONFLICT (id) DO UPDATE SET
+            url = EXCLUDED.url,
+            status = EXCLUDED.status,
+            last_seen = EXCLUDED.last_seen,
+            version = EXCLUDED.version
+        "#,
+    )
+    .bind(node_id)
+    .bind(url)
+    .bind(status)
+    .bind(event.timestamp as f64)
+    .bind(version)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("NodeStarted node projection failed: {}", e))?;
+
+    tracing::info!(
+        application_id = %application_id,
+        node_id = %node_id,
+        event_id = %event.event_id,
+        "NodeStarted projected"
+    );
+    Ok(())
+}
+
+async fn apply_mayor_confirmed(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let application_id = require_str(&event.data, "application_id")?;
+    let citizen_id = require_str(&event.data, "citizen_id")?;
+    let role = Role::Mayor;
+
+    sqlx::query(
+        r#"
+        UPDATE mayor_applications
+        SET status = 'confirmed'
+        WHERE id = $1::uuid AND status IN ('pending', 'approved', 'confirmed')
+        "#,
+    )
+    .bind(application_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("MayorConfirmed application projection failed: {}", e))?;
+
+    sqlx::query(
+        "UPDATE citizens SET role = $1, candidate_type = NULL, target_role = NULL WHERE id = $2",
+    )
+    .bind(role.as_str())
+    .bind(citizen_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("MayorConfirmed role projection failed: {}", e))?;
+
+    sqlx::query("UPDATE api_keys SET role = $1 WHERE citizen_id = $2")
+        .bind(role.as_str())
+        .bind(citizen_id)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("MayorConfirmed api_keys sync failed: {}", e))?;
+
+    tracing::info!(
+        application_id = %application_id,
+        citizen_id = %citizen_id,
+        event_id = %event.event_id,
+        "MayorConfirmed projected"
+    );
     Ok(())
 }
 

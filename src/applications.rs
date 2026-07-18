@@ -48,9 +48,15 @@ pub fn recaptcha_site_key() -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
-/// Captcha is required when configured, or always in production.
+/// Both site key and secret must be present before captcha is treated as configured.
+pub(crate) fn recaptcha_keys_ready() -> bool {
+    recaptcha_configured() && recaptcha_site_key().is_some()
+}
+
+/// Captcha is required only when both RECAPTCHA_SECRET_KEY and RECAPTCHA_SITE_KEY are set.
+/// (STRICT mode without keys fails at startup — see `assert_recaptcha_in_production`.)
 pub(crate) fn recaptcha_required() -> bool {
-    crate::auth::is_production() || recaptcha_configured()
+    recaptcha_keys_ready()
 }
 
 fn recaptcha_min_score() -> f64 {
@@ -230,5 +236,38 @@ pub async fn list_applications(
         })))
         .into_response(),
         Err(e) => response::internal_error(format!("Failed to list applications: {e}")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recaptcha_required_only_when_both_keys_set() {
+        // Isolate from ambient process env.
+        std::env::remove_var("RECAPTCHA_SECRET_KEY");
+        std::env::remove_var("RECAPTCHA_SITE_KEY");
+        std::env::remove_var("QUAZAR_STRICT_SECRETS");
+
+        assert!(!recaptcha_required());
+        assert!(recaptcha_site_key().is_none());
+
+        std::env::set_var("RECAPTCHA_SECRET_KEY", "secret-only");
+        assert!(!recaptcha_required());
+        assert!(recaptcha_site_key().is_none());
+
+        std::env::set_var("RECAPTCHA_SITE_KEY", "site-key");
+        assert!(recaptcha_keys_ready());
+        assert!(recaptcha_required());
+        assert_eq!(recaptcha_site_key().as_deref(), Some("site-key"));
+
+        // STRICT alone must not force required=true without a site key.
+        std::env::remove_var("RECAPTCHA_SITE_KEY");
+        std::env::set_var("QUAZAR_STRICT_SECRETS", "true");
+        assert!(!recaptcha_required());
+
+        std::env::remove_var("RECAPTCHA_SECRET_KEY");
+        std::env::remove_var("QUAZAR_STRICT_SECRETS");
     }
 }

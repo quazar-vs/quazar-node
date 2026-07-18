@@ -182,6 +182,8 @@ pub enum QuazarEventType {
     CandidateAppointed,
     CityRegistered,
     ChatHistoryAdded,
+    NodeStarted,
+    MayorConfirmed,
     MayorApplicationTimedOut,
 }
 
@@ -241,6 +243,8 @@ impl QuazarEventType {
             "CandidateAppointed" => Ok(QuazarEventType::CandidateAppointed),
             "CityRegistered" => Ok(QuazarEventType::CityRegistered),
             "ChatHistoryAdded" => Ok(QuazarEventType::ChatHistoryAdded),
+            "NodeStarted" => Ok(QuazarEventType::NodeStarted),
+            "MayorConfirmed" => Ok(QuazarEventType::MayorConfirmed),
             "MayorApplicationTimedOut" => Ok(QuazarEventType::MayorApplicationTimedOut),
             _ => Err(format!("Unknown event type: {}", s)),
         }
@@ -259,7 +263,19 @@ pub struct CityData {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_role_candidacy_target, CandidateType, Role};
+    use super::{is_role_candidacy_target, CandidateType, QuazarEventType, Role};
+
+    #[test]
+    fn mayor_lifecycle_event_types_parse() {
+        assert_eq!(
+            QuazarEventType::from_str("NodeStarted").unwrap(),
+            QuazarEventType::NodeStarted
+        );
+        assert_eq!(
+            QuazarEventType::from_str("MayorConfirmed").unwrap(),
+            QuazarEventType::MayorConfirmed
+        );
+    }
 
     #[test]
     fn role_from_str_and_as_str_roundtrip() {

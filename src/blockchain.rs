@@ -924,6 +924,8 @@ pub fn build_mayor_confirmed_event(
             "citizen_id": citizen_id,
             "citizen_name": citizen_name,
             "node_id": node_id,
+            "role": "Mayor",
+            "status": "confirmed",
         }),
         previous_hash: "0".to_string(),
         signatures: vec![],
@@ -1485,5 +1487,41 @@ mod tests {
         assert!(chains_share_prefix(&local, &peer, 3));
         let diverged = vec![block(1, "x"), block(2, "b"), block(3, "peer")];
         assert!(!chains_share_prefix(&local, &diverged, 3));
+    }
+
+    #[test]
+    fn mayor_confirmed_event_carries_projection_fields() {
+        let event = build_mayor_confirmed_event(
+            "mayor_confirmed_1",
+            "11111111-1111-1111-1111-111111111111",
+            "QZ-42",
+            "MayorCandidate",
+            "QZ-NODE-3",
+            "QZ-NODE",
+            1_700_000_000,
+        );
+        assert_eq!(event.event_type, "MayorConfirmed");
+        assert_eq!(event.data["role"], "Mayor");
+        assert_eq!(event.data["status"], "confirmed");
+        assert_eq!(event.data["citizen_id"], "QZ-42");
+        assert_eq!(event.data["node_id"], "QZ-NODE-3");
+    }
+
+    #[test]
+    fn node_started_event_carries_projection_fields() {
+        let event = build_node_started_event(
+            "node_started_1",
+            "11111111-1111-1111-1111-111111111111",
+            "QZ-42",
+            "MayorCandidate",
+            "QZ-NODE-3",
+            "http://203.0.113.10:8080",
+            "0.7.0",
+            "QZ-NODE",
+            1_700_000_000,
+        );
+        assert_eq!(event.event_type, "NodeStarted");
+        assert_eq!(event.data["status"], "alive");
+        assert_eq!(event.data["url"], "http://203.0.113.10:8080");
     }
 }

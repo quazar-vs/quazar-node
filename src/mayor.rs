@@ -22,8 +22,7 @@ use crate::gossip;
 use crate::models::Event;
 use crate::node_generator::{
     allocate_mayor_node_id, format_secret_for_package, generate_node_secret_hex,
-    network_reg_secret_for_package, peer_url_from_sync_peer, resolve_network_id,
-    resolve_network_version, MayorNodePackageParams,
+    peer_url_from_sync_peer, resolve_network_id, resolve_network_version, MayorNodePackageParams,
 };
 use crate::pending;
 use crate::nodes::{Node, NodeStatus};
@@ -127,14 +126,12 @@ pub struct MayorSetupPackageQuery {
 pub struct MayorSetupPackageResponse {
     pub node_id: String,
     pub node_secret: String,
-    pub reg_secret: String,
     /// Full bootstrap peer entry: `id@url` (preferred for QUAZAR_BOOTSTRAP_PEERS).
     pub sync_peer: String,
     /// Base URL extracted from sync_peer (no node id).
     pub peer_url: String,
     pub qz_id: String,
     pub citizen_name: String,
-    pub api_key: String,
     pub network_id: String,
     pub version: String,
 }
@@ -1525,12 +1522,10 @@ pub async fn build_mayor_setup_package(
     Ok(MayorSetupPackageResponse {
         node_id: node_id.clone(),
         node_secret: format_secret_for_package(&node_secret),
-        reg_secret: network_reg_secret_for_package(),
         sync_peer,
         peer_url,
         qz_id: app.citizen_id,
         citizen_name,
-        api_key: raw_api_key.to_string(),
         network_id,
         version,
     })
@@ -1629,7 +1624,6 @@ pub async fn deliver_mayor_node_package(
     Ok(MayorNodePackageParams {
         node_id,
         node_secret: format_secret_for_package(&node_secret),
-        reg_secret: network_reg_secret_for_package(),
         network_id,
         version,
         sync_peer,

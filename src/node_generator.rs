@@ -4,7 +4,6 @@ use serde::Serialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
-use crate::auth::reg_secret;
 use crate::models::Block;
 
 const NETWORK_VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -29,10 +28,6 @@ pub fn format_secret_for_package(secret: &str) -> String {
     s.to_string()
 }
 
-pub fn network_reg_secret_for_package() -> String {
-    format_secret_for_package(reg_secret())
-}
-
 pub fn generate_node_secret_hex() -> String {
     use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
@@ -46,6 +41,22 @@ pub fn generate_node_secret_hex() -> String {
             .to_le_bytes(),
     );
     format!("0x{:x}", hasher.finalize())
+}
+
+/// Local registration secret for a newly installed mayor node (never the network's).
+pub fn generate_reg_secret_hex() -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(b"quazar_mayor_reg_secret:");
+    hasher.update(Uuid::new_v4().as_bytes());
+    hasher.update(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+            .to_le_bytes(),
+    );
+    format!("{:x}", hasher.finalize())
 }
 
 fn parse_qz_node_suffix(id: &str) -> Option<u32> {
@@ -180,7 +191,6 @@ pub fn peer_url_from_sync_peer(sync_peer: &str) -> String {
 pub struct MayorNodePackageParams {
     pub node_id: String,
     pub node_secret: String,
-    pub reg_secret: String,
     pub network_id: String,
     pub version: String,
     pub sync_peer: String,
@@ -208,6 +218,15 @@ mod tests {
     fn format_secret_adds_0x_for_hex() {
         assert_eq!(format_secret_for_package("abcd0123"), "0xabcd0123");
         assert_eq!(format_secret_for_package("0xABCD"), "0xABCD");
+    }
+
+    #[test]
+    fn generate_reg_secret_is_hex_and_distinct() {
+        let a = generate_reg_secret_hex();
+        let b = generate_reg_secret_hex();
+        assert_eq!(a.len(), 64);
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        assert_ne!(a, b);
     }
 
     #[test]
