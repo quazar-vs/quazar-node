@@ -6,16 +6,44 @@ services:
     image: postgres:16-alpine
     restart: always
     environment:
-      POSTGRES_USER: quazar
+      POSTGRES_USER: ${POSTGRES_USER:-quazar}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
       POSTGRES_DB: quazar
     volumes:
       - quazar_pg_data:/var/lib/postgresql/data
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U quazar -d quazar"]
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d quazar"]
       interval: 5s
       timeout: 5s
       retries: 5
+
+  mailserver:
+    image: ghcr.io/docker-mailserver/docker-mailserver:14.0
+    hostname: mail.quazar.website
+    domainname: quazar.website
+    restart: always
+    stop_grace_period: 1m
+    ports:
+      - "25:25"
+      - "465:465"
+      - "587:587"
+    volumes:
+      - ./mail/docker-data/dms/mail-data:/var/mail
+      - ./mail/docker-data/dms/mail-state:/var/mail-state
+      - ./mail/docker-data/dms/mail-logs:/var/log/mail
+      - ./mail/docker-data/dms/config:/tmp/docker-mailserver
+      - /etc/letsencrypt:/etc/letsencrypt:ro
+      - /etc/localtime:/etc/localtime:ro
+    env_file:
+      - ./mail/mailserver.env
+    cap_add:
+      - NET_ADMIN
+    healthcheck:
+      test: ["CMD-SHELL", "ss -lnt | grep -q ':587' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 60s
 
   quazar-node:
     build: .
@@ -23,7 +51,7 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     environment:
-      DATABASE_URL: postgres://quazar:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/quazar
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
       QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}
       QUAZAR_REG_SECRET: ${QUAZAR_REG_SECRET:?QUAZAR_REG_SECRET must be set}
       QUAZAR_STRICT_SECRETS: ${QUAZAR_STRICT_SECRETS:-true}
@@ -40,9 +68,22 @@ services:
       QUAZAR_NETWORK_URL: ${QUAZAR_NETWORK_URL:-}
       QUAZAR_BOOTSTRAP_PEERS: ${QUAZAR_BOOTSTRAP_PEERS:-}
       RUST_LOG: ${RUST_LOG:-info}
+      # Self-hosted SMTP (docker-mailserver). GMAIL_* still work as fallback if SMTP_* unset.
+      SMTP_HOST: ${SMTP_HOST:-mailserver}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Квазар}
+      SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-true}
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+      GMAIL_FROM_NAME: ${GMAIL_FROM_NAME:-}
     depends_on:
       postgres:
         condition: service_healthy
+      mailserver:
+        condition: service_started
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/status"]
       interval: 10s
