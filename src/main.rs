@@ -29,6 +29,7 @@ mod citizenship_application;
 mod citizenship_portal;
 mod db;
 mod email;
+mod mail;
 mod exchange;
 mod crypto;
 mod gossip;

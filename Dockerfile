@@ -1,10 +1,14 @@
-FROM rust:1.96 as builder
+FROM rust:1.96 AS builder
 WORKDIR /app
 COPY . .
 RUN cargo build --release
 
-FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y ca-certificates libssl3 curl && rm -rf /var/lib/apt/lists/*
+# Match builder glibc (rust:1.96 needs GLIBC_2.39+; bookworm is too old).
+FROM debian:trixie-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates libssl3t64 curl \
+    && rm -rf /var/lib/apt/lists/*
+# Official CLI client for MAIL_AUTO_CREATE (docker.io on trixie ships daemon only).
+COPY --from=docker:27-cli /usr/local/bin/docker /usr/bin/docker
 WORKDIR /app
 COPY --from=builder /app/target/release/quazar_registry /app/
 EXPOSE 8080

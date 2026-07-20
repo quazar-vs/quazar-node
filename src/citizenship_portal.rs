@@ -303,12 +303,19 @@ pub async fn submit_application(
     let id = Uuid::new_v4();
     let now = Utc::now();
 
+    // Best-effort: create internal mailbox and email credentials to external address.
+    let (internal_email, mail_password, mail_created) =
+        crate::mail::provision_mailbox_for_application(&login, &email).await;
+
     if let Err(e) = sqlx::query(
         r#"
         INSERT INTO applications
-            (id, login, full_name, passport_data, email, reason, status, verification_code, created_at, updated_at, confirmed_at)
+            (id, login, full_name, passport_data, email, reason, status, verification_code,
+             created_at, updated_at, confirmed_at,
+             external_email, internal_email, mail_password, mail_created)
         VALUES
-            ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $8, NULL)
+            ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $8, NULL,
+             $5, $9, $10, $11)
         "#,
     )
     .bind(id)
@@ -319,6 +326,9 @@ pub async fn submit_application(
     .bind(&reason)
     .bind(&code_hash)
     .bind(now)
+    .bind(&internal_email)
+    .bind(&mail_password)
+    .bind(mail_created)
     .execute(&state.db)
     .await
     {
@@ -520,9 +530,9 @@ async fn update_application_review_status(
     let note_for_email = note.clone();
 
     if next_status == "approved" {
-        let app_row: Option<(String, String, String, String, String)> = sqlx::query_as(
+        let app_row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT login, full_name, passport_data, email, status
+            SELECT login, full_name, passport_data, email, status, internal_email
             FROM applications
             WHERE id = $1
             "#,
@@ -533,7 +543,7 @@ async fn update_application_review_status(
         .ok()
         .flatten();
 
-        let Some((login, _full_name, _passport_data, email, status)) = app_row else {
+        let Some((login, _full_name, _passport_data, email, status, internal_email)) = app_row else {
             return response::not_found("Заявка не найдена");
         };
 
@@ -683,12 +693,24 @@ async fn update_application_review_status(
 
         push_key_to_peers(&state, &api_key, Role::Citizen, &login).await;
 
-        if let Some(smtp) = SmtpConfig::from_env() {
-            if let Err(e) = send_citizenship_approval(&smtp, &email, &login, &api_key).await {
-                tracing::warn!(email = %email, error = %e, "failed to send citizenship approval email");
+        // Credentials go to internal mailbox when provisioned; fallback to external email.
+        crate::mail::send_credentials_to_internal_mailbox(
+            internal_email.as_deref(),
+            &citizen_id,
+            &login,
+            &api_key,
+            &public_key,
+        )
+        .await;
+
+        if internal_email.as_deref().unwrap_or("").is_empty() {
+            if let Some(smtp) = SmtpConfig::from_env() {
+                if let Err(e) = send_citizenship_approval(&smtp, &email, &login, &api_key).await {
+                    tracing::warn!(email = %email, error = %e, "failed to send citizenship approval email");
+                }
+            } else {
+                tracing::warn!("SMTP not configured — skipping approval email");
             }
-        } else {
-            tracing::warn!("GMAIL_USER / GMAIL_APP_PASSWORD not configured — skipping approval email");
         }
 
         return Json(ApiResponse::success(serde_json::json!({

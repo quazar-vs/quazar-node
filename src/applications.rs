@@ -36,8 +36,21 @@ pub struct ListQuery {
 
 pub(crate) fn recaptcha_configured() -> bool {
     std::env::var("RECAPTCHA_SECRET_KEY")
-        .map(|s| !s.trim().is_empty())
+        .map(|s| is_real_recaptcha_key(&s))
         .unwrap_or(false)
+}
+
+fn is_real_recaptcha_key(raw: &str) -> bool {
+    let s = raw.trim();
+    if s.is_empty() {
+        return false;
+    }
+    matches!(
+        s.to_ascii_lowercase().as_str(),
+        "disabled" | "none" | "null" | "false" | "off" | "0" | "placeholder" | "changeme"
+    )
+    .then_some(false)
+    .unwrap_or(true)
 }
 
 /// Public site key for frontend widgets (v2 checkbox / v3). Never secret.
@@ -45,7 +58,7 @@ pub fn recaptcha_site_key() -> Option<String> {
     std::env::var("RECAPTCHA_SITE_KEY")
         .ok()
         .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
+        .filter(|s| is_real_recaptcha_key(s))
 }
 
 /// Both site key and secret must be present before captcha is treated as configured.
@@ -267,7 +280,13 @@ mod tests {
         std::env::set_var("QUAZAR_STRICT_SECRETS", "true");
         assert!(!recaptcha_required());
 
+        std::env::set_var("RECAPTCHA_SITE_KEY", "disabled");
+        std::env::set_var("RECAPTCHA_SECRET_KEY", "disabled");
+        assert!(!recaptcha_required());
+        assert!(recaptcha_site_key().is_none());
+
         std::env::remove_var("RECAPTCHA_SECRET_KEY");
+        std::env::remove_var("RECAPTCHA_SITE_KEY");
         std::env::remove_var("QUAZAR_STRICT_SECRETS");
     }
 }

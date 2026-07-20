@@ -575,13 +575,11 @@ impl AuthContext {
             && matches!(self.role, Role::Founder | Role::Aiya)
     }
 
+    /// Add peers to the registry and PeerListUpdate events — Founder and Aiya only.
     pub fn can_manage_peers(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
-            && matches!(
-                self.role,
-                Role::Founder | Role::Aiya | Role::Mayor | Role::Guardian
-            )
+            && matches!(self.role, Role::Founder | Role::Aiya)
     }
 
     pub fn can_add_balance(&self) -> bool {
@@ -956,6 +954,17 @@ mod tests {
             let a = ctx(role);
             assert_eq!(a.can_vote(), a.can_vote_in_election());
         }
+    }
+
+    #[test]
+    fn can_manage_peers_founder_and_aiya_only() {
+        assert!(ctx(Role::Founder).can_manage_peers());
+        assert!(ctx(Role::Aiya).can_manage_peers());
+        assert!(!ctx(Role::Mayor).can_manage_peers());
+        assert!(!ctx(Role::Guardian).can_manage_peers());
+        assert!(!ctx(Role::Citizen).can_manage_peers());
+        assert!(!ctx(Role::Agent).can_manage_peers());
+        assert!(!AuthContext::node().can_manage_peers());
     }
 
     #[test]

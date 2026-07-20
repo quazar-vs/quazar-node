@@ -171,7 +171,7 @@ pub async fn add_peer(
     Json(peer): Json<Node>,
 ) -> impl IntoResponse {
     if !auth.can_manage_peers() {
-        return response::forbidden("Only Aiya, Founder, Mayor and Guardian can add peers (Agent: read-only)");
+        return response::forbidden("Only Aiya and Founder can add peers (Agent: read-only)");
     }
 
     match state.node_registry.upsert_node(&peer).await {

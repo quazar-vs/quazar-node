@@ -17,39 +17,45 @@ services:
       timeout: 5s
       retries: 5
 
+  # Lightweight Postfix + Dovecot (replaces docker-mailserver)
   mailserver:
-    image: ghcr.io/docker-mailserver/docker-mailserver:14.0
+    build: ./mail
+    image: quazar-mail:local
     hostname: mail.quazar.website
     domainname: quazar.website
     restart: always
-    stop_grace_period: 1m
+    stop_grace_period: 30s
     ports:
       - "25:25"
+      - "143:143"
       - "465:465"
       - "587:587"
+      - "993:993"
+    environment:
+      MAIL_DOMAIN: ${MAIL_DOMAIN:-quazar.website}
+      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-mail.quazar.website}
+      POSTMASTER: ${MAIL_FROM:-no-reply@quazar.website}
+      SEED_MAIL_PASSWORD: ${SMTP_PASSWORD:-}
     volumes:
-      - ./mail/docker-data/dms/mail-data:/var/mail
-      - ./mail/docker-data/dms/mail-state:/var/mail-state
-      - ./mail/docker-data/dms/mail-logs:/var/log/mail
-      - ./mail/docker-data/dms/config:/tmp/docker-mailserver
-      - /etc/letsencrypt:/etc/letsencrypt:ro
-      - /etc/localtime:/etc/localtime:ro
-    env_file:
-      - ./mail/mailserver.env
-    cap_add:
-      - NET_ADMIN
+      - quazar_mail_data:/var/mail/vhosts
+      - quazar_mail_users:/etc/dovecot/users
+      - quazar_mail_maps:/etc/postfix/maps
+      - quazar_mail_ssl:/etc/ssl/mail
     healthcheck:
-      test: ["CMD-SHELL", "ss -lnt | grep -q ':587' || exit 1"]
-      interval: 30s
-      timeout: 10s
+      test: ["CMD-SHELL", "nc -z 127.0.0.1 25 && nc -z 127.0.0.1 587"]
+      interval: 20s
+      timeout: 5s
       retries: 5
-      start_period: 60s
+      start_period: 40s
 
   quazar-node:
     build: .
     restart: always
     ports:
       - "127.0.0.1:8080:8080"
+    volumes:
+      # MAIL_AUTO_CREATE: docker exec into mailserver
+      - /var/run/docker.sock:/var/run/docker.sock
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
       QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}
@@ -68,7 +74,6 @@ services:
       QUAZAR_NETWORK_URL: ${QUAZAR_NETWORK_URL:-}
       QUAZAR_BOOTSTRAP_PEERS: ${QUAZAR_BOOTSTRAP_PEERS:-}
       RUST_LOG: ${RUST_LOG:-info}
-      # Self-hosted SMTP (docker-mailserver). GMAIL_* still work as fallback if SMTP_* unset.
       SMTP_HOST: ${SMTP_HOST:-mailserver}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
@@ -79,11 +84,15 @@ services:
       GMAIL_USER: ${GMAIL_USER:-}
       GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
       GMAIL_FROM_NAME: ${GMAIL_FROM_NAME:-}
+      MAIL_AUTO_CREATE: ${MAIL_AUTO_CREATE:-true}
+      MAIL_DOMAIN: ${MAIL_DOMAIN:-quazar.website}
+      MAIL_FROM: ${MAIL_FROM:-no-reply@quazar.website}
+      MAIL_CONTAINER: ${MAIL_CONTAINER:-quazar-mailserver-1}
     depends_on:
       postgres:
         condition: service_healthy
       mailserver:
-        condition: service_started
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/status"]
       interval: 10s
@@ -93,3 +102,7 @@ services:
 
 volumes:
   quazar_pg_data:
+  quazar_mail_data:
+  quazar_mail_users:
+  quazar_mail_maps:
+  quazar_mail_ssl:

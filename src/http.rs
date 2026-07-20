@@ -209,7 +209,7 @@ pub fn build_cors_layer() -> CorsLayer {
 fn enforce_path_rbac(path: &str, auth: &AuthContext) -> Option<Response> {
     if (path == "/peers" || path == "/peers/network") && !auth.can_manage_peers() {
         return Some(response::forbidden(
-            "Insufficient permissions. Only Aiya, Founder, Mayor and Guardian can manage peers (Agent: read-only)",
+            "Insufficient permissions. Only Aiya and Founder can manage peers (Agent: read-only)",
         ));
     }
     if path == "/exchange/balance/add" && !auth.can_add_balance() {

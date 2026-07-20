@@ -1380,10 +1380,44 @@ pub async fn apply_for_mayor_node(
     let expires_at = now + Duration::hours(24);
     let sync_peer = select_mayor_sync_peer(&state).await?;
 
+    let citizen_row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT name, email FROM citizens WHERE id = $1",
+    )
+    .bind(&citizen_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let (citizen_name, citizen_email) = citizen_row.unwrap_or_else(|| (citizen_id.clone(), None));
+    let external_email = citizen_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("")
+        .to_string();
+
+    let (internal_email, mail_password, mail_created) = if !external_email.is_empty() {
+        crate::mail::provision_mailbox_for_application(
+            &format!("mayor.{}", citizen_id),
+            &external_email,
+        )
+        .await
+    } else {
+        tracing::info!(%citizen_id, "mayor apply: no citizen email — skip mailbox");
+        (
+            crate::mail::build_internal_email(&format!("mayor.{}", citizen_id)),
+            crate::mail::generate_mail_password(),
+            false,
+        )
+    };
+
     sqlx::query(
         r#"
-        INSERT INTO mayor_applications (id, citizen_id, node_ip, sync_peer, status, created_at, expires_at)
-        VALUES ($1, $2, $3, $4, 'pending', $5, $6)
+        INSERT INTO mayor_applications (
+            id, citizen_id, node_ip, sync_peer, status, created_at, expires_at,
+            external_email, internal_email, mail_password, mail_created
+        )
+        VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10)
         "#,
     )
     .bind(application_id)
@@ -1392,6 +1426,14 @@ pub async fn apply_for_mayor_node(
     .bind(&sync_peer)
     .bind(now)
     .bind(expires_at)
+    .bind(if external_email.is_empty() {
+        None::<String>
+    } else {
+        Some(external_email)
+    })
+    .bind(&internal_email)
+    .bind(&mail_password)
+    .bind(mail_created)
     .execute(&state.db)
     .await
     .map_err(|e| {
@@ -1406,6 +1448,8 @@ pub async fn apply_for_mayor_node(
         }
         MayorError::Database(e.to_string())
     })?;
+
+    let _ = citizen_name; // reserved for future mail templates
 
     Ok(MayorApplyResponse {
         application_id: application_id.to_string(),
@@ -2228,7 +2272,37 @@ pub async fn confirm_mayor_node(
         timestamp,
     );
 
-    submit_mayor_pending_event(state, event).await?;
+    submit_mayor_pending_event(state.clone(), event).await?;
+
+    // Notify mayor on internal mailbox (best-effort) after confirmation event is queued.
+    let mail_meta: Option<(Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT ma.internal_email, c.email FROM mayor_applications ma \
+         JOIN citizens c ON c.id = ma.citizen_id WHERE ma.id = $1",
+    )
+    .bind(app.id)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    if let Some((internal, _ext)) = mail_meta {
+        // No new API key here — send identity + node context reminder.
+        let pk: String = sqlx::query_scalar("SELECT public_key FROM citizens WHERE id = $1")
+            .bind(&app.citizen_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .unwrap_or_default();
+        crate::mail::send_credentials_to_internal_mailbox(
+            internal.as_deref(),
+            &app.citizen_id,
+            &citizen_name,
+            "(см. ранее выданный API-ключ гражданина)",
+            &pk,
+        )
+        .await;
+    }
 
     Ok(MayorConfirmResponse {
         application_id: app.id.to_string(),

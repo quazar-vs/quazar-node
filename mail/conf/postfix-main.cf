@@ -1,0 +1,42 @@
+# Postfix main.cf template — placeholders __HOSTNAME__ / __DOMAIN__
+smtpd_banner = $myhostname ESMTP
+biff = no
+append_dot_mydomain = no
+readme_directory = no
+compatibility_level = 3.6
+
+myhostname = __HOSTNAME__
+myorigin = __DOMAIN__
+mydestination = localhost
+mynetworks = 127.0.0.0/8 [::1]/128 172.16.0.0/12 10.0.0.0/8
+inet_interfaces = all
+inet_protocols = ipv4
+
+# Virtual mailboxes
+virtual_mailbox_domains = __DOMAIN__
+virtual_mailbox_base = /var/mail/vhosts
+virtual_mailbox_maps = hash:/etc/postfix/maps/vmailbox
+virtual_minimum_uid = 100
+virtual_uid_maps = static:5000
+virtual_gid_maps = static:5000
+virtual_alias_maps =
+
+# Local delivery via LMTP to Dovecot
+virtual_transport = lmtp:unix:private/dovecot-lmtp
+
+# TLS
+smtpd_tls_cert_file = /etc/ssl/mail/fullchain.pem
+smtpd_tls_key_file = /etc/ssl/mail/privkey.pem
+smtpd_tls_security_level = may
+smtp_tls_security_level = may
+smtpd_tls_auth_only = no
+
+# SASL via Dovecot
+smtpd_sasl_type = dovecot
+smtpd_sasl_path = private/auth
+smtpd_sasl_auth_enable = yes
+smtpd_relay_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+smtpd_recipient_restrictions = permit_mynetworks, permit_sasl_authenticated, reject_unauth_destination
+
+mailbox_size_limit = 0
+message_size_limit = 26214400

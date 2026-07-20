@@ -1,0 +1,89 @@
+#!/usr/bin/env bash
+# Compatible CLI: setup email add|list|del  (used by quazar-node MAIL_AUTO_CREATE)
+set -euo pipefail
+
+USERS_FILE="${USERS_FILE:-/etc/dovecot/users/passwd}"
+VMAILBOX="${VMAILBOX:-/etc/postfix/maps/vmailbox}"
+MAIL_ROOT="${MAIL_ROOT:-/var/mail/vhosts}"
+DOMAIN="${MAIL_DOMAIN:-quazar.website}"
+
+ensure_files() {
+  mkdir -p "$(dirname "$USERS_FILE")" "$(dirname "$VMAILBOX")" "$MAIL_ROOT"
+  touch "$USERS_FILE" "$VMAILBOX"
+}
+
+hash_pw() {
+  doveadm pw -s SHA512-CRYPT -p "$1"
+}
+
+cmd_email_add() {
+  local email="${1:-}" pass="${2:-}"
+  [[ -n "$email" && -n "$pass" ]] || {
+    echo "usage: setup email add <email> <password>" >&2
+    exit 1
+  }
+  email="$(echo "$email" | tr '[:upper:]' '[:lower:]')"
+  local localpart="${email%@*}"
+  local domainpart="${email#*@}"
+  if [[ "$domainpart" != "$DOMAIN" ]]; then
+    echo "only @${DOMAIN} addresses are allowed" >&2
+    exit 1
+  fi
+  ensure_files
+  if grep -q "^${email}:" "$USERS_FILE" 2>/dev/null; then
+    echo "mailbox already exists: $email" >&2
+    exit 0
+  fi
+  local hash
+  hash="$(hash_pw "$pass")"
+  echo "${email}:${hash}::::::" >> "$USERS_FILE"
+  echo "${email} ${domainpart}/${localpart}/" >> "$VMAILBOX"
+  mkdir -p "${MAIL_ROOT}/${domainpart}/${localpart}/cur" \
+           "${MAIL_ROOT}/${domainpart}/${localpart}/new" \
+           "${MAIL_ROOT}/${domainpart}/${localpart}/tmp"
+  chown -R vmail:vmail "${MAIL_ROOT}/${domainpart}"
+  chmod -R 700 "${MAIL_ROOT}/${domainpart}/${localpart}"
+  postmap "$VMAILBOX" 2>/dev/null || true
+  postfix reload 2>/dev/null || true
+  doveadm reload 2>/dev/null || true
+  echo "added $email"
+}
+
+cmd_email_list() {
+  ensure_files
+  if [[ ! -s "$USERS_FILE" ]]; then
+    echo "(no mailboxes)"
+    return 0
+  fi
+  cut -d: -f1 "$USERS_FILE"
+}
+
+cmd_email_del() {
+  local email="${1:-}"
+  [[ -n "$email" ]] || { echo "usage: setup email del <email>" >&2; exit 1; }
+  email="$(echo "$email" | tr '[:upper:]' '[:lower:]')"
+  ensure_files
+  grep -v "^${email}:" "$USERS_FILE" > "${USERS_FILE}.tmp" || true
+  mv "${USERS_FILE}.tmp" "$USERS_FILE"
+  grep -v "^${email} " "$VMAILBOX" > "${VMAILBOX}.tmp" || true
+  mv "${VMAILBOX}.tmp" "$VMAILBOX"
+  postmap "$VMAILBOX" 2>/dev/null || true
+  postfix reload 2>/dev/null || true
+  doveadm reload 2>/dev/null || true
+  echo "deleted $email"
+}
+
+case "${1:-}" in
+  email)
+    case "${2:-}" in
+      add) shift 2; cmd_email_add "$@" ;;
+      list) cmd_email_list ;;
+      del|delete|rm) shift 2; cmd_email_del "$@" ;;
+      *) echo "usage: setup email add|list|del" >&2; exit 1 ;;
+    esac
+    ;;
+  *)
+    echo "usage: setup email add|list|del" >&2
+    exit 1
+    ;;
+esac

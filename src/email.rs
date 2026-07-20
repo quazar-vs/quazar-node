@@ -15,6 +15,7 @@ pub struct SmtpConfig {
     pub from_name: String,
     pub host: String,
     pub port: u16,
+    pub tls_insecure: bool,
 }
 
 impl SmtpConfig {
@@ -37,8 +38,15 @@ impl SmtpConfig {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(587);
-        let from_name = std::env::var("GMAIL_FROM_NAME")
+        let from_name = std::env::var("SMTP_FROM_NAME")
+            .or_else(|_| std::env::var("GMAIL_FROM_NAME"))
             .unwrap_or_else(|_| "Квазар".to_string());
+        let tls_insecure = std::env::var("SMTP_TLS_INSECURE")
+            .map(|v| {
+                let t = v.trim().to_ascii_lowercase();
+                t == "1" || t == "true" || t == "yes" || t == "on"
+            })
+            .unwrap_or(false);
         Some(Self {
             user: user.trim().to_string(),
             username: username.trim().to_string(),
@@ -46,15 +54,25 @@ impl SmtpConfig {
             from_name,
             host: host.trim().to_string(),
             port,
+            tls_insecure,
         })
     }
 }
 
+fn build_tls_parameters(config: &SmtpConfig) -> Result<TlsParameters, String> {
+    let mut builder = TlsParameters::builder(config.host.clone());
+    if config.tls_insecure {
+        builder = builder.dangerous_accept_invalid_certs(true);
+    }
+    builder
+        .build()
+        .map_err(|e| format!("TLS parameters error: {e}"))
+}
+
 fn build_mailer(config: &SmtpConfig) -> Result<SmtpTransport, String> {
     let creds = Credentials::new(config.username.clone(), config.app_password.clone());
+    let tls = build_tls_parameters(config)?;
     if config.port == 465 {
-        let tls = TlsParameters::new(config.host.clone())
-            .map_err(|e| format!("TLS parameters error: {e}"))?;
         Ok(SmtpTransport::relay(&config.host)
             .map_err(|e| format!("SMTP relay error: {e}"))?
             .port(465)
@@ -63,9 +81,11 @@ fn build_mailer(config: &SmtpConfig) -> Result<SmtpTransport, String> {
             .timeout(Some(Duration::from_secs(20)))
             .build())
     } else {
-        Ok(SmtpTransport::starttls_relay(&config.host)
+        // STARTTLS on 587 (and similar): use relay + Required TLS with optional insecure.
+        Ok(SmtpTransport::relay(&config.host)
             .map_err(|e| format!("SMTP relay error: {e}"))?
             .port(config.port)
+            .tls(Tls::Required(tls))
             .credentials(creds)
             .timeout(Some(Duration::from_secs(20)))
             .build())
@@ -101,6 +121,15 @@ fn send_plain_email_blocking(
         .map_err(|e| format!("failed to send email: {e}"))?;
 
     Ok(())
+}
+
+pub async fn send_plain_email_public(
+    config: &SmtpConfig,
+    to_email: &str,
+    subject: &str,
+    body: String,
+) -> Result<(), String> {
+    send_plain_email(config, to_email, subject, body).await
 }
 
 async fn send_plain_email(
