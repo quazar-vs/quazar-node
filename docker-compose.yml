@@ -56,6 +56,8 @@ services:
     volumes:
       # MAIL_AUTO_CREATE: docker exec into mailserver
       - /var/run/docker.sock:/var/run/docker.sock
+      # VPN SSH pubkeys written by node into host authorized_keys
+      - /var/lib/quazar/tunnel:/var/lib/quazar/tunnel
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
       QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}

@@ -160,45 +160,121 @@ fn generate_openssh_keypair(comment: &str) -> Result<(String, String), String> {
     Ok((private_openssh.to_string(), public_openssh))
 }
 
-fn append_authorized_key(public_key: &str) {
-    let Ok(path) = std::env::var("VPN_AUTHORIZED_KEYS_PATH") else {
-        return;
-    };
+const VPN_INACTIVE_RETENTION_DAYS: i64 = 7;
+
+fn authorized_keys_path() -> Option<std::path::PathBuf> {
+    let path = std::env::var("VPN_AUTHORIZED_KEYS_PATH").ok()?;
     let path = path.trim();
     if path.is_empty() {
-        return;
+        return None;
     }
-    let path = Path::new(path);
+    Some(Path::new(path).to_path_buf())
+}
+
+/// Rewrite `authorized_keys` from currently active, non-expired public keys only.
+pub async fn rewrite_authorized_keys(pool: &PgPool) {
+    let Some(path) = authorized_keys_path() else {
+        return;
+    };
     if let Some(parent) = path.parent() {
         if let Err(e) = std::fs::create_dir_all(parent) {
             tracing::warn!(error = %e, path = %parent.display(), "VPN authorized_keys parent dir");
             return;
         }
     }
-    let line = format!("{}\n", public_key.trim());
-    let existing = std::fs::read_to_string(path).unwrap_or_default();
-    if existing.lines().any(|l| l.trim() == public_key.trim()) {
+
+    let keys: Result<Vec<(String,)>, sqlx::Error> = sqlx::query_as(
+        r#"
+        SELECT public_key
+        FROM vpn_keys
+        WHERE is_active = TRUE
+          AND expires_at > NOW()
+        ORDER BY created_at ASC
+        "#,
+    )
+    .fetch_all(pool)
+    .await;
+
+    let keys = match keys {
+        Ok(k) => k,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to load VPN public keys for authorized_keys rewrite");
+            return;
+        }
+    };
+
+    let mut content = String::new();
+    for (public_key,) in &keys {
+        let line = public_key.trim();
+        if line.is_empty() {
+            continue;
+        }
+        content.push_str(line);
+        content.push('\n');
+    }
+
+    let tmp = path.with_extension("authorized_keys.tmp");
+    if let Err(e) = std::fs::write(&tmp, content.as_bytes()) {
+        tracing::warn!(
+            error = %e,
+            path = %tmp.display(),
+            "Failed to write VPN authorized_keys temp file"
+        );
         return;
     }
-    match std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(path)
+    #[cfg(unix)]
     {
-        Ok(mut f) => {
-            use std::io::Write;
-            if let Err(e) = f.write_all(line.as_bytes()) {
-                tracing::warn!(error = %e, "Failed to append VPN public key to authorized_keys");
-            }
-        }
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                path = %path.display(),
-                "Failed to open VPN authorized_keys"
-            );
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
+    }
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        tracing::warn!(
+            error = %e,
+            path = %path.display(),
+            "Failed to replace VPN authorized_keys"
+        );
+        let _ = std::fs::remove_file(&tmp);
+        return;
+    }
+    // sshd opens AuthorizedKeysFile as quazar-tunnel — root:root 0600 => Permission denied.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+        let owner = std::env::var("VPN_AUTHORIZED_KEYS_OWNER")
+            .unwrap_or_else(|_| "999:987".to_string());
+        let status = std::process::Command::new("chown")
+            .arg(&owner)
+            .arg(&path)
+            .status();
+        match status {
+            Ok(s) if s.success() => {}
+            Ok(s) => tracing::warn!(code = ?s.code(), owner = %owner, "chown authorized_keys failed"),
+            Err(e) => tracing::warn!(error = %e, owner = %owner, "chown authorized_keys failed"),
         }
     }
+    tracing::info!(
+        path = %path.display(),
+        active_keys = keys.len(),
+        "VPN authorized_keys rewritten from active keys"
+    );
+}
+
+/// Delete inactive VPN rows older than retention (private material already stripped).
+pub async fn gc_inactive_vpn_keys(pool: &PgPool) -> Result<u64, String> {
+    let result = sqlx::query(
+        r#"
+        DELETE FROM vpn_keys
+        WHERE COALESCE(is_active, FALSE) = FALSE
+          AND created_at < NOW() - make_interval(days => $1::int)
+        "#,
+    )
+    .bind(VPN_INACTIVE_RETENTION_DAYS as i32)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to GC inactive VPN keys: {e}"))?;
+
+    Ok(result.rows_affected())
 }
 
 /// Generate Ed25519 OpenSSH keypair, deactivate prior active keys, persist, return private once.
@@ -222,7 +298,7 @@ pub async fn generate_vpn_key(
     sqlx::query(
         r#"
         UPDATE vpn_keys
-        SET is_active = FALSE
+        SET is_active = FALSE, private_key = ''
         WHERE citizen_id = $1 AND is_active = TRUE
         "#,
     )
@@ -251,7 +327,7 @@ pub async fn generate_vpn_key(
         .await
         .map_err(|e| format!("Failed to commit VPN key: {e}"))?;
 
-    append_authorized_key(&public_key);
+    rewrite_authorized_keys(pool).await;
 
     Ok(VpnKeyResponse {
         id,
@@ -343,7 +419,7 @@ pub async fn revoke_vpn_key(pool: &PgPool, citizen_id: &str) -> Result<bool, Str
     let result = sqlx::query(
         r#"
         UPDATE vpn_keys
-        SET is_active = FALSE
+        SET is_active = FALSE, private_key = ''
         WHERE citizen_id = $1 AND is_active = TRUE
         "#,
     )
@@ -352,7 +428,11 @@ pub async fn revoke_vpn_key(pool: &PgPool, citizen_id: &str) -> Result<bool, Str
     .await
     .map_err(|e| format!("Failed to revoke VPN key: {e}"))?;
 
-    Ok(result.rows_affected() > 0)
+    let changed = result.rows_affected() > 0;
+    if changed {
+        rewrite_authorized_keys(pool).await;
+    }
+    Ok(changed)
 }
 
 /// Deactivate expired or idle keys:
@@ -361,7 +441,7 @@ pub async fn cleanup_expired_keys(pool: &PgPool) -> Result<u64, String> {
     let result = sqlx::query(
         r#"
         UPDATE vpn_keys
-        SET is_active = FALSE
+        SET is_active = FALSE, private_key = ''
         WHERE is_active = TRUE
           AND (
             expires_at < NOW()
@@ -373,7 +453,19 @@ pub async fn cleanup_expired_keys(pool: &PgPool) -> Result<u64, String> {
     .await
     .map_err(|e| format!("Failed to cleanup VPN keys: {e}"))?;
 
-    Ok(result.rows_affected())
+    let deactivated = result.rows_affected();
+    // Always rewrite so authorized_keys cannot drift from DB (stale pubkeys).
+    rewrite_authorized_keys(pool).await;
+
+    match gc_inactive_vpn_keys(pool).await {
+        Ok(n) if n > 0 => {
+            tracing::info!(deleted = n, "VPN inactive keys garbage-collected");
+        }
+        Ok(_) => {}
+        Err(e) => tracing::warn!(error = %e, "VPN inactive key GC failed"),
+    }
+
+    Ok(deactivated)
 }
 
 /// List all currently active (and not expired) VPN keys — admin view (no private keys).
