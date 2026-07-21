@@ -46,6 +46,8 @@ mod projection;
 mod referendum;
 mod register_verify;
 mod response;
+mod tunnel;
+mod vpn;
 mod svod;
 mod types;
 mod validator;
@@ -64,6 +66,13 @@ use agent_permissions::{
 };
 use citizenship_application::citizenship_application_handler;
 use register_verify::{send_code_handler, verify_code_handler};
+use tunnel::{
+    tunnel_clients_handler, tunnel_config_handler, tunnel_connect_handler, tunnel_heartbeat_handler,
+    tunnel_stats_handler, tunnel_status_handler, TunnelRegistry,
+};
+use vpn::{
+    generate_vpn_key_handler, list_vpn_keys_handler, revoke_vpn_key_handler, vpn_status_handler,
+};
 use crypto::assert_production_secrets;
 use citizen::*;
 use candidacy::{
@@ -93,7 +102,7 @@ use mayor::{
     mayor_setup_package_handler, nominate_handler as mayor_nominate_handler,
     start_election_handler, start_mayor_timeout_worker, vote_handler as mayor_vote_handler,
 };
-use handlers::background_sync;
+use handlers::{background_sync, background_vpn_cleanup};
 use http::{auth_middleware, build_cors_layer, public_rate_limit_middleware, rate_limit_middleware};
 use nodes::{Node, NodeRegistry, NodeStatus};
 
@@ -105,6 +114,7 @@ pub struct AppState {
     node_registry: Arc<NodeRegistry>,
     pub node_id: String,
     pub channel_hub: Arc<ChannelHub>,
+    pub tunnel_registry: Arc<TunnelRegistry>,
     /// Trusted proxies for XFF: `nodes` registry (non-local) + `QUAZAR_TRUSTED_PROXIES`.
     pub trusted_proxies: client_ip::TrustedProxyCache,
 }
@@ -203,6 +213,7 @@ async fn main() {
         node_registry,
         node_id,
         channel_hub: Arc::new(ChannelHub::new()),
+        tunnel_registry: Arc::new(TunnelRegistry::new()),
         trusted_proxies,
     });
 
@@ -217,6 +228,11 @@ async fn main() {
     });
 
     start_mayor_timeout_worker(state.clone());
+
+    let state_vpn = state.clone();
+    tokio::spawn(async move {
+        background_vpn_cleanup(state_vpn).await;
+    });
 
     let public_routes = Router::new()
         .route("/auth/login", post(login_handler))
@@ -238,6 +254,12 @@ async fn main() {
         )
         .route("/api/public-config", get(applications::public_config_handler))
         .route("/api/public/stats", get(public_stats_handler))
+        .route("/api/tunnel/status", get(tunnel_status_handler))
+        .route("/api/tunnel/stats", get(tunnel_stats_handler))
+        .route("/api/tunnel/config", get(tunnel_config_handler))
+        .route("/api/tunnel/connect", post(tunnel_connect_handler))
+        .route("/api/tunnel/heartbeat", post(tunnel_heartbeat_handler))
+        .route("/api/tunnel/clients", get(tunnel_clients_handler))
         .route("/health", get(health_handler))
         .route("/citizen/apply", post(apply_for_citizenship))
         .route("/citizen/apply/citizenship", post(apply_for_citizenship))
@@ -367,6 +389,10 @@ async fn main() {
             "/admin/agent/:id/permissions/:perm",
             delete(revoke_permission_handler),
         )
+        .route("/api/vpn/key", post(generate_vpn_key_handler))
+        .route("/api/vpn/status", get(vpn_status_handler))
+        .route("/api/vpn/revoke", post(revoke_vpn_key_handler))
+        .route("/api/vpn/keys", get(list_vpn_keys_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),

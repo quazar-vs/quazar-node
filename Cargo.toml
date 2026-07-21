@@ -22,6 +22,7 @@ governor = "0.6"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+ssh-key = { version = "0.6", default-features = false, features = ["alloc", "ed25519", "getrandom"] }
 rand_core = "0.6"
 rand = "0.8"
 hex = "0.4"

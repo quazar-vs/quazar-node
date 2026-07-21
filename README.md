@@ -355,6 +355,16 @@ cargo install sqlx-cli --no-default-features --features rustls,postgres
 sqlx migrate run
 ```
 
+## SSH tunnels for mobile
+
+Мобильное приложение может ходить в API через SSH local forward (`-L`), если прямой доступ к `https://api…` недоступен.
+
+- **Хост (VPS):** один раз выполните `sudo bash scripts/setup-ssh-tunnel-quazar.sh` — drop-in для `sshd` (`AllowTcpForwarding`, `GatewayPorts`, keepalive). Переменные `SSH_GATEWAY_PORTS`, `SSH_KEEPALIVE_INTERVAL`, `SSH_KEEPALIVE_COUNT_MAX` читаются скриптом при запуске.
+- **Узел Quazar:** в `.env` задайте `SSH_TUNNEL_ENABLED=true` и при необходимости `SSH_TUNNEL_HOST`, `SSH_TUNNEL_PORT`, `SSH_TUNNEL_CLIENT_LOCAL_PORT` (по умолчанию `18443`), `SSH_TUNNEL_REMOTE_API_HOST` / `SSH_TUNNEL_REMOTE_API_PORT` (куда на сервере пробрасывается API, обычно `127.0.0.1:8080`). Перезапустите `quazar-node`.
+- **Публичные API** (без Bearer): `GET /api/tunnel/config` — параметры и пример команды `ssh -L …`; `GET /api/tunnel/status` — доступность SSH с узла; `GET /api/tunnel/stats` — агрегированная статистика клиентов; `POST /api/tunnel/connect` и `POST /api/tunnel/heartbeat` — регистрация/пульс клиента (тело JSON, опционально `client_id`).
+- **Админ:** `GET /api/tunnel/clients` — список активных клиентов (Bearer: API-ключ Founder/Aiya или `ADMIN_API_KEY`).
+- **Nginx:** отдельный `location` не нужен — маршруты под `/api/tunnel/*` попадают под существующий прокси `location ^~ /api/` на backend.
+
 ## Тесты
 
 ```bash

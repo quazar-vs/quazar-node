@@ -18,6 +18,7 @@ use crate::nodes::Node;
 use crate::pending;
 use crate::response::{self, ApiResponse};
 use crate::validator::EventValidator;
+use crate::vpn::{self, VPN_CLEANUP_INTERVAL};
 use crate::AppState;
 
 pub async fn add_event(
@@ -440,6 +441,22 @@ pub async fn background_sync(state: Arc<AppState>) {
         block_producer::sync_blocks_from_peers(&state).await;
 
         keys::sync_keys_from_peers(&state).await;
+    }
+}
+
+/// Every 5 minutes: deactivate expired / idle VPN keys.
+pub async fn background_vpn_cleanup(state: Arc<AppState>) {
+    let mut interval = time::interval(VPN_CLEANUP_INTERVAL);
+    loop {
+        interval.tick().await;
+        match vpn::cleanup_expired_keys(&state.db).await {
+            Ok(n) => {
+                tracing::info!("VPN ключей деактивировано: {n}");
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "VPN key cleanup failed");
+            }
+        }
     }
 }
 
