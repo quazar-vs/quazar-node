@@ -29,7 +29,8 @@ use crate::blockchain::{
 use crate::citizen::hash_key;
 use crate::client_ip;
 use crate::email::{
-    notify_email, send_mayor_street_application, send_registration_credentials_soft, SmtpConfig,
+    notify_email, send_mayor_street_application, send_mayor_street_confirmation,
+    send_registration_credentials_soft, SmtpConfig,
 };
 use crate::gossip;
 use crate::keys::push_key_to_peers;
@@ -164,12 +165,15 @@ pub struct MayorApplyResponse {
 }
 
 /// Public street application (website, no Bearer).
+/// Same core fields as citizenship submit, plus optional node IP.
 #[derive(Debug, Deserialize)]
 pub struct StreetMayorApplicationRequest {
     pub login: String,
     pub full_name: String,
+    pub passport_data: String,
     pub email: String,
     pub reason: String,
+    /// Optional until admin approve (street flow may submit without a node address).
     #[serde(default)]
     pub ip: Option<String>,
     #[serde(default)]
@@ -1551,7 +1555,9 @@ pub async fn apply_street_mayor_application(
         .map_err(|msg| MayorError::bad_request(msg))?;
     let full_name = validate_non_empty_len(&req.full_name, "ФИО", 200)
         .map_err(MayorError::bad_request)?;
-    let reason = validate_non_empty_len(&req.reason, "Мотивация", 5000)
+    let passport_data = validate_non_empty_len(&req.passport_data, "Данные паспорта", 2000)
+        .map_err(MayorError::bad_request)?;
+    let reason = validate_non_empty_len(&req.reason, "Причина", 5000)
         .map_err(MayorError::bad_request)?;
 
     let email = normalize_email(&req.email);
@@ -1618,10 +1624,11 @@ pub async fn apply_street_mayor_application(
         ));
     }
 
+    // Same as citizenship: client hint + recent /auth/register/verify-code consume.
     let client_claims_verified = req.email_already_verified.unwrap_or(false);
     let auto_confirm = client_claims_verified && take_recent_email_verification(&email);
     if !auto_confirm {
-        return Err(MayorError::bad_request(
+        return Err(MayorError::forbidden(
             "Сначала подтвердите email через вход на сайте, затем подайте заявку снова",
         ));
     }
@@ -1636,9 +1643,9 @@ pub async fn apply_street_mayor_application(
         r#"
         INSERT INTO mayor_applications (
             id, citizen_id, node_ip, sync_peer, status, created_at, expires_at,
-            external_email, login, full_name, reason, confirmed_at
+            external_email, login, full_name, passport_data, reason, confirmed_at
         )
-        VALUES ($1, NULL, $2, $3, 'confirmed', $4, $5, $6, $7, $8, $9, $4)
+        VALUES ($1, NULL, $2, $3, 'confirmed', $4, $5, $6, $7, $8, $9, $10, $4)
         "#,
     )
     .bind(application_id)
@@ -1649,6 +1656,7 @@ pub async fn apply_street_mayor_application(
     .bind(&email)
     .bind(&login)
     .bind(&full_name)
+    .bind(&passport_data)
     .bind(&reason)
     .execute(&state.db)
     .await
@@ -1667,6 +1675,7 @@ pub async fn apply_street_mayor_application(
         MayorError::Database(e.to_string())
     })?;
 
+    // Notify admins (NOTIFY_EMAIL) + confirmation to applicant — same pattern as citizenship.
     if let Some(smtp) = SmtpConfig::from_env() {
         let notify_to = notify_email().unwrap_or_else(|| smtp.user.clone());
         if let Err(e) = send_mayor_street_application(
@@ -1675,12 +1684,25 @@ pub async fn apply_street_mayor_application(
             &full_name,
             &email,
             &login,
+            &passport_data,
             &reason,
         )
         .await
         {
             tracing::warn!(to = %notify_to, error = %e, "failed to send mayor street application notification");
         }
+        if let Err(e) =
+            send_mayor_street_confirmation(&smtp, &email, &application_id.to_string()).await
+        {
+            tracing::warn!(
+                email = %email,
+                application_id = %application_id,
+                error = %e,
+                "failed to send mayor street confirmation email"
+            );
+        }
+    } else {
+        tracing::warn!("SMTP not configured — skipping mayor application emails");
     }
 
     Ok(StreetMayorApplicationResponse {
@@ -2143,6 +2165,7 @@ pub async fn list_street_mayor_applications(
         status: String,
         login: Option<String>,
         full_name: Option<String>,
+        passport_data: Option<String>,
         external_email: Option<String>,
         reason: Option<String>,
         node_ip: Option<String>,
@@ -2162,8 +2185,8 @@ pub async fn list_street_mayor_applications(
     let rows = if let Some(st) = status_filter {
         sqlx::query_as::<_, Row>(
             r#"
-            SELECT id, status, login, full_name, external_email, reason, node_ip, citizen_id,
-                   created_at, review_note, reviewed_by, reviewed_at
+            SELECT id, status, login, full_name, passport_data, external_email, reason, node_ip,
+                   citizen_id, created_at, review_note, reviewed_by, reviewed_at
             FROM mayor_applications
             WHERE citizen_id IS NULL AND status = $1
             ORDER BY created_at DESC
@@ -2176,8 +2199,8 @@ pub async fn list_street_mayor_applications(
     } else {
         sqlx::query_as::<_, Row>(
             r#"
-            SELECT id, status, login, full_name, external_email, reason, node_ip, citizen_id,
-                   created_at, review_note, reviewed_by, reviewed_at
+            SELECT id, status, login, full_name, passport_data, external_email, reason, node_ip,
+                   citizen_id, created_at, review_note, reviewed_by, reviewed_at
             FROM mayor_applications
             WHERE citizen_id IS NULL
             ORDER BY created_at DESC
@@ -2197,6 +2220,7 @@ pub async fn list_street_mayor_applications(
                 "status": r.status,
                 "login": r.login,
                 "full_name": r.full_name,
+                "passport_data": r.passport_data,
                 "email": r.external_email,
                 "reason": r.reason,
                 "node_ip": r.node_ip,

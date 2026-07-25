@@ -250,6 +250,10 @@ async fn main() {
             post(citizenship_portal::verify_application_code),
         )
         .route(
+            "/api/my-applications",
+            post(citizenship_portal::my_applications),
+        )
+        .route(
             "/api/application/:id",
             get(citizenship_portal::get_application_status),
         )

@@ -783,7 +783,10 @@
 
     .form-group input[readonly],
     .form-group input.input-readonly,
-    .form-group input:disabled {
+    .form-group input:disabled,
+    .form-group textarea[readonly],
+    .form-group textarea.input-readonly,
+    .form-group textarea:disabled {
       background: #e6e4df;
       border-color: rgba(47, 58, 74, 0.18);
       color: var(--text-muted);
@@ -794,7 +797,10 @@
 
     .form-group input[readonly]:focus,
     .form-group input.input-readonly:focus,
-    .form-group input:disabled:focus {
+    .form-group input:disabled:focus,
+    .form-group textarea[readonly]:focus,
+    .form-group textarea.input-readonly:focus,
+    .form-group textarea:disabled:focus {
       border-color: rgba(47, 58, 74, 0.18);
       box-shadow: none;
       outline: none;
@@ -2467,13 +2473,29 @@
       var ADMIN_FORM_URL = 'https://formsubmit.co/ajax/' + encodeURIComponent(QUAZAR_EMAIL);
       var REG_STORAGE_KEY = 'quazar_reg_pending';
       var VERIFIED_EMAIL_KEY = 'quazar_email_verified';
+      var VERIFIED_EMAIL_EXPIRES_KEY = 'quazar_email_verified_expires';
       var CODE_TTL_MS = 10 * 60 * 1000;
       var registerSubmitDefault = registerSubmitBtn.innerHTML;
       var verifySubmitDefault = verifySubmitBtn.innerHTML;
 
+      function clearVerifiedEmail() {
+        try {
+          sessionStorage.removeItem(VERIFIED_EMAIL_KEY);
+          sessionStorage.removeItem(VERIFIED_EMAIL_EXPIRES_KEY);
+        } catch (e) { /* ignore */ }
+      }
+
       function getVerifiedEmail() {
         try {
-          return sessionStorage.getItem(VERIFIED_EMAIL_KEY) || '';
+          var email = sessionStorage.getItem(VERIFIED_EMAIL_KEY) || '';
+          if (!email) return '';
+          var exp = Number(sessionStorage.getItem(VERIFIED_EMAIL_EXPIRES_KEY) || 0);
+          // No expiry (legacy) or past TTL → session inactive, clear storage.
+          if (!exp || Date.now() > exp) {
+            clearVerifiedEmail();
+            return '';
+          }
+          return email;
         } catch (e) {
           return '';
         }
@@ -2484,9 +2506,11 @@
         return !!email && emailRegex.test(email);
       }
 
-      function saveVerifiedEmail(email) {
+      function saveVerifiedEmail(email, expiresInSecs) {
         try {
+          var ttlMs = (Number(expiresInSecs) > 0 ? Number(expiresInSecs) * 1000 : CODE_TTL_MS);
           sessionStorage.setItem(VERIFIED_EMAIL_KEY, email);
+          sessionStorage.setItem(VERIFIED_EMAIL_EXPIRES_KEY, String(Date.now() + ttlMs));
         } catch (e) { /* ignore */ }
       }
 
@@ -2702,6 +2726,7 @@
         getVerifiedEmail: getVerifiedEmail,
         isEmailVerified: isEmailVerified,
         saveVerifiedEmail: saveVerifiedEmail,
+        clearVerifiedEmail: clearVerifiedEmail,
         openLogin: openRegister,
         goToApply: goToApplyForm
       };
@@ -2826,11 +2851,9 @@
         setVerifySubmitting(true);
 
         quazarApiPost('/auth/register/verify-code', { email: pending.email, code: code })
-          .then(function () {
-            return sendConfirmationToAdmin(pending.email).catch(function () {});
-          })
-          .then(function () {
-            saveVerifiedEmail(pending.email);
+          .then(function (res) {
+            var expiresIn = res && res.expires_in_secs;
+            saveVerifiedEmail(pending.email, expiresIn);
             clearPendingRegistration();
             showRegisterStep(3);
             try {
@@ -2838,6 +2861,7 @@
                 detail: { email: pending.email }
               }));
             } catch (e) { /* ignore */ }
+            return sendConfirmationToAdmin(pending.email).catch(function () {});
           })
           .catch(function (err) {
             var message = err.message || 'Ошибка проверки кода';
@@ -3214,8 +3238,37 @@
       var ADMIN_KEY = 'quazar_admin_api_key';
       var MAYOR_KEY = 'quazar_mayor_api_key';
       var VERIFIED_EMAIL_KEY = 'quazar_email_verified';
+      var VERIFIED_EMAIL_EXPIRES_KEY = 'quazar_email_verified_expires';
       var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       var keepMessageOnNextRender = false;
+      var sessionWatchTimer = null;
+
+      function clearConfirmedEmailSession() {
+        if (window.quazarAuth && typeof window.quazarAuth.clearVerifiedEmail === 'function') {
+          window.quazarAuth.clearVerifiedEmail();
+        } else {
+          try {
+            sessionStorage.removeItem(VERIFIED_EMAIL_KEY);
+            sessionStorage.removeItem(VERIFIED_EMAIL_EXPIRES_KEY);
+          } catch (_) {}
+        }
+        var emailEl = document.getElementById('portal_email');
+        if (emailEl) {
+          emailEl.value = '';
+          emailEl.removeAttribute('readonly');
+          emailEl.classList.remove('input-readonly');
+          emailEl.removeAttribute('aria-readonly');
+          emailEl.tabIndex = 0;
+        }
+      }
+
+      function isSessionAuthError(err) {
+        var status = err && err.status;
+        var msg = String((err && err.message) || err || '');
+        return status === 403
+          || msg.indexOf('HTTP 403') !== -1
+          || msg.indexOf('подтвердите email') !== -1;
+      }
 
       function getApplyKind() {
         var kind = '';
@@ -3251,7 +3304,14 @@
           return String(window.quazarAuth.getVerifiedEmail() || '').trim();
         }
         try {
-          return String(sessionStorage.getItem(VERIFIED_EMAIL_KEY) || '').trim();
+          var email = String(sessionStorage.getItem(VERIFIED_EMAIL_KEY) || '').trim();
+          if (!email) return '';
+          var exp = Number(sessionStorage.getItem(VERIFIED_EMAIL_EXPIRES_KEY) || 0);
+          if (!exp || Date.now() > exp) {
+            clearConfirmedEmailSession();
+            return '';
+          }
+          return email;
         } catch (e) {
           return '';
         }
@@ -3382,8 +3442,9 @@
         var body = null;
         try { body = await res.json(); } catch (_) {}
         if (!res.ok) {
-          var err = (body && (body.error || body.message)) || ('HTTP ' + res.status);
-          throw new Error(err);
+          var err = new Error((body && (body.error || body.message)) || ('HTTP ' + res.status));
+          err.status = res.status;
+          throw err;
         }
         return body;
       }
@@ -3528,12 +3589,15 @@
           + '      <input id="portal_email" class="input-readonly" required maxlength="254" type="email" readonly tabindex="-1" aria-readonly="true" value="' + escapeHtml(confirmedEmail) + '" autocomplete="email">'
           + '    </div>'
           + '  </div>'
-          + '  <p class="field-hint">Заявка «с улицы»: без API-ключа. После одобрения администратор создаст или привяжет гражданина. Уже граждане могут подать заявку из приложения (Bearer).</p>'
+          + '  <p class="field-hint">Логин: только латиница (A–Z, a–z), без цифр и спецсимволов, 1–13 символов. Регистр не важен. Email нельзя изменить — он из подтверждённой сессии входа. IP узла можно указать позже при одобрении.</p>'
           + '  <div class="form-group"><label for="portal_full_name">ФИО</label>'
           + '    <input id="portal_full_name" required maxlength="200" placeholder="Иван Иванов" autocomplete="name">'
           + '  </div>'
-          + '  <div class="form-group"><label for="portal_reason">Мотивация</label>'
-          + '    <textarea id="portal_reason" required maxlength="5000" placeholder="Почему вы хотите стать мэром / запустить узел"></textarea>'
+          + '  <div class="form-group"><label for="portal_passport">Данные паспорта</label>'
+          + '    <textarea id="portal_passport" required maxlength="2000" placeholder="Серия/номер, кем выдан, дата"></textarea>'
+          + '  </div>'
+          + '  <div class="form-group"><label for="portal_reason">Причина</label>'
+          + '    <textarea id="portal_reason" class="input-readonly" required maxlength="5000" readonly tabindex="-1" aria-readonly="true">запуск узла</textarea>'
           + '  </div>'
           + '  <div class="form-group"><label for="portal_mayor_ip">IP / адрес узла <span class="hint">(необязательно)</span></label>'
           + '    <input id="portal_mayor_ip" maxlength="512" placeholder="например: 203.0.113.10" autocomplete="off">'
@@ -3553,14 +3617,69 @@
         });
       }
 
-      function renderApply() {
-        if (!hasConfirmedEmail()) {
-          renderApplyGate();
-          return;
-        }
+      /** Block resubmit for active / approved apps; rejected & timed_out may apply again. */
+      function isApplyBlockedStatus(status) {
+        var s = String(status || '').toLowerCase();
+        return s === 'pending' || s === 'confirmed' || s === 'approved';
+      }
 
-        var confirmedEmail = getConfirmedEmail();
-        var kind = getApplyKind();
+      function applyBlockMessage(status) {
+        var s = String(status || '').toLowerCase();
+        if (s === 'approved') {
+          return 'Заявка уже одобрена. Повторная подача недоступна.';
+        }
+        return 'Заявка уже подана, ожидайте ответ.';
+      }
+
+      async function fetchMyApplications(email) {
+        var res = await api('/api/my-applications', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Accept': 'application/json'
+          },
+          body: JSON.stringify({
+            email: email,
+            email_already_verified: true
+          })
+        });
+        return (res && res.data) || {};
+      }
+
+      function rememberApplicationForStatus(kind, app) {
+        if (!app || !app.id) return;
+        try {
+          sessionStorage.setItem(SESSION_ID_KEY, String(app.id));
+          setApplyKind(kind === 'mayor' ? 'mayor' : 'citizenship');
+        } catch (_) {}
+        // Enable «Статус» tab without leaving the apply view.
+        syncTabs({ route: 'apply', id: app.id, kind: kind === 'mayor' ? 'mayor' : 'citizenship' });
+      }
+
+      function renderAlreadyApplied(kind, app) {
+        var k = kind === 'mayor' ? 'mayor' : 'citizenship';
+        var label = k === 'mayor' ? 'мэрство' : 'гражданство';
+        rememberApplicationForStatus(k, app);
+        VIEW.innerHTML = ''
+          + renderKindSwitcher(k)
+          + '<div class="apply-muted-box" id="portalAlreadyApplied">'
+          + '  <p style="margin:0 0 0.5rem"><strong>' + escapeHtml(applyBlockMessage(app.status)) + '</strong></p>'
+          + '  <p class="field-hint" style="margin:0 0 0.75rem">Тип: ' + escapeHtml(label)
+          + ' · статус: ' + pill(app.status)
+          + ' · id: <code>' + escapeHtml(app.id) + '</code></p>'
+          + '  <button type="button" class="btn btn-primary" id="portalViewStatusBtn">Смотреть статус</button>'
+          + '</div>';
+        bindKindSwitcher();
+        var btn = document.getElementById('portalViewStatusBtn');
+        if (btn) {
+          btn.addEventListener('click', function () {
+            setRoute('status', app.id, k);
+          });
+        }
+        showMessage(applyBlockMessage(app.status), 'info');
+      }
+
+      function renderApplyForm(confirmedEmail, kind) {
         var fields = kind === 'mayor'
           ? renderMayorFields(confirmedEmail)
           : renderCitizenshipFields(confirmedEmail);
@@ -3586,6 +3705,62 @@
         });
       }
 
+      async function renderApply() {
+        if (!hasConfirmedEmail()) {
+          clearConfirmedEmailSession();
+          renderApplyGate();
+          return;
+        }
+
+        var confirmedEmail = getConfirmedEmail();
+        var kind = getApplyKind();
+
+        VIEW.innerHTML = ''
+          + renderKindSwitcher(kind)
+          + '<p class="field-hint">Проверяем ваши заявки…</p>';
+        bindKindSwitcher();
+
+        var mine = null;
+        try {
+          mine = await fetchMyApplications(confirmedEmail);
+        } catch (err) {
+          if (isSessionAuthError(err)) {
+            clearConfirmedEmailSession();
+            keepMessageOnNextRender = true;
+            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'info');
+            renderApplyGate();
+            return;
+          }
+          // Network / other: still show form; submit will enforce server rules.
+          mine = null;
+        }
+
+        // Local TTL may have elapsed while awaiting the network.
+        if (!hasConfirmedEmail()) {
+          clearConfirmedEmailSession();
+          keepMessageOnNextRender = true;
+          showMessage('Сессия подтверждения email истекла. Войдите снова.', 'info');
+          renderApplyGate();
+          return;
+        }
+
+        var app = kind === 'mayor'
+          ? (mine && mine.mayor)
+          : (mine && mine.citizenship);
+
+        if (app && app.id && isApplyBlockedStatus(app.status)) {
+          renderAlreadyApplied(kind, app);
+          return;
+        }
+
+        // Rejected / timed_out: keep id for status tab, but allow a new form.
+        if (app && app.id) {
+          rememberApplicationForStatus(kind, app);
+        }
+
+        renderApplyForm(confirmedEmail, kind);
+      }
+
       async function onSubmitCitizenship(btn) {
         var honey = document.getElementById('portal_website');
         if (honey && honey.value.trim()) return;
@@ -3600,6 +3775,7 @@
 
         if (!hasConfirmedEmail()) {
           showMessage('Сначала войдите с подтверждённым email.', 'err');
+          clearConfirmedEmailSession();
           openLoginForApply();
           return;
         }
@@ -3625,6 +3801,26 @@
 
         btn.disabled = true;
         try {
+          // Ping mark before submit so expired session clears the form.
+          try {
+            await fetchMyApplications(email);
+          } catch (pingErr) {
+            if (isSessionAuthError(pingErr)) {
+              clearConfirmedEmailSession();
+              keepMessageOnNextRender = true;
+              showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+              renderApplyGate();
+              return;
+            }
+          }
+          if (!hasConfirmedEmail()) {
+            clearConfirmedEmailSession();
+            keepMessageOnNextRender = true;
+            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+            renderApplyGate();
+            return;
+          }
+
           var captcha_token = getCaptchaToken();
           if ((recaptchaRequired || recaptchaSiteKey) && !captcha_token) {
             showMessage('Пройдите проверку reCAPTCHA.', 'err');
@@ -3655,8 +3851,19 @@
           try { sessionStorage.removeItem(SESSION_MAYOR_PEER_KEY); } catch (_) {}
           keepMessageOnNextRender = true;
           showMessage((res.data && res.data.message) || 'Заявка принята и ожидает рассмотрения.', 'ok');
-          setRoute('status', id, 'citizenship');
+          // Block resubmit UI on apply tab; status remains available via button / tab.
+          renderAlreadyApplied('citizenship', {
+            id: id,
+            status: (res.data && res.data.status) || 'confirmed'
+          });
         } catch (err) {
+          if (isSessionAuthError(err)) {
+            clearConfirmedEmailSession();
+            keepMessageOnNextRender = true;
+            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+            renderApplyGate();
+            return;
+          }
           showMessage(err.message || String(err), 'err');
           if (window.grecaptcha && recaptchaWidgetId !== null) {
             try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
@@ -3676,18 +3883,20 @@
 
         if (!hasConfirmedEmail()) {
           showMessage('Сначала войдите с подтверждённым email.', 'err');
+          clearConfirmedEmailSession();
           openLoginForApply();
           return;
         }
 
         var login = document.getElementById('portal_login').value.trim();
         var full_name = document.getElementById('portal_full_name').value.trim();
+        var passport_data = document.getElementById('portal_passport').value.trim();
         var reason = document.getElementById('portal_reason').value.trim();
         var ipEl = document.getElementById('portal_mayor_ip');
         var ip = ipEl ? ipEl.value.trim() : '';
 
-        if (!login || !full_name || !reason) {
-          showMessage('Заполните логин, ФИО и мотивацию.', 'err');
+        if (!login || !full_name || !passport_data || !reason) {
+          showMessage('Заполните все поля.', 'err');
           return;
         }
 
@@ -3717,6 +3926,25 @@
 
         btn.disabled = true;
         try {
+          try {
+            await fetchMyApplications(email);
+          } catch (pingErr) {
+            if (isSessionAuthError(pingErr)) {
+              clearConfirmedEmailSession();
+              keepMessageOnNextRender = true;
+              showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+              renderApplyGate();
+              return;
+            }
+          }
+          if (!hasConfirmedEmail()) {
+            clearConfirmedEmailSession();
+            keepMessageOnNextRender = true;
+            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+            renderApplyGate();
+            return;
+          }
+
           var captcha_token = getCaptchaToken();
           if ((recaptchaRequired || recaptchaSiteKey) && !captcha_token) {
             showMessage('Пройдите проверку reCAPTCHA.', 'err');
@@ -3726,6 +3954,7 @@
           var payload = {
             login: loginNorm,
             full_name: full_name,
+            passport_data: passport_data,
             email: email,
             reason: reason,
             captcha_token: captcha_token || undefined,
@@ -3753,8 +3982,18 @@
           }
           keepMessageOnNextRender = true;
           showMessage((res.data && res.data.message) || 'Заявка на мэрство принята и ожидает рассмотрения.', 'ok');
-          setRoute('status', id, 'mayor');
+          renderAlreadyApplied('mayor', {
+            id: id,
+            status: (res.data && res.data.status) || 'confirmed'
+          });
         } catch (err) {
+          if (isSessionAuthError(err)) {
+            clearConfirmedEmailSession();
+            keepMessageOnNextRender = true;
+            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+            renderApplyGate();
+            return;
+          }
           showMessage(err.message || String(err), 'err');
           if (window.grecaptcha && recaptchaWidgetId !== null) {
             try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
@@ -3998,6 +4237,45 @@
         }
       }
 
+      function stopSessionWatch() {
+        if (sessionWatchTimer) {
+          clearInterval(sessionWatchTimer);
+          sessionWatchTimer = null;
+        }
+      }
+
+      function startSessionWatch() {
+        stopSessionWatch();
+        sessionWatchTimer = setInterval(async function () {
+          var state = parseHash();
+          if (!state || state.route !== 'apply') return;
+          // Only reset while the apply form is open (not gate / already-applied).
+          if (!document.getElementById('portal-apply-form')) return;
+
+          // Local TTL expired while the form is open.
+          if (!hasConfirmedEmail()) {
+            clearConfirmedEmailSession();
+            keepMessageOnNextRender = true;
+            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'info');
+            renderApplyGate();
+            return;
+          }
+
+          var email = getConfirmedEmail();
+          if (!email) return;
+          try {
+            await fetchMyApplications(email);
+          } catch (err) {
+            if (isSessionAuthError(err)) {
+              clearConfirmedEmailSession();
+              keepMessageOnNextRender = true;
+              showMessage('Сессия подтверждения email истекла. Войдите снова.', 'info');
+              renderApplyGate();
+            }
+          }
+        }, 30 * 1000);
+      }
+
       function render() {
         var state = parseHash();
         if (!state) return;
@@ -4015,9 +4293,14 @@
         syncTabs(state);
         if (keepMessageOnNextRender) keepMessageOnNextRender = false;
         else clearMessage();
-        if (state.route === 'apply') return renderApply();
+        if (state.route === 'apply') {
+          startSessionWatch();
+          return renderApply();
+        }
+        stopSessionWatch();
         if (state.route === 'status') return renderStatus(state);
         if (state.route === 'admin') return renderAdmin();
+        startSessionWatch();
         renderApply();
       }
 

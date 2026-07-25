@@ -15,11 +15,11 @@ use crate::email::{send_verification_code, SmtpConfig};
 use crate::response::{self, ApiResponse};
 use crate::AppState;
 
+/// TTL for the 6-digit verification code and for the post-verify session mark.
+/// Mark lifetime must match the code so the verified-email session expires with it.
 const CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const RESEND_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_SENDS_PER_IP_PER_HOUR: u32 = 10;
-/// How long a successful `/auth/register/verify-code` can auto-confirm a citizenship application.
-const RECENT_VERIFY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone)]
 struct PendingCode {
@@ -135,7 +135,8 @@ fn purge_expired_verified(map: &mut HashMap<String, Instant>) {
     map.retain(|_, expires_at| *expires_at > now);
 }
 
-/// Record that `email` completed register verify-code (for apply auto-confirm).
+/// Record that `email` completed register verify-code (for apply auto-confirm / session).
+/// Lives for [`CODE_TTL`] — the same window as the verification code.
 pub fn mark_email_recently_verified(email: &str) {
     let email = normalize_email(email);
     if !is_valid_email(&email) {
@@ -143,7 +144,19 @@ pub fn mark_email_recently_verified(email: &str) {
     }
     let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
     purge_expired_verified(&mut map);
-    map.insert(email, Instant::now() + RECENT_VERIFY_TTL);
+    map.insert(email, Instant::now() + CODE_TTL);
+}
+
+/// Peek whether a recent register email verification is still valid (does not consume).
+/// Used by `/api/my-applications` so lookups do not burn the apply auto-confirm mark.
+pub fn peek_recent_email_verification(email: &str) -> bool {
+    let email = normalize_email(email);
+    if !is_valid_email(&email) {
+        return false;
+    }
+    let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
+    purge_expired_verified(&mut map);
+    map.get(&email).is_some_and(|expires_at| *expires_at > Instant::now())
 }
 
 /// Consume a recent register email verification, if still valid.
@@ -225,6 +238,8 @@ pub struct VerifyCodeRequest {
 #[derive(Serialize)]
 pub struct VerifyCodeResponse {
     pub message: String,
+    /// How long the verified-email mark / session remains valid (same as code TTL).
+    pub expires_in_secs: u64,
 }
 
 fn parse_json_body<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, Response> {
@@ -302,6 +317,7 @@ pub async fn verify_code_handler(
     match consume_verification_code(&req.email, &req.code) {
         Ok(()) => Json(ApiResponse::success(VerifyCodeResponse {
             message: "Email подтверждён".to_string(),
+            expires_in_secs: CODE_TTL.as_secs(),
         }))
         .into_response(),
         Err(message) => response::bad_request(message),
@@ -346,5 +362,15 @@ mod tests {
         mark_email_recently_verified(email);
         assert!(take_recent_email_verification(email));
         assert!(!take_recent_email_verification(email));
+    }
+
+    #[test]
+    fn recent_verify_peek_does_not_consume() {
+        let email = "apply-peek@example.com";
+        mark_email_recently_verified(email);
+        assert!(peek_recent_email_verification(email));
+        assert!(peek_recent_email_verification(email));
+        assert!(take_recent_email_verification(email));
+        assert!(!peek_recent_email_verification(email));
     }
 }

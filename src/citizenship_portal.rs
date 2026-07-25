@@ -35,7 +35,7 @@ use crate::models::Event;
 use crate::pending;
 use crate::register_verify::{
     consume_verification_code, issue_verification_code, is_valid_email, normalize_email,
-    take_recent_email_verification,
+    peek_recent_email_verification, take_recent_email_verification,
 };
 use crate::response::{self, ApiResponse};
 use crate::validator::{normalize_and_validate_citizen_name, EventValidator};
@@ -196,6 +196,93 @@ pub struct ReviewApplicationRequest {
     pub note: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct MyApplicationsRequest {
+    pub email: String,
+    /// Must be true; server still requires a live register-verify mark (peek, not take).
+    #[serde(default)]
+    pub email_already_verified: Option<bool>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+pub struct MyApplicationSummary {
+    pub id: String,
+    pub status: String,
+    pub login: Option<String>,
+    pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct MyApplicationsResponse {
+    pub citizenship: Option<MyApplicationSummary>,
+    pub mayor: Option<MyApplicationSummary>,
+}
+
+/// POST /api/my-applications — latest citizenship + street-mayor apps for a verified email.
+///
+/// Requires `email_already_verified: true` and a live in-memory register-verify mark (peek).
+/// Does not consume the mark, so a subsequent apply can still auto-confirm.
+pub async fn my_applications(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MyApplicationsRequest>,
+) -> impl IntoResponse {
+    let email = normalize_email(&req.email);
+    if !is_valid_email(&email) {
+        return response::bad_request("Введите корректный email-адрес");
+    }
+
+    let client_claims_verified = req.email_already_verified.unwrap_or(false);
+    if !client_claims_verified || !peek_recent_email_verification(&email) {
+        return response::forbidden(
+            "Сначала подтвердите email через вход на сайте, затем повторите запрос",
+        );
+    }
+
+    let citizenship = match sqlx::query_as::<_, MyApplicationSummary>(
+        r#"
+        SELECT id::text AS id, status, login, created_at
+        FROM applications
+        WHERE lower(email) = lower($1)
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            return response::internal_error(format!("Failed to load citizenship application: {e}"));
+        }
+    };
+
+    let mayor = match sqlx::query_as::<_, MyApplicationSummary>(
+        r#"
+        SELECT id::text AS id, status, login, created_at
+        FROM mayor_applications
+        WHERE lower(external_email) = lower($1)
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(row) => row,
+        Err(e) => {
+            return response::internal_error(format!("Failed to load mayor application: {e}"));
+        }
+    };
+
+    Json(ApiResponse::success(MyApplicationsResponse {
+        citizenship,
+        mayor,
+    }))
+    .into_response()
+}
+
 /// POST /api/application — submit citizenship application.
 ///
 /// Public endpoint (no Authorization header).
@@ -303,8 +390,18 @@ pub async fn submit_application(
 
     // Prefer auto-confirm when the same email recently passed /auth/register/verify-code
     // (client also sends email_already_verified from sessionStorage).
+    // If the client claims a live verified session but the mark expired — refuse (no fallback code).
     let client_claims_verified = req.email_already_verified.unwrap_or(false);
-    let auto_confirm = client_claims_verified && take_recent_email_verification(&email);
+    let auto_confirm = if client_claims_verified {
+        if !take_recent_email_verification(&email) {
+            return response::forbidden(
+                "Сначала подтвердите email через вход на сайте, затем повторите запрос",
+            );
+        }
+        true
+    } else {
+        false
+    };
 
     let (status, verification_code, confirmed_at, message) = if auto_confirm {
         (

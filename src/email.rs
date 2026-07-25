@@ -351,6 +351,7 @@ fn send_mayor_street_application_blocking(
     name: &str,
     applicant_email: &str,
     login: &str,
+    passport_data: &str,
     reason: &str,
 ) -> Result<(), String> {
     let body = format!(
@@ -358,9 +359,11 @@ fn send_mayor_street_application_blocking(
          ФИО: {name}\n\
          Логин: {login}\n\
          Email: {email}\n\
-         Мотивация: {reason}\n\
+         Паспорт: {passport}\n\
+         Причина: {reason}\n\
          --- КОНЕЦ ЗАЯВКИ ---",
         email = applicant_email,
+        passport = passport_data,
     );
     send_plain_email_blocking(
         config,
@@ -376,6 +379,7 @@ pub async fn send_mayor_street_application(
     name: &str,
     applicant_email: &str,
     login: &str,
+    passport_data: &str,
     reason: &str,
 ) -> Result<(), String> {
     let config = config.clone();
@@ -383,6 +387,7 @@ pub async fn send_mayor_street_application(
     let name = name.to_string();
     let applicant_email = applicant_email.to_string();
     let login = login.to_string();
+    let passport_data = passport_data.to_string();
     let reason = reason.to_string();
 
     timeout(
@@ -394,6 +399,7 @@ pub async fn send_mayor_street_application(
                 &name,
                 &applicant_email,
                 &login,
+                &passport_data,
                 &reason,
             )
         }),
@@ -401,6 +407,38 @@ pub async fn send_mayor_street_application(
     .await
     .map_err(|_| "SMTP send timed out (check network or SMTP credentials)".to_string())?
     .map_err(|e| format!("SMTP task failed: {e}"))?
+}
+
+pub async fn send_mayor_street_confirmation(
+    config: &SmtpConfig,
+    to_email: &str,
+    application_id: &str,
+) -> Result<(), String> {
+    tracing::info!(email = %to_email, application_id = %application_id, "📧 Отправка письма о принятии заявки на мэрство");
+
+    let body = format!(
+        "Здравствуйте!\n\n\
+         Ваша заявка на мэрство Квазара принята. Email подтверждён.\n\n\
+         Номер заявки: {application_id}\n\
+         Статус: подтверждена, ожидает решения администрации.\n\n\
+         Вы можете проверить статус заявки на портале Квазара.\n\n\
+         С уважением,\n\
+         {from_name}\n\
+         {from_email}",
+        from_name = config.from_name,
+        from_email = config.user,
+    );
+
+    send_plain_email(
+        config,
+        to_email,
+        "Заявка на мэрство Квазара принята",
+        body,
+    )
+    .await?;
+
+    tracing::info!(email = %to_email, application_id = %application_id, "📧 Письмо о принятии заявки на мэрство отправлено");
+    Ok(())
 }
 
 pub async fn send_citizenship_confirmation(
