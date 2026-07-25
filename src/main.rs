@@ -21,8 +21,10 @@ mod applications;
 mod block_producer;
 mod blockchain;
 mod candidacy;
+mod candidates;
 mod channel;
 mod chat;
+mod candidate_chat;
 mod client_ip;
 mod citizen;
 mod citizenship_application;
@@ -81,6 +83,7 @@ use channel::{
     connect_handler, cross_channel_handler, disconnect_handler, events_handler, health_handler,
     post_message_handler, status_handler, ws_handler, ChannelHub,
 };
+use candidate_chat::{candidate_list_messages_handler, candidate_send_message_handler};
 use chat::{
     admin_send_message_handler, background_chat_archive, gossip_chat_message_handler,
     list_history_handler, list_messages_handler, get_session_handler, search_db_handler,
@@ -296,6 +299,14 @@ async fn main() {
         )
         .route("/api/mayor/node-started", post(mayor_node_started_handler))
         .route("/api/mayor/confirm", post(mayor_confirm_handler))
+        .route(
+            "/api/chat/candidate/messages",
+            post(candidate_list_messages_handler),
+        )
+        .route(
+            "/api/chat/candidate/send",
+            post(candidate_send_message_handler),
+        )
         .route("/chat/admin/send", post(admin_send_message_handler))
         // Public abuse limits: register/apply 5/min, auth/application 10/min,
         // channel/search/admin-send 20/min (per IP).
@@ -349,6 +360,19 @@ async fn main() {
         .route("/citizen/pending", get(list_pending_applications))
         .route("/citizen/apply/role", post(apply_for_role))
         .route("/api/applications", get(applications::list_applications))
+        .route("/api/candidates", get(candidates::list_candidates_handler))
+        .route(
+            "/api/candidates/:id",
+            get(candidates::get_candidate_handler),
+        )
+        .route(
+            "/api/candidates/:id/approve",
+            post(candidates::approve_candidate_handler),
+        )
+        .route(
+            "/api/candidates/:id/reject",
+            post(candidates::reject_candidate_handler),
+        )
         .route(
             "/api/application/:id/approve",
             post(citizenship_portal::approve_application),

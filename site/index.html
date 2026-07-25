@@ -1476,6 +1476,24 @@
       border-radius: 3px;
     }
 
+    .chat-auth-hint {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+      margin-bottom: 1rem;
+    }
+
+    .chat-auth-hint a {
+      color: var(--ll-navy);
+      text-decoration: underline;
+    }
+
+    .chat-candidate-email {
+      font-weight: 600;
+      color: var(--ll-navy) !important;
+      margin-bottom: 1rem !important;
+      word-break: break-all;
+    }
+
     .chat-status {
       display: inline-flex;
       align-items: center;
@@ -1812,13 +1830,22 @@
         <div class="chat-layout">
           <aside class="chat-auth-panel">
             <h3>Доступ к чату</h3>
-            <p>Введите API-ключ гражданина. Для теста: <code>successful_app_key_2026</code></p>
-            <div class="form-group">
-              <label for="chatApiKey">API-ключ</label>
-              <input type="password" id="chatApiKey" placeholder="your_api_key" autocomplete="off">
+            <div id="chatCandidateAuth" class="chat-hidden">
+              <p>Вы вошли по email — API-ключ не нужен. Сессия продлевается, пока вы пишете в чат.</p>
+              <p class="chat-candidate-email" id="chatCandidateEmail"></p>
+              <button type="button" class="btn btn-primary" id="chatCandidateConnectBtn">Открыть чат</button>
+              <button type="button" class="btn btn-secondary chat-hidden" id="chatCandidateDisconnectBtn">Выйти из чата</button>
             </div>
-            <button type="button" class="btn btn-primary" id="chatConnectBtn">Подключиться</button>
-            <button type="button" class="btn btn-secondary chat-hidden" id="chatDisconnectBtn">Отключиться</button>
+            <div id="chatApiKeyAuth">
+              <p>Введите API-ключ гражданина. Для теста: <code>successful_app_key_2026</code></p>
+              <p class="chat-auth-hint">Или <a href="#register" id="chatLoginHint">войдите по email</a> после подачи заявки — чат откроется без ключа.</p>
+              <div class="form-group">
+                <label for="chatApiKey">API-ключ</label>
+                <input type="password" id="chatApiKey" placeholder="your_api_key" autocomplete="off">
+              </div>
+              <button type="button" class="btn btn-primary" id="chatConnectBtn">Подключиться</button>
+              <button type="button" class="btn btn-secondary chat-hidden" id="chatDisconnectBtn">Отключиться</button>
+            </div>
             <div class="chat-status" id="chatStatus">
               <span class="dot"></span>
               <span id="chatStatusText">Не подключено</span>
@@ -2474,9 +2501,18 @@
       var REG_STORAGE_KEY = 'quazar_reg_pending';
       var VERIFIED_EMAIL_KEY = 'quazar_email_verified';
       var VERIFIED_EMAIL_EXPIRES_KEY = 'quazar_email_verified_expires';
+      var CITIZEN_USE_APP_MSG = 'Вход для граждан через приложение';
       var CODE_TTL_MS = 10 * 60 * 1000;
       var registerSubmitDefault = registerSubmitBtn.innerHTML;
       var verifySubmitDefault = verifySubmitBtn.innerHTML;
+
+      function isCitizenUseAppError(err) {
+        var msg = String((err && err.message) || err || '');
+        var code = err && err.code;
+        return code === 'citizen_use_app'
+          || msg.indexOf(CITIZEN_USE_APP_MSG) !== -1
+          || msg.indexOf('citizen_use_app') !== -1;
+      }
 
       function clearVerifiedEmail() {
         try {
@@ -2626,7 +2662,10 @@
             }
             if (!response.ok || (data && data.status === 'error')) {
               var errMsg = (data && (data.error || data.message)) || 'Ошибка сервера (' + response.status + ')';
-              throw new Error(errMsg);
+              var err = new Error(errMsg);
+              err.status = response.status;
+              if (data && data.data && data.data.code) err.code = data.data.code;
+              throw err;
             }
             return (data && data.data) || data;
           });
@@ -2811,9 +2850,12 @@
         requestVerificationCode(email)
           .catch(function (err) {
             clearPendingRegistration();
-            var message = err.name === 'AbortError'
-              ? 'Превышено время ожидания. Проверьте соединение и попробуйте снова.'
-              : (err.message || 'Не удалось отправить код. Попробуйте позже или напишите на quazarvs@gmail.com');
+            clearVerifiedEmail();
+            var message = isCitizenUseAppError(err)
+              ? CITIZEN_USE_APP_MSG
+              : (err.name === 'AbortError'
+                ? 'Превышено время ожидания. Проверьте соединение и попробуйте снова.'
+                : (err.message || 'Не удалось отправить код. Попробуйте позже или напишите на quazarvs@gmail.com'));
             showRegisterError(registerError, message);
           })
           .finally(function () {
@@ -2864,6 +2906,14 @@
             return sendConfirmationToAdmin(pending.email).catch(function () {});
           })
           .catch(function (err) {
+            if (isCitizenUseAppError(err)) {
+              clearVerifiedEmail();
+              clearPendingRegistration();
+              showRegisterStep(1);
+              showRegisterError(registerError, CITIZEN_USE_APP_MSG);
+              showRegisterError(verifyError, CITIZEN_USE_APP_MSG);
+              return;
+            }
             var message = err.message || 'Ошибка проверки кода';
             if (message.indexOf('истёк') !== -1 || message.indexOf('не найден') !== -1) {
               clearPendingRegistration();
@@ -2955,14 +3005,21 @@
         }
       });
 
-      /* Live chat (SSE + REST) */
+      /* Live chat (SSE + REST); candidates use verified-email session (no API key). */
       var CHAT_KEY_STORAGE = 'quazar_chat_api_key';
       var CHAT_CHANNEL_ID = 'quazar_chat';
       var CHAT_UI_TTL_MS = 15 * 60 * 1000;
       var CHAT_UI_SWEEP_MS = 60 * 1000;
+      var CHAT_CANDIDATE_POLL_MS = 5000;
       var chatApiKeyInput = document.getElementById('chatApiKey');
       var chatConnectBtn = document.getElementById('chatConnectBtn');
       var chatDisconnectBtn = document.getElementById('chatDisconnectBtn');
+      var chatApiKeyAuth = document.getElementById('chatApiKeyAuth');
+      var chatCandidateAuth = document.getElementById('chatCandidateAuth');
+      var chatCandidateEmail = document.getElementById('chatCandidateEmail');
+      var chatCandidateConnectBtn = document.getElementById('chatCandidateConnectBtn');
+      var chatCandidateDisconnectBtn = document.getElementById('chatCandidateDisconnectBtn');
+      var chatLoginHint = document.getElementById('chatLoginHint');
       var chatStatus = document.getElementById('chatStatus');
       var chatStatusText = document.getElementById('chatStatusText');
       var chatMessages = document.getElementById('chatMessages');
@@ -2970,10 +3027,73 @@
       var chatInput = document.getElementById('chatInput');
       var chatSendBtn = document.getElementById('chatSendBtn');
       var chatEventSource = null;
+      var chatCandidatePollTimer = null;
       var chatMessageIds = new Set();
       var chatMessageTimers = new Map();
       var chatApiKey = null;
+      var chatMode = null; // 'candidate' | 'apikey' | null
       var myCitizenId = null;
+
+      function getChatVerifiedEmail() {
+        if (window.quazarAuth && typeof window.quazarAuth.getVerifiedEmail === 'function') {
+          return String(window.quazarAuth.getVerifiedEmail() || '').trim();
+        }
+        try {
+          var email = sessionStorage.getItem('quazar_email_verified') || '';
+          var exp = Number(sessionStorage.getItem('quazar_email_verified_expires') || 0);
+          if (!email || !exp || Date.now() > exp) return '';
+          return email;
+        } catch (e) {
+          return '';
+        }
+      }
+
+      function refreshChatVerifiedExpires(expiresInSecs) {
+        var email = getChatVerifiedEmail();
+        if (!email) return;
+        if (window.quazarAuth && typeof window.quazarAuth.saveVerifiedEmail === 'function') {
+          window.quazarAuth.saveVerifiedEmail(email, expiresInSecs);
+        }
+      }
+
+      function clearChatEmailSession() {
+        if (window.quazarAuth && typeof window.quazarAuth.clearVerifiedEmail === 'function') {
+          window.quazarAuth.clearVerifiedEmail();
+        } else {
+          try {
+            sessionStorage.removeItem('quazar_email_verified');
+            sessionStorage.removeItem('quazar_email_verified_expires');
+          } catch (e) { /* ignore */ }
+        }
+        var emailEl = document.getElementById('portal_email');
+        if (emailEl) {
+          emailEl.value = '';
+          emailEl.removeAttribute('readonly');
+          emailEl.classList.remove('input-readonly');
+          emailEl.removeAttribute('aria-readonly');
+          emailEl.tabIndex = 0;
+        }
+      }
+
+      function isChatSessionAuthError(status, data) {
+        var msg = String((data && (data.error || data.message)) || '');
+        var code = data && data.data && data.data.code;
+        return status === 403
+          || code === 'citizen_use_app'
+          || msg.indexOf('подтвердите email') !== -1
+          || msg.indexOf('Вход для граждан через приложение') !== -1;
+      }
+
+      function isCitizenChatError(err) {
+        var msg = String((err && err.message) || err || '');
+        return (err && err.code === 'citizen_use_app')
+          || msg.indexOf('Вход для граждан через приложение') !== -1;
+      }
+
+      function isNoApplicationChatError(err) {
+        var msg = String((err && err.message) || err || '');
+        return msg.indexOf('после подачи заявки') !== -1;
+      }
 
       function isChatMessageVisible(msg) {
         if (!msg) return false;
@@ -3083,12 +3203,67 @@
         });
       }
 
-      function loadChatHistory() {
+      function stopChatCandidatePoll() {
+        if (chatCandidatePollTimer) {
+          clearInterval(chatCandidatePollTimer);
+          chatCandidatePollTimer = null;
+        }
+      }
+
+      function stopChatSse() {
+        if (chatEventSource) {
+          chatEventSource.close();
+          chatEventSource = null;
+        }
+      }
+
+      function updateChatAuthPanels() {
+        var email = getChatVerifiedEmail();
+        var candidate = !!email;
+        if (chatCandidateAuth) {
+          chatCandidateAuth.classList.toggle('chat-hidden', !candidate);
+        }
+        if (chatApiKeyAuth) {
+          chatApiKeyAuth.classList.toggle('chat-hidden', candidate);
+        }
+        if (candidate && chatCandidateEmail) {
+          chatCandidateEmail.textContent = email;
+        }
+      }
+
+      function enableChatUi(enabled) {
+        chatInput.disabled = !enabled;
+        chatSendBtn.disabled = !enabled;
+        var candidateConnected = enabled && chatMode === 'candidate';
+        var apiConnected = enabled && chatMode === 'apikey';
+        if (chatCandidateConnectBtn) {
+          chatCandidateConnectBtn.classList.toggle('chat-hidden', candidateConnected);
+        }
+        if (chatCandidateDisconnectBtn) {
+          chatCandidateDisconnectBtn.classList.toggle('chat-hidden', !candidateConnected);
+        }
+        if (chatConnectBtn) {
+          chatConnectBtn.classList.toggle('chat-hidden', apiConnected);
+        }
+        if (chatDisconnectBtn) {
+          chatDisconnectBtn.classList.toggle('chat-hidden', !apiConnected);
+        }
+        if (chatApiKeyInput) {
+          chatApiKeyInput.disabled = apiConnected;
+        }
+      }
+
+      function loadChatHistoryApiKey() {
         var base = QUAZAR_API_BASE.replace(/\/$/, '');
         return fetch(base + '/chat/messages?limit=50', {
           headers: chatHeaders()
         }).then(function (response) {
-          return response.json();
+          return response.json().then(function (data) {
+            if (!response.ok || (data && data.status === 'error')) {
+              throw new Error((data && data.error) || ('HTTP ' + response.status));
+            }
+            return data;
+          });
         }).then(function (data) {
           chatMessages.innerHTML = '';
           chatMessageIds.clear();
@@ -3099,11 +3274,57 @@
         });
       }
 
-      function connectChatSse() {
-        if (chatEventSource) {
-          chatEventSource.close();
-          chatEventSource = null;
+      function loadChatHistoryCandidate(opts) {
+        var quiet = opts && opts.quiet;
+        var email = getChatVerifiedEmail();
+        if (!email) {
+          return Promise.reject(Object.assign(new Error('Нет сессии email'), { status: 403 }));
         }
+        var base = QUAZAR_API_BASE.replace(/\/$/, '');
+        return fetch(base + '/api/chat/candidate/messages', {
+          method: 'POST',
+          headers: {
+            'Accept': 'application/json',
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            email: email,
+            email_already_verified: true,
+            limit: 50
+          })
+        }).then(function (response) {
+          return response.json().then(function (data) {
+            if (isChatSessionAuthError(response.status, data)) {
+              var err = new Error((data && data.error) || 'HTTP 403');
+              err.status = 403;
+              if (data && data.data && data.data.code) err.code = data.data.code;
+              throw err;
+            }
+            if (!response.ok || (data && data.status === 'error')) {
+              throw new Error((data && data.error) || ('HTTP ' + response.status));
+            }
+            return data;
+          });
+        }).then(function (data) {
+          var payload = (data && data.data) || {};
+          if (payload.citizen_id) myCitizenId = payload.citizen_id;
+          if (payload.expires_in_secs) {
+            // list does not refresh TTL; keep client expiry in sync if server reports remaining
+            refreshChatVerifiedExpires(payload.expires_in_secs);
+          }
+          if (!quiet) {
+            chatMessages.innerHTML = '';
+            chatMessageIds.clear();
+            chatMessageTimers.forEach(function (timerId) { clearTimeout(timerId); });
+            chatMessageTimers.clear();
+          }
+          var messages = payload.messages || [];
+          messages.filter(isChatMessageVisible).forEach(renderChatMessage);
+        });
+      }
+
+      function connectChatSse() {
+        stopChatSse();
         var base = QUAZAR_API_BASE.replace(/\/$/, '');
         var url = base + '/api/channel/events?channelId=' + encodeURIComponent(CHAT_CHANNEL_ID) +
           '&token=' + encodeURIComponent(chatApiKey);
@@ -3126,12 +3347,67 @@
         };
       }
 
-      function enableChatUi(enabled) {
-        chatInput.disabled = !enabled;
-        chatSendBtn.disabled = !enabled;
-        chatConnectBtn.classList.toggle('chat-hidden', enabled);
-        chatDisconnectBtn.classList.toggle('chat-hidden', !enabled);
-        chatApiKeyInput.disabled = enabled;
+      function startChatCandidatePoll() {
+        stopChatCandidatePoll();
+        chatCandidatePollTimer = setInterval(function () {
+          if (chatMode !== 'candidate') return;
+          loadChatHistoryCandidate({ quiet: true }).catch(function (err) {
+            if (err && err.status === 403) {
+              handleCandidateSessionExpired(err);
+            }
+          });
+        }, CHAT_CANDIDATE_POLL_MS);
+      }
+
+      function handleCandidateSessionExpired(err) {
+        disconnectChat();
+        updateChatAuthPanels();
+        if (isCitizenChatError(err)) {
+          clearChatEmailSession();
+          setChatStatus('error', 'Вход для граждан через приложение');
+          return;
+        }
+        if (isNoApplicationChatError(err)) {
+          // Keep verified email so the user can still submit an application.
+          setChatStatus('error', 'Чат доступен после подачи заявки на сайте');
+          return;
+        }
+        clearChatEmailSession();
+        setChatStatus('error', 'Сессия истекла — войдите снова');
+        if (window.quazarAuth && typeof window.quazarAuth.openLogin === 'function') {
+          window.quazarAuth.openLogin();
+        }
+      }
+
+      function connectCandidateChat() {
+        var email = getChatVerifiedEmail();
+        if (!email) {
+          updateChatAuthPanels();
+          setChatStatus('error', 'Сначала подтвердите email');
+          if (window.quazarAuth && typeof window.quazarAuth.openLogin === 'function') {
+            window.quazarAuth.openLogin();
+          }
+          return;
+        }
+        stopChatSse();
+        chatApiKey = null;
+        chatMode = 'candidate';
+        enableChatUi(true);
+        setChatStatus('', 'Подключение...');
+        loadChatHistoryCandidate()
+          .then(function () {
+            setChatStatus('live', 'Чат по email-сессии');
+            startChatCandidatePoll();
+          })
+          .catch(function (err) {
+            if (err && err.status === 403) {
+              handleCandidateSessionExpired(err);
+              return;
+            }
+            setChatStatus('error', (err && err.message) || 'Не удалось загрузить чат');
+            enableChatUi(false);
+            chatMode = null;
+          });
       }
 
       function connectChat() {
@@ -3140,46 +3416,139 @@
           setChatStatus('error', 'Укажите API-ключ');
           return;
         }
+        stopChatCandidatePoll();
+        chatMode = 'apikey';
         chatApiKey = key;
         sessionStorage.setItem(CHAT_KEY_STORAGE, key);
         enableChatUi(true);
         setChatStatus('', 'Подключение...');
-        loadChatHistory()
+        loadChatHistoryApiKey()
           .then(function () {
             connectChatSse();
           })
           .catch(function () {
             setChatStatus('error', 'Не удалось загрузить чат');
             enableChatUi(false);
+            chatMode = null;
           });
       }
 
       function disconnectChat() {
-        if (chatEventSource) {
-          chatEventSource.close();
-          chatEventSource = null;
-        }
+        stopChatSse();
+        stopChatCandidatePoll();
         chatMessageTimers.forEach(function (timerId) { clearTimeout(timerId); });
         chatMessageTimers.clear();
         chatApiKey = null;
         myCitizenId = null;
+        chatMode = null;
         sessionStorage.removeItem(CHAT_KEY_STORAGE);
         enableChatUi(false);
+        updateChatAuthPanels();
         setChatStatus('', 'Не подключено');
       }
 
-      chatConnectBtn.addEventListener('click', connectChat);
-      chatDisconnectBtn.addEventListener('click', disconnectChat);
+      function tryAutoConnectChat() {
+        updateChatAuthPanels();
+        if (getChatVerifiedEmail()) {
+          if (chatMode !== 'candidate') {
+            connectCandidateChat();
+          }
+          return;
+        }
+        var savedChatKey = sessionStorage.getItem(CHAT_KEY_STORAGE);
+        if (savedChatKey && chatMode !== 'apikey') {
+          chatApiKeyInput.value = savedChatKey;
+          connectChat();
+        }
+      }
+
+      if (chatConnectBtn) chatConnectBtn.addEventListener('click', connectChat);
+      if (chatDisconnectBtn) chatDisconnectBtn.addEventListener('click', disconnectChat);
+      if (chatCandidateConnectBtn) {
+        chatCandidateConnectBtn.addEventListener('click', connectCandidateChat);
+      }
+      if (chatCandidateDisconnectBtn) {
+        chatCandidateDisconnectBtn.addEventListener('click', disconnectChat);
+      }
+      if (chatLoginHint) {
+        chatLoginHint.addEventListener('click', function (e) {
+          e.preventDefault();
+          if (window.quazarAuth && typeof window.quazarAuth.openLogin === 'function') {
+            window.quazarAuth.openLogin();
+          }
+        });
+      }
 
       chatForm.addEventListener('submit', function (e) {
         e.preventDefault();
-        if (!chatApiKey) return;
         var text = (chatInput.value || '').trim();
         if (!text) return;
+
+        if (chatMode === 'candidate') {
+          var email = getChatVerifiedEmail();
+          if (!email) {
+            handleCandidateSessionExpired();
+            return;
+          }
+          chatInput.value = '';
+          chatSendBtn.disabled = true;
+          var base = QUAZAR_API_BASE.replace(/\/$/, '');
+          fetch(base + '/api/chat/candidate/send', {
+            method: 'POST',
+            headers: {
+              'Accept': 'application/json',
+              'Content-Type': 'application/json'
+            },
+            body: JSON.stringify({
+              email: email,
+              email_already_verified: true,
+              text: text
+            })
+          }).then(function (response) {
+            return response.json().then(function (data) {
+              if (isChatSessionAuthError(response.status, data)) {
+                var err = new Error((data && data.error) || 'HTTP 403');
+                err.status = 403;
+                if (data && data.data && data.data.code) err.code = data.data.code;
+                throw err;
+              }
+              if (!response.ok || (data && data.status !== 'success')) {
+                throw new Error((data && data.error) || 'Ошибка отправки');
+              }
+              return data;
+            });
+          }).then(function (data) {
+            var payload = (data && data.data) || {};
+            if (payload.expires_in_secs) {
+              refreshChatVerifiedExpires(payload.expires_in_secs);
+            }
+            myCitizenId = payload.citizen_id || myCitizenId;
+            renderChatMessage({
+              id: payload.id,
+              citizen_id: payload.citizen_id,
+              citizen_name: payload.citizen_name,
+              content: payload.content,
+              created_at: payload.created_at
+            });
+            setChatStatus('live', 'Чат по email-сессии');
+          }).catch(function (err) {
+            if (err && err.status === 403) {
+              handleCandidateSessionExpired(err);
+              return;
+            }
+            setChatStatus('error', 'Не удалось отправить сообщение');
+          }).finally(function () {
+            chatSendBtn.disabled = false;
+            chatInput.focus();
+          });
+          return;
+        }
+
+        if (!chatApiKey) return;
         chatInput.value = '';
         chatSendBtn.disabled = true;
-        var base = QUAZAR_API_BASE.replace(/\/$/, '');
-        fetch(base + '/chat/send', {
+        var apiBase = QUAZAR_API_BASE.replace(/\/$/, '');
+        fetch(apiBase + '/chat/send', {
           method: 'POST',
           headers: Object.assign({ 'Content-Type': 'application/json' }, chatHeaders()),
           body: JSON.stringify({ content: text })
@@ -3206,11 +3575,25 @@
         });
       });
 
-      var savedChatKey = sessionStorage.getItem(CHAT_KEY_STORAGE);
-      if (savedChatKey) {
-        chatApiKeyInput.value = savedChatKey;
-        connectChat();
-      }
+      window.addEventListener('hashchange', function () {
+        if ((window.location.hash || '') === '#chat') {
+          tryAutoConnectChat();
+        }
+      });
+
+      window.addEventListener('quazar:email-verified', function () {
+        updateChatAuthPanels();
+        tryAutoConnectChat();
+      });
+
+      // After email verify, prefer candidate chat over stored API key.
+      tryAutoConnectChat();
+
+      window.quazarChat = {
+        updateAuthPanels: updateChatAuthPanels,
+        tryAutoConnect: tryAutoConnectChat,
+        disconnect: disconnectChat
+      };
     })();
   </script>
 
@@ -3260,14 +3643,31 @@
           emailEl.removeAttribute('aria-readonly');
           emailEl.tabIndex = 0;
         }
+        if (window.quazarChat && typeof window.quazarChat.disconnect === 'function') {
+          window.quazarChat.disconnect();
+        }
       }
 
       function isSessionAuthError(err) {
         var status = err && err.status;
         var msg = String((err && err.message) || err || '');
+        var code = err && err.code;
         return status === 403
+          || code === 'citizen_use_app'
           || msg.indexOf('HTTP 403') !== -1
-          || msg.indexOf('подтвердите email') !== -1;
+          || msg.indexOf('подтвердите email') !== -1
+          || msg.indexOf('Вход для граждан через приложение') !== -1;
+      }
+
+      function isCitizenSessionError(err) {
+        var msg = String((err && err.message) || err || '');
+        return (err && err.code === 'citizen_use_app')
+          || msg.indexOf('Вход для граждан через приложение') !== -1;
+      }
+
+      function sessionAuthUserMessage(err) {
+        if (isCitizenSessionError(err)) return 'Вход для граждан через приложение';
+        return 'Сессия подтверждения email истекла. Войдите снова.';
       }
 
       function getApplyKind() {
@@ -3444,6 +3844,7 @@
         if (!res.ok) {
           var err = new Error((body && (body.error || body.message)) || ('HTTP ' + res.status));
           err.status = res.status;
+          if (body && body.data && body.data.code) err.code = body.data.code;
           throw err;
         }
         return body;
@@ -3727,7 +4128,7 @@
           if (isSessionAuthError(err)) {
             clearConfirmedEmailSession();
             keepMessageOnNextRender = true;
-            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'info');
+            showMessage(sessionAuthUserMessage(err), 'info');
             renderApplyGate();
             return;
           }
@@ -3808,7 +4209,7 @@
             if (isSessionAuthError(pingErr)) {
               clearConfirmedEmailSession();
               keepMessageOnNextRender = true;
-              showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+              showMessage(sessionAuthUserMessage(pingErr), 'err');
               renderApplyGate();
               return;
             }
@@ -3860,7 +4261,7 @@
           if (isSessionAuthError(err)) {
             clearConfirmedEmailSession();
             keepMessageOnNextRender = true;
-            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+            showMessage(sessionAuthUserMessage(err), 'err');
             renderApplyGate();
             return;
           }
@@ -3932,7 +4333,7 @@
             if (isSessionAuthError(pingErr)) {
               clearConfirmedEmailSession();
               keepMessageOnNextRender = true;
-              showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+              showMessage(sessionAuthUserMessage(pingErr), 'err');
               renderApplyGate();
               return;
             }
@@ -3990,7 +4391,7 @@
           if (isSessionAuthError(err)) {
             clearConfirmedEmailSession();
             keepMessageOnNextRender = true;
-            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
+            showMessage(sessionAuthUserMessage(err), 'err');
             renderApplyGate();
             return;
           }
@@ -4269,7 +4670,7 @@
             if (isSessionAuthError(err)) {
               clearConfirmedEmailSession();
               keepMessageOnNextRender = true;
-              showMessage('Сессия подтверждения email истекла. Войдите снова.', 'info');
+              showMessage(sessionAuthUserMessage(err), 'info');
               renderApplyGate();
             }
           }

@@ -164,7 +164,7 @@ pub async fn public_config_handler() -> impl IntoResponse {
     })))
 }
 
-/// GET /api/applications — list applications (Bearer API key).
+/// GET /api/applications — list citizenship applications (via unified candidates).
 pub async fn list_applications(
     Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
@@ -180,76 +180,81 @@ pub async fn list_applications(
         .map(str::trim)
         .filter(|s| !s.is_empty());
 
-    let rows = if let Some(status) = status_filter {
+    if let Some(status) = status_filter {
         if !matches!(status, "pending" | "confirmed" | "approved" | "rejected") {
             return response::bad_request("status must be pending, confirmed, approved, or rejected");
         }
-        sqlx::query_as::<_, ApplicationRow>(
-            r#"
-            SELECT
-                id::text AS id,
-                login,
-                full_name,
-                email,
-                reason,
-                status,
-                citizen_id,
-                created_at,
-                updated_at,
-                confirmed_at,
-                review_note,
-                reviewed_by,
-                reviewed_at
-            FROM applications
-            WHERE status = $1
-            ORDER BY created_at DESC
-            LIMIT 200
-            "#,
-        )
-        .bind(status)
-        .fetch_all(&state.db)
-        .await
-    } else {
-        sqlx::query_as::<_, ApplicationRow>(
-            r#"
-            SELECT
-                id::text AS id,
-                login,
-                full_name,
-                email,
-                reason,
-                status,
-                citizen_id,
-                created_at,
-                updated_at,
-                confirmed_at,
-                review_note,
-                reviewed_by,
-                reviewed_at
-            FROM applications
-            ORDER BY
-              CASE status
-                  WHEN 'pending' THEN 0
-                  WHEN 'confirmed' THEN 1
-                  WHEN 'approved' THEN 2
-                  ELSE 3
-              END,
-              created_at DESC
-            LIMIT 200
-            "#,
-        )
-        .fetch_all(&state.db)
-        .await
+    }
+
+    let list_q = crate::candidates::ListCandidatesQuery {
+        kind: Some(crate::candidates::KIND_CITIZENSHIP.to_string()),
+        status: status_filter.map(|s| s.to_string()),
+        street_only: None,
     };
 
-    match rows {
-        Ok(list) => Json(ApiResponse::success(serde_json::json!({
-            "applications": list,
-            "total": list.len(),
-        })))
-        .into_response(),
-        Err(e) => response::internal_error(format!("Failed to list applications: {e}")),
-    }
+    let rows = match crate::candidates::list_candidates(&state.db, &list_q).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return response::internal_error(format!("Failed to list applications: {e}"));
+        }
+    };
+
+    let applications: Vec<ApplicationRow> = rows
+        .into_iter()
+        .map(|c| {
+            let login = c
+                .payload
+                .get("login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let full_name = c
+                .payload
+                .get("full_name")
+                .and_then(|v| v.as_str())
+                .or(c.display_name.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let reason = c
+                .payload
+                .get("reason")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let confirmed_at = c
+                .payload
+                .get("confirmed_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            let review_note = c
+                .payload
+                .get("review_note")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+            ApplicationRow {
+                id: c.id,
+                login,
+                full_name,
+                email: c.email.unwrap_or_default(),
+                reason,
+                status: c.status,
+                citizen_id: c.citizen_id,
+                created_at: c.created_at,
+                updated_at: c.updated_at,
+                confirmed_at,
+                review_note,
+                reviewed_by: c.decided_by.clone(),
+                reviewed_at: c.decided_at,
+            }
+        })
+        .collect();
+
+    Json(ApiResponse::success(serde_json::json!({
+        "applications": applications,
+        "total": applications.len(),
+    })))
+    .into_response()
 }
 
 #[cfg(test)]

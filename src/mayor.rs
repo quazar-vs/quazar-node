@@ -41,7 +41,10 @@ use crate::node_generator::{
 };
 use crate::pending;
 use crate::nodes::{Node, NodeStatus};
-use crate::register_verify::{is_valid_email, normalize_email, take_recent_email_verification};
+use crate::register_verify::{
+    clear_recent_email_verification, email_belongs_to_citizen, is_valid_email, normalize_email,
+    take_recent_email_verification, CITIZEN_USE_APP_MESSAGE,
+};
 use crate::response::{self, ApiResponse};
 use crate::types::Role;
 use crate::validator::{normalize_and_validate_citizen_name, EventValidator};
@@ -343,7 +346,7 @@ impl MayorError {
         Self::NotFound(msg.into())
     }
 
-    fn to_response(&self) -> (StatusCode, Json<ApiResponse>) {
+    pub fn to_response(&self) -> (StatusCode, Json<ApiResponse>) {
         let (status, message) = match self {
             MayorError::Message(m) => (StatusCode::BAD_REQUEST, m),
             MayorError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
@@ -1191,6 +1194,54 @@ pub async fn list_elections(
 
 const MAYOR_APPLICATION_ACTIVE_STATUSES: &[&str] = &["pending", "approved", "confirmed"];
 
+fn payload_str(payload: &serde_json::Value, key: &str) -> Option<String> {
+    payload
+        .get(key)
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn payload_datetime(payload: &serde_json::Value, key: &str) -> Option<chrono::DateTime<Utc>> {
+    payload.get(key).and_then(|v| {
+        v.as_str().and_then(|s| {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .ok()
+                .map(|d| d.with_timezone(&Utc))
+        })
+    })
+}
+
+async fn load_mayor_candidate_by_node_id(
+    pool: &PgPool,
+    node_id: &str,
+) -> Result<Option<crate::candidates::CandidateRow>, sqlx::Error> {
+    sqlx::query_as::<_, crate::candidates::CandidateRow>(
+        r#"
+        SELECT
+            id::text AS id,
+            kind,
+            status,
+            email,
+            display_name,
+            payload,
+            source,
+            citizen_id,
+            created_at,
+            updated_at,
+            decided_at,
+            decided_by
+        FROM candidates
+        WHERE kind = 'mayor' AND payload->>'node_id' = $1
+        LIMIT 1
+        "#,
+    )
+    .bind(node_id)
+    .fetch_optional(pool)
+    .await
+}
+
 /// How often the background task scans for expired pending mayor applications.
 pub const MAYOR_APPLICATION_EXPIRY_INTERVAL: std::time::Duration =
     std::time::Duration::from_secs(5 * 60);
@@ -1229,12 +1280,13 @@ pub async fn expire_pending_mayor_applications(
     let rows = sqlx::query_as::<_, ExpiredMayorApplicationRow>(
         r#"
         SELECT a.id, a.citizen_id, c.role AS previous_role
-        FROM mayor_applications a
+        FROM candidates a
         JOIN citizens c ON c.id = a.citizen_id
-        WHERE a.status = 'pending'
+        WHERE a.kind = 'mayor'
+          AND a.status = 'pending'
           AND a.citizen_id IS NOT NULL
-          AND a.expires_at < NOW()
-        ORDER BY a.expires_at ASC
+          AND (a.payload->>'expires_at')::timestamptz < NOW()
+        ORDER BY (a.payload->>'expires_at')::timestamptz ASC
         "#,
     )
     .fetch_all(&state.db)
@@ -1249,9 +1301,11 @@ pub async fn expire_pending_mayor_applications(
 
         let updated = sqlx::query(
             r#"
-            UPDATE mayor_applications
-            SET status = 'timed_out'
-            WHERE id = $1 AND status = 'pending'
+            UPDATE candidates
+            SET status = 'timed_out',
+                updated_at = NOW(),
+                decided_at = NOW()
+            WHERE id = $1 AND kind = 'mayor' AND status = 'pending'
             "#,
         )
         .bind(row.id)
@@ -1399,8 +1453,10 @@ async fn resolve_apply_citizen(
 async fn mayor_application_ip_taken(pool: &PgPool, node_ip: &str) -> Result<bool, MayorError> {
     let taken: bool = sqlx::query_scalar(
         "SELECT EXISTS(
-            SELECT 1 FROM mayor_applications
-            WHERE node_ip = $1 AND status = ANY($2)
+            SELECT 1 FROM candidates
+            WHERE kind = 'mayor'
+              AND status = ANY($2)
+              AND payload->>'node_ip' = $1
         )",
     )
     .bind(node_ip)
@@ -1440,8 +1496,10 @@ async fn citizen_has_active_mayor_application(
 ) -> Result<bool, MayorError> {
     let exists: bool = sqlx::query_scalar(
         "SELECT EXISTS(
-            SELECT 1 FROM mayor_applications
-            WHERE citizen_id = $1 AND status = ANY($2)
+            SELECT 1 FROM candidates
+            WHERE kind = 'mayor'
+              AND citizen_id = $1
+              AND status = ANY($2)
         )",
     )
     .bind(citizen_id)
@@ -1498,36 +1556,26 @@ pub async fn apply_for_mayor_node(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
-    sqlx::query(
-        r#"
-        INSERT INTO mayor_applications (
-            id, citizen_id, node_ip, sync_peer, status, created_at, expires_at,
-            external_email
-        )
-        VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
-        "#,
+    crate::candidates::upsert_mayor(
+        &state.db,
+        application_id,
+        external_email.as_deref(),
+        Some(&citizen_id),
+        "pending",
+        Some(&citizen_id),
+        "citizen",
+        serde_json::json!({
+            "node_ip": node_ip,
+            "sync_peer": sync_peer,
+            "expires_at": expires_at,
+            "external_email": external_email,
+            "street": false,
+        }),
+        None,
+        None,
     )
-    .bind(application_id)
-    .bind(&citizen_id)
-    .bind(&node_ip)
-    .bind(&sync_peer)
-    .bind(now)
-    .bind(expires_at)
-    .bind(&external_email)
-    .execute(&state.db)
     .await
-    .map_err(|e| {
-        if let sqlx::Error::Database(db_err) = &e {
-            if db_err.constraint() == Some("idx_mayor_applications_node_ip_active")
-                || db_err.constraint() == Some("idx_mayor_applications_citizen_active")
-            {
-                return MayorError::bad_request(
-                    "Заявка не создана: IP или гражданин уже участвуют в активной заявке",
-                );
-            }
-        }
-        MayorError::Database(e.to_string())
-    })?;
+    .map_err(|e| MayorError::Database(e.to_string()))?;
 
     Ok(MayorApplyResponse {
         application_id: application_id.to_string(),
@@ -1565,6 +1613,15 @@ pub async fn apply_street_mayor_application(
         return Err(MayorError::bad_request("Введите корректный email-адрес"));
     }
 
+    match email_belongs_to_citizen(&state.db, &email).await {
+        Ok(true) => {
+            clear_recent_email_verification(&email);
+            return Err(MayorError::forbidden(CITIZEN_USE_APP_MESSAGE));
+        }
+        Ok(false) => {}
+        Err(e) => return Err(MayorError::Database(e.to_string())),
+    }
+
     let node_ip = match req.ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         Some(ip) => {
             if !is_valid_node_ip(ip) {
@@ -1585,9 +1642,10 @@ pub async fn apply_street_mayor_application(
     let email_active: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM mayor_applications
-            WHERE citizen_id IS NULL
-              AND lower(external_email) = lower($1)
+            SELECT 1 FROM candidates
+            WHERE kind = 'mayor'
+              AND citizen_id IS NULL
+              AND lower(email) = lower($1)
               AND status = ANY($2)
         )
         "#,
@@ -1606,9 +1664,10 @@ pub async fn apply_street_mayor_application(
     let login_active: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM mayor_applications
-            WHERE citizen_id IS NULL
-              AND lower(login) = lower($1)
+            SELECT 1 FROM candidates
+            WHERE kind = 'mayor'
+              AND citizen_id IS NULL
+              AND lower(payload->>'login') = lower($1)
               AND status = ANY($2)
         )
         "#,
@@ -1639,41 +1698,31 @@ pub async fn apply_street_mayor_application(
     let expires_at = now + Duration::days(30);
     let sync_peer = select_mayor_sync_peer(&state).await?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO mayor_applications (
-            id, citizen_id, node_ip, sync_peer, status, created_at, expires_at,
-            external_email, login, full_name, passport_data, reason, confirmed_at
-        )
-        VALUES ($1, NULL, $2, $3, 'confirmed', $4, $5, $6, $7, $8, $9, $10, $4)
-        "#,
+    crate::candidates::upsert_mayor(
+        &state.db,
+        application_id,
+        Some(&email),
+        Some(&full_name),
+        "confirmed",
+        None,
+        "street",
+        serde_json::json!({
+            "login": login,
+            "full_name": full_name,
+            "passport_data": passport_data,
+            "reason": reason,
+            "node_ip": node_ip,
+            "sync_peer": sync_peer,
+            "confirmed_at": now,
+            "external_email": email,
+            "expires_at": expires_at,
+            "street": true,
+        }),
+        None,
+        None,
     )
-    .bind(application_id)
-    .bind(&node_ip)
-    .bind(&sync_peer)
-    .bind(now)
-    .bind(expires_at)
-    .bind(&email)
-    .bind(&login)
-    .bind(&full_name)
-    .bind(&passport_data)
-    .bind(&reason)
-    .execute(&state.db)
     .await
-    .map_err(|e| {
-        if let sqlx::Error::Database(db_err) = &e {
-            let c = db_err.constraint();
-            if c == Some("idx_mayor_applications_node_ip_active")
-                || c == Some("idx_mayor_applications_street_email_active")
-                || c == Some("idx_mayor_applications_street_login_active")
-            {
-                return MayorError::bad_request(
-                    "Заявка не создана: email, логин или IP уже участвуют в активной заявке",
-                );
-            }
-        }
-        MayorError::Database(e.to_string())
-    })?;
+    .map_err(|e| MayorError::Database(e.to_string()))?;
 
     // Notify admins (NOTIFY_EMAIL) + confirmation to applicant — same pattern as citizenship.
     if let Some(smtp) = SmtpConfig::from_env() {
@@ -1738,18 +1787,25 @@ pub async fn approve_street_mayor_application(
         ));
     }
 
-    let app = sqlx::query_as::<_, StreetMayorReviewRow>(
-        r#"
-        SELECT id, status, login, full_name, external_email, reason, node_ip, citizen_id
-        FROM mayor_applications
-        WHERE id = $1
-        "#,
-    )
-    .bind(application_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?
-    .ok_or_else(|| MayorError::not_found("Заявка на мэрство не найдена"))?;
+    let cand = crate::candidates::get_candidate(&state.db, application_id)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Заявка на мэрство не найдена"))?;
+
+    if cand.kind != crate::candidates::KIND_MAYOR {
+        return Err(MayorError::not_found("Заявка на мэрство не найдена"));
+    }
+
+    let app = StreetMayorReviewRow {
+        id: application_id,
+        status: cand.status.clone(),
+        login: payload_str(&cand.payload, "login"),
+        full_name: payload_str(&cand.payload, "full_name").or(cand.display_name.clone()),
+        external_email: cand.email.clone().or_else(|| payload_str(&cand.payload, "external_email")),
+        reason: payload_str(&cand.payload, "reason"),
+        node_ip: payload_str(&cand.payload, "node_ip"),
+        citizen_id: cand.citizen_id.clone(),
+    };
 
     if app.citizen_id.is_some() {
         return Err(MayorError::bad_request(
@@ -1804,8 +1860,11 @@ pub async fn approve_street_mayor_application(
     let ip_taken_other: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM mayor_applications
-            WHERE node_ip = $1 AND status = ANY($2) AND id <> $3
+            SELECT 1 FROM candidates
+            WHERE kind = 'mayor'
+              AND payload->>'node_ip' = $1
+              AND status = ANY($2)
+              AND id <> $3
         )
         "#,
     )
@@ -1932,31 +1991,44 @@ pub async fn approve_street_mayor_application(
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
 
-        sqlx::query(
+        let claim = sqlx::query(
             r#"
-            UPDATE mayor_applications
-            SET citizen_id = $2,
-                node_ip = $3,
-                sync_peer = $4,
-                status = 'pending',
-                expires_at = $5,
-                review_note = $6,
-                reviewed_by = $7,
-                reviewed_at = $8
-            WHERE id = $1 AND status = 'confirmed' AND citizen_id IS NULL
+            UPDATE candidates
+            SET status = 'pending',
+                citizen_id = $2,
+                email = COALESCE($3, email),
+                display_name = COALESCE($4, display_name),
+                payload = payload || $5::jsonb,
+                updated_at = NOW(),
+                decided_at = $6,
+                decided_by = $7
+            WHERE id = $1 AND kind = 'mayor' AND status = 'confirmed' AND citizen_id IS NULL
             "#,
         )
         .bind(application_id)
         .bind(&citizen_id)
-        .bind(&node_ip)
-        .bind(&sync_peer)
-        .bind(expires_at)
-        .bind(&note)
-        .bind(&auth.citizen_name)
+        .bind(&email)
+        .bind(&login)
+        .bind(serde_json::json!({
+            "node_ip": node_ip,
+            "sync_peer": sync_peer,
+            "expires_at": expires_at,
+            "review_note": note,
+            "reviewed_by": auth.citizen_name,
+            "reviewed_at": now,
+            "street": true,
+        }))
         .bind(now)
+        .bind(&auth.citizen_name)
         .execute(&mut *tx)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        if claim.rows_affected() == 0 {
+            return Err(MayorError::bad_request(
+                "Заявка уже обработана или недоступна для одобрения",
+            ));
+        }
 
         tx.commit()
             .await
@@ -2010,30 +2082,37 @@ pub async fn approve_street_mayor_application(
         (citizen_id, login, Some(api_key))
     };
 
-    // Existing citizen path: only update mayor application (citizen already in tx path above for new).
+    // Existing citizen path: only update mayor candidate (citizen already in tx path above for new).
     if created_api_key.is_none() {
         let updated = sqlx::query(
             r#"
-            UPDATE mayor_applications
-            SET citizen_id = $2,
-                node_ip = $3,
-                sync_peer = $4,
-                status = 'pending',
-                expires_at = $5,
-                review_note = $6,
-                reviewed_by = $7,
-                reviewed_at = $8
-            WHERE id = $1 AND status = 'confirmed' AND citizen_id IS NULL
+            UPDATE candidates
+            SET status = 'pending',
+                citizen_id = $2,
+                email = COALESCE($3, email),
+                display_name = COALESCE($4, display_name),
+                payload = payload || $5::jsonb,
+                updated_at = NOW(),
+                decided_at = $6,
+                decided_by = $7
+            WHERE id = $1 AND kind = 'mayor' AND status = 'confirmed' AND citizen_id IS NULL
             "#,
         )
         .bind(application_id)
         .bind(&citizen_id)
-        .bind(&node_ip)
-        .bind(&sync_peer)
-        .bind(expires_at)
-        .bind(&note)
-        .bind(&auth.citizen_name)
+        .bind(&email)
+        .bind(&citizen_login)
+        .bind(serde_json::json!({
+            "node_ip": node_ip,
+            "sync_peer": sync_peer,
+            "expires_at": expires_at,
+            "review_note": note,
+            "reviewed_by": auth.citizen_name,
+            "reviewed_at": now,
+            "street": true,
+        }))
         .bind(now)
+        .bind(&auth.citizen_name)
         .execute(&state.db)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
@@ -2084,33 +2163,24 @@ pub async fn reject_street_mayor_application(
         .map(|s| s.to_string())
         .ok_or_else(|| MayorError::bad_request("Для отклонения укажите причину"))?;
 
-    let status: Option<String> =
-        sqlx::query_scalar("SELECT status FROM mayor_applications WHERE id = $1")
-            .bind(application_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| MayorError::Database(e.to_string()))?;
+    let cand = crate::candidates::get_candidate(&state.db, application_id)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Заявка на мэрство не найдена"))?;
 
-    let Some(status) = status else {
+    if cand.kind != crate::candidates::KIND_MAYOR {
         return Err(MayorError::not_found("Заявка на мэрство не найдена"));
-    };
+    }
 
-    if !matches!(status.as_str(), "pending" | "confirmed") {
+    let status = cand.status.as_str();
+    if !matches!(status, "pending" | "confirmed") {
         return Err(MayorError::bad_request(
             "Отклонить можно только pending или confirmed заявку",
         ));
     }
 
     // Only street (no citizen) or pre-node street pending after mistaken state.
-    let citizen_id: Option<String> =
-        sqlx::query_scalar("SELECT citizen_id FROM mayor_applications WHERE id = $1")
-            .bind(application_id)
-            .fetch_optional(&state.db)
-            .await
-            .map_err(|e| MayorError::Database(e.to_string()))?
-            .flatten();
-
-    if citizen_id.is_some() && status == "pending" {
+    if cand.citizen_id.is_some() && status == "pending" {
         return Err(MayorError::bad_request(
             "Заявку гражданина с узлом нельзя отклонить этим методом — дождитесь timeout или обрабатывайте вручную",
         ));
@@ -2118,18 +2188,26 @@ pub async fn reject_street_mayor_application(
 
     let updated = sqlx::query(
         r#"
-        UPDATE mayor_applications
+        UPDATE candidates
         SET status = 'rejected',
-            review_note = $2,
-            reviewed_by = $3,
-            reviewed_at = $4
-        WHERE id = $1 AND status = ANY($5) AND citizen_id IS NULL
+            payload = payload || $2::jsonb,
+            updated_at = $3,
+            decided_at = $3,
+            decided_by = $4
+        WHERE id = $1
+          AND kind = 'mayor'
+          AND status = ANY($5)
+          AND citizen_id IS NULL
         "#,
     )
     .bind(application_id)
-    .bind(&note)
-    .bind(&auth.citizen_name)
+    .bind(serde_json::json!({
+        "review_note": note,
+        "reviewed_by": auth.citizen_name,
+        "reviewed_at": Utc::now(),
+    }))
     .bind(Utc::now())
+    .bind(&auth.citizen_name)
     .bind(&["pending", "confirmed"][..])
     .execute(&state.db)
     .await
@@ -2159,76 +2237,40 @@ pub async fn list_street_mayor_applications(
         ));
     }
 
-    #[derive(Debug, sqlx::FromRow)]
-    struct Row {
-        id: Uuid,
-        status: String,
-        login: Option<String>,
-        full_name: Option<String>,
-        passport_data: Option<String>,
-        external_email: Option<String>,
-        reason: Option<String>,
-        node_ip: Option<String>,
-        citizen_id: Option<String>,
-        created_at: chrono::DateTime<Utc>,
-        review_note: Option<String>,
-        reviewed_by: Option<String>,
-        reviewed_at: Option<chrono::DateTime<Utc>>,
-    }
+    let list_q = crate::candidates::ListCandidatesQuery {
+        kind: Some(crate::candidates::KIND_MAYOR.to_string()),
+        status: query
+            .status
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(|s| s.to_string()),
+        street_only: Some(true),
+    };
 
-    let status_filter = query
-        .status
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
-
-    let rows = if let Some(st) = status_filter {
-        sqlx::query_as::<_, Row>(
-            r#"
-            SELECT id, status, login, full_name, passport_data, external_email, reason, node_ip,
-                   citizen_id, created_at, review_note, reviewed_by, reviewed_at
-            FROM mayor_applications
-            WHERE citizen_id IS NULL AND status = $1
-            ORDER BY created_at DESC
-            LIMIT 200
-            "#,
-        )
-        .bind(st)
-        .fetch_all(&state.db)
+    let rows = crate::candidates::list_candidates(&state.db, &list_q)
         .await
-    } else {
-        sqlx::query_as::<_, Row>(
-            r#"
-            SELECT id, status, login, full_name, passport_data, external_email, reason, node_ip,
-                   citizen_id, created_at, review_note, reviewed_by, reviewed_at
-            FROM mayor_applications
-            WHERE citizen_id IS NULL
-            ORDER BY created_at DESC
-            LIMIT 200
-            "#,
-        )
-        .fetch_all(&state.db)
-        .await
-    }
-    .map_err(|e| MayorError::Database(e.to_string()))?;
+        .map_err(|e| MayorError::Database(e.to_string()))?;
 
     let applications: Vec<serde_json::Value> = rows
         .into_iter()
         .map(|r| {
+            let payload = &r.payload;
             serde_json::json!({
-                "id": r.id.to_string(),
+                "id": r.id,
                 "status": r.status,
-                "login": r.login,
-                "full_name": r.full_name,
-                "passport_data": r.passport_data,
-                "email": r.external_email,
-                "reason": r.reason,
-                "node_ip": r.node_ip,
+                "login": payload.get("login").and_then(|v| v.as_str()),
+                "full_name": payload.get("full_name").and_then(|v| v.as_str())
+                    .or(r.display_name.as_deref()),
+                "passport_data": payload.get("passport_data").and_then(|v| v.as_str()),
+                "email": r.email,
+                "reason": payload.get("reason").and_then(|v| v.as_str()),
+                "node_ip": payload.get("node_ip").and_then(|v| v.as_str()),
                 "citizen_id": r.citizen_id,
                 "created_at": r.created_at,
-                "review_note": r.review_note,
-                "reviewed_by": r.reviewed_by,
-                "reviewed_at": r.reviewed_at,
+                "review_note": payload.get("review_note").and_then(|v| v.as_str()),
+                "reviewed_by": r.decided_by,
+                "reviewed_at": r.decided_at,
             })
         })
         .collect();
@@ -2302,28 +2344,22 @@ pub async fn get_mayor_application_status(
     pool: &PgPool,
     application_id: Uuid,
 ) -> Result<MayorApplicationStatusResponse, MayorError> {
-    let row: Option<(
-        String,
-        Option<String>,
-        chrono::DateTime<Utc>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-        Option<String>,
-    )> = sqlx::query_as(
-        r#"
-        SELECT status, node_id, expires_at, login, full_name, citizen_id, review_note
-        FROM mayor_applications
-        WHERE id = $1
-        "#,
-    )
-    .bind(application_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?;
+    let cand = crate::candidates::get_candidate(pool, application_id)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Заявка на узел мэра не найдена"))?;
 
-    let (status, node_id, expires_at, login, full_name, citizen_id, review_note) =
-        row.ok_or_else(|| MayorError::not_found("Заявка на узел мэра не найдена"))?;
+    if cand.kind != crate::candidates::KIND_MAYOR {
+        return Err(MayorError::not_found("Заявка на узел мэра не найдена"));
+    }
+
+    let status = cand.status;
+    let node_id = payload_str(&cand.payload, "node_id");
+    let expires_at = payload_datetime(&cand.payload, "expires_at").unwrap_or(cand.created_at);
+    let login = payload_str(&cand.payload, "login");
+    let full_name = payload_str(&cand.payload, "full_name").or(cand.display_name.clone());
+    let citizen_id = cand.citizen_id;
+    let review_note = payload_str(&cand.payload, "review_note");
 
     let mut message =
         mayor_application_status_message(&status, node_id.as_deref(), expires_at, Utc::now());
@@ -2412,9 +2448,16 @@ pub async fn build_mayor_setup_package(
 
     let app = sqlx::query_as::<_, PendingMayorApplicationRow>(
         r#"
-        SELECT id, citizen_id, sync_peer, node_id, node_secret
-        FROM mayor_applications
-        WHERE node_ip = $1 AND status = 'pending'
+        SELECT
+            id,
+            citizen_id,
+            payload->>'sync_peer' AS sync_peer,
+            payload->>'node_id' AS node_id,
+            payload->>'node_secret' AS node_secret
+        FROM candidates
+        WHERE kind = 'mayor'
+          AND status = 'pending'
+          AND payload->>'node_ip' = $1
         LIMIT 1
         "#,
     )
@@ -2467,22 +2510,19 @@ pub async fn build_mayor_setup_package(
     let peer_url = peer_url_from_sync_peer(&sync_peer);
     let now = Utc::now();
 
-    sqlx::query(
-        r#"
-        UPDATE mayor_applications
-        SET node_id = $1,
-            node_secret = $2,
-            sync_peer = $3,
-            package_delivered_at = $4
-        WHERE id = $5 AND status = 'pending'
-        "#,
+    crate::candidates::mark_status(
+        &state.db,
+        app.id,
+        "pending",
+        None,
+        Some(serde_json::json!({
+            "node_id": node_id,
+            "node_secret": node_secret,
+            "sync_peer": sync_peer,
+            "package_delivered_at": now,
+        })),
+        None,
     )
-    .bind(&node_id)
-    .bind(&node_secret)
-    .bind(&sync_peer)
-    .bind(now)
-    .bind(app.id)
-    .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
@@ -2514,9 +2554,14 @@ pub async fn deliver_mayor_node_package(
 
     let app = sqlx::query_as::<_, PendingMayorApplicationRow>(
         r#"
-        SELECT id, citizen_id, sync_peer, node_id, node_secret
-        FROM mayor_applications
-        WHERE id = $1
+        SELECT
+            id,
+            citizen_id,
+            payload->>'sync_peer' AS sync_peer,
+            payload->>'node_id' AS node_id,
+            payload->>'node_secret' AS node_secret
+        FROM candidates
+        WHERE kind = 'mayor' AND id = $1
         "#,
     )
     .bind(application_id)
@@ -2535,11 +2580,13 @@ pub async fn deliver_mayor_node_package(
         ));
     }
 
-    let status: String = sqlx::query_scalar("SELECT status FROM mayor_applications WHERE id = $1")
-        .bind(application_id)
-        .fetch_one(&state.db)
-        .await
-        .map_err(|e| MayorError::Database(e.to_string()))?;
+    let status: String = sqlx::query_scalar(
+        "SELECT status FROM candidates WHERE id = $1 AND kind = 'mayor'",
+    )
+    .bind(application_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
 
     if !matches!(status.as_str(), "pending" | "approved") {
         return Err(MayorError::bad_request(format!(
@@ -2573,21 +2620,19 @@ pub async fn deliver_mayor_node_package(
     if app.node_id.as_deref() != Some(node_id.as_str())
         || app.node_secret.as_deref() != Some(node_secret.as_str())
     {
-        sqlx::query(
-            r#"
-            UPDATE mayor_applications
-            SET node_id = $1,
-                node_secret = $2,
-                sync_peer = $3,
-                package_delivered_at = COALESCE(package_delivered_at, NOW())
-            WHERE id = $4
-            "#,
+        crate::candidates::mark_status(
+            &state.db,
+            application_id,
+            &status,
+            None,
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "node_secret": node_secret,
+                "sync_peer": sync_peer,
+                "package_delivered_at": Utc::now(),
+            })),
+            None,
         )
-        .bind(&node_id)
-        .bind(&node_secret)
-        .bind(&sync_peer)
-        .bind(application_id)
-        .execute(&state.db)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
     }
@@ -2668,19 +2713,12 @@ pub async fn register_mayor_node_started(
         return Err(MayorError::bad_request("node_secret обязателен"));
     }
 
-    let app = sqlx::query_as::<_, MayorConfirmApplicationRow>(
-        r#"
-        SELECT id, citizen_id, node_ip, node_id, node_secret, status, package_delivered_at
-        FROM mayor_applications
-        WHERE node_id = $1
-        LIMIT 1
-        "#,
-    )
-    .bind(node_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?
-    .ok_or_else(|| MayorError::not_found("Заявка для этого node_id не найдена"))?;
+    let cand = load_mayor_candidate_by_node_id(&state.db, node_id)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Заявка для этого node_id не найдена"))?;
+
+    let app = mayor_confirm_row_from_candidate(&cand)?;
 
     let stored_secret = app
         .node_secret
@@ -2745,15 +2783,17 @@ pub async fn register_mayor_node_started(
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
 
-    sqlx::query(
-        r#"
-        UPDATE mayor_applications
-        SET status = 'approved'
-        WHERE id = $1 AND status IN ('pending', 'approved')
-        "#,
+    crate::candidates::mark_status(
+        &state.db,
+        app.id,
+        "approved",
+        None,
+        Some(serde_json::json!({
+            "node_id": node_id,
+            "node_url": node_url,
+        })),
+        Some(citizen_id),
     )
-    .bind(app.id)
-    .execute(&state.db)
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
@@ -2892,6 +2932,22 @@ impl MayorConfirmApplicationRow {
             .filter(|s| !s.is_empty())
             .ok_or_else(|| MayorError::bad_request("У заявки не указан IP узла"))
     }
+}
+
+fn mayor_confirm_row_from_candidate(
+    c: &crate::candidates::CandidateRow,
+) -> Result<MayorConfirmApplicationRow, MayorError> {
+    let id = Uuid::parse_str(&c.id)
+        .map_err(|_| MayorError::Database(format!("invalid candidate id: {}", c.id)))?;
+    Ok(MayorConfirmApplicationRow {
+        id,
+        citizen_id: c.citizen_id.clone(),
+        node_ip: payload_str(&c.payload, "node_ip"),
+        node_id: payload_str(&c.payload, "node_id"),
+        node_secret: payload_str(&c.payload, "node_secret"),
+        status: c.status.clone(),
+        package_delivered_at: payload_datetime(&c.payload, "package_delivered_at"),
+    })
 }
 
 async fn network_block_count(pool: &PgPool) -> Result<i64, MayorError> {
@@ -3044,19 +3100,12 @@ pub async fn confirm_mayor_node(
         return Err(MayorError::bad_request("node_secret обязателен"));
     }
 
-    let app = sqlx::query_as::<_, MayorConfirmApplicationRow>(
-        r#"
-        SELECT id, citizen_id, node_ip, node_id, node_secret, status, package_delivered_at
-        FROM mayor_applications
-        WHERE node_id = $1
-        LIMIT 1
-        "#,
-    )
-    .bind(node_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?
-    .ok_or_else(|| MayorError::not_found("Заявка для этого node_id не найдена"))?;
+    let cand = load_mayor_candidate_by_node_id(&state.db, node_id)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?
+        .ok_or_else(|| MayorError::not_found("Заявка для этого node_id не найдена"))?;
+
+    let app = mayor_confirm_row_from_candidate(&cand)?;
 
     let stored_secret = app
         .node_secret
@@ -3109,27 +3158,27 @@ pub async fn confirm_mayor_node(
     submit_mayor_pending_event(state.clone(), event).await?;
 
     // Notify mayor on external email (best-effort) after confirmation event is queued.
-    let mail_meta: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT ma.external_email, c.email FROM mayor_applications ma \
-         JOIN citizens c ON c.id = ma.citizen_id WHERE ma.id = $1",
-    )
-    .bind(app.id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
+    let to = cand
+        .email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .or_else(|| payload_str(&cand.payload, "external_email"));
+    let to = match to {
+        Some(t) => Some(t),
+        None => sqlx::query_scalar::<_, Option<String>>("SELECT email FROM citizens WHERE id = $1")
+            .bind(citizen_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .flatten()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty()),
+    };
 
-    if let Some((ext, citizen_email)) = mail_meta {
-        let to = ext
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .or_else(|| {
-                citizen_email
-                    .as_deref()
-                    .map(str::trim)
-                    .filter(|s| !s.is_empty())
-            });
+    if let Some(to) = to.as_deref() {
         let pk: String = sqlx::query_scalar("SELECT public_key FROM citizens WHERE id = $1")
             .bind(citizen_id)
             .fetch_optional(&state.db)
@@ -3138,7 +3187,7 @@ pub async fn confirm_mayor_node(
             .flatten()
             .unwrap_or_default();
         send_registration_credentials_soft(
-            to,
+            Some(to),
             citizen_id,
             &citizen_name,
             "(см. ранее выданный API-ключ гражданина)",
@@ -3159,22 +3208,23 @@ pub async fn try_confirm_mayor_after_node_started(
     state: Arc<AppState>,
     node_id: &str,
 ) -> Result<Option<MayorConfirmResponse>, MayorError> {
-    let row: Option<(String, String)> = sqlx::query_as(
-        "SELECT node_secret, status FROM mayor_applications WHERE node_id = $1",
-    )
-    .bind(node_id.trim())
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?;
+    let cand = load_mayor_candidate_by_node_id(&state.db, node_id.trim())
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
 
-    let Some((secret, status)) = row else {
+    let Some(cand) = cand else {
         return Ok(None);
     };
 
-    if status == "confirmed" {
+    let secret = match payload_str(&cand.payload, "node_secret") {
+        Some(s) => s,
+        None => return Ok(None),
+    };
+
+    if cand.status == "confirmed" {
         return Ok(None);
     }
-    if status != "approved" {
+    if cand.status != "approved" {
         return Ok(None);
     }
 
@@ -3208,7 +3258,11 @@ pub async fn maybe_request_mayor_confirmation_on_startup(state: Arc<AppState>) {
     };
 
     let status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM mayor_applications WHERE node_id = $1",
+        r#"
+        SELECT status FROM candidates
+        WHERE kind = 'mayor' AND payload->>'node_id' = $1
+        LIMIT 1
+        "#,
     )
     .bind(&node_id)
     .fetch_optional(&state.db)

@@ -1,4 +1,5 @@
 use sqlx::{Postgres, Transaction};
+use uuid::Uuid;
 
 use crate::models::Event;
 use crate::types::Role;
@@ -446,6 +447,22 @@ async fn apply_node_started(
     .await
     .map_err(|e| format!("NodeStarted application projection failed: {}", e))?;
 
+    if let Ok(app_uuid) = Uuid::parse_str(application_id) {
+        crate::candidates::mark_status_tx(
+            tx,
+            app_uuid,
+            "approved",
+            None,
+            Some(serde_json::json!({
+                "node_id": node_id,
+                "node_url": url,
+            })),
+            None,
+        )
+        .await
+        .map_err(|e| format!("NodeStarted candidates sync failed: {}", e))?;
+    }
+
     sqlx::query(
         r#"
         INSERT INTO nodes (id, url, public_key, status, last_seen, version, created_at)
@@ -494,6 +511,19 @@ async fn apply_mayor_confirmed(
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("MayorConfirmed application projection failed: {}", e))?;
+
+    if let Ok(app_uuid) = Uuid::parse_str(application_id) {
+        crate::candidates::mark_status_tx(
+            tx,
+            app_uuid,
+            "confirmed",
+            None,
+            None,
+            Some(citizen_id),
+        )
+        .await
+        .map_err(|e| format!("MayorConfirmed candidates sync failed: {}", e))?;
+    }
 
     sqlx::query(
         "UPDATE citizens SET role = $1, candidate_type = NULL, target_role = NULL WHERE id = $2",

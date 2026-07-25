@@ -105,6 +105,8 @@ fn is_public_application_path(path: &str) -> bool {
     path == "/api/application"
         || path.starts_with("/api/application/")
         || path == "/api/my-applications"
+        || path == "/api/chat/candidate/messages"
+        || path == "/api/chat/candidate/send"
         || path == "/api/mayor/application"
         || path == "/api/mayor/setup-package"
         || path.starts_with("/api/mayor/status/")

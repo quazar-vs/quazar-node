@@ -66,7 +66,13 @@ fn parse_qz_node_suffix(id: &str) -> Option<u32> {
 
 pub async fn allocate_mayor_node_id(pool: &PgPool) -> Result<String, sqlx::Error> {
     let app_ids: Vec<String> = sqlx::query_scalar(
-        "SELECT node_id FROM mayor_applications WHERE node_id IS NOT NULL",
+        r#"
+        SELECT payload->>'node_id'
+        FROM candidates
+        WHERE kind = 'mayor'
+          AND payload->>'node_id' IS NOT NULL
+          AND payload->>'node_id' <> ''
+        "#,
     )
     .fetch_all(pool)
     .await?;
@@ -89,8 +95,13 @@ pub async fn allocate_mayor_node_id(pool: &PgPool) -> Result<String, sqlx::Error
 
     let candidate = format!("QZ-NODE-{}", max_n + 1);
     let taken: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM nodes WHERE id = $1)
-         OR EXISTS(SELECT 1 FROM mayor_applications WHERE node_id = $1)",
+        r#"
+        SELECT EXISTS(SELECT 1 FROM nodes WHERE id = $1)
+         OR EXISTS(
+            SELECT 1 FROM candidates
+            WHERE kind = 'mayor' AND payload->>'node_id' = $1
+         )
+        "#,
     )
     .bind(&candidate)
     .fetch_one(pool)

@@ -173,6 +173,10 @@ impl ChatError {
         };
         (status, Json(ApiResponse::error(message)))
     }
+
+    pub(crate) fn into_api_response(&self) -> axum::response::Response {
+        self.to_response().into_response()
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -34,7 +34,8 @@ use crate::keys::push_key_to_peers;
 use crate::models::Event;
 use crate::pending;
 use crate::register_verify::{
-    consume_verification_code, issue_verification_code, is_valid_email, normalize_email,
+    clear_recent_email_verification, citizen_use_app_forbidden, consume_verification_code,
+    email_belongs_to_citizen, issue_verification_code, is_valid_email, normalize_email,
     peek_recent_email_verification, take_recent_email_verification,
 };
 use crate::response::{self, ApiResponse};
@@ -161,21 +162,6 @@ pub struct VerifyApplicationResponse {
     pub message: String,
 }
 
-#[derive(Debug, sqlx::FromRow)]
-struct ApplicationStatusRow {
-    pub id: Uuid,
-    pub login: String,
-    pub full_name: String,
-    pub status: String,
-    pub citizen_id: Option<String>,
-    pub created_at: DateTime<Utc>,
-    pub updated_at: DateTime<Utc>,
-    pub confirmed_at: Option<DateTime<Utc>>,
-    pub review_note: Option<String>,
-    pub reviewed_by: Option<String>,
-    pub reviewed_at: Option<DateTime<Utc>>,
-}
-
 #[derive(Debug, Serialize)]
 pub struct ApplicationStatusResponse {
     pub id: String,
@@ -222,6 +208,7 @@ pub struct MyApplicationsResponse {
 ///
 /// Requires `email_already_verified: true` and a live in-memory register-verify mark (peek).
 /// Does not consume the mark, so a subsequent apply can still auto-confirm.
+/// Citizens are refused (web login is for candidates only).
 pub async fn my_applications(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MyApplicationsRequest>,
@@ -231,6 +218,17 @@ pub async fn my_applications(
         return response::bad_request("Введите корректный email-адрес");
     }
 
+    match email_belongs_to_citizen(&state.db, &email).await {
+        Ok(true) => {
+            clear_recent_email_verification(&email);
+            return citizen_use_app_forbidden();
+        }
+        Ok(false) => {}
+        Err(e) => {
+            return response::internal_error(format!("Failed to check citizen email: {e}"));
+        }
+    }
+
     let client_claims_verified = req.email_already_verified.unwrap_or(false);
     if !client_claims_verified || !peek_recent_email_verification(&email) {
         return response::forbidden(
@@ -238,39 +236,39 @@ pub async fn my_applications(
         );
     }
 
-    let citizenship = match sqlx::query_as::<_, MyApplicationSummary>(
-        r#"
-        SELECT id::text AS id, status, login, created_at
-        FROM applications
-        WHERE lower(email) = lower($1)
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
+    let citizenship = match crate::candidates::latest_by_email_kind(
+        &state.db,
+        &email,
+        crate::candidates::KIND_CITIZENSHIP,
     )
-    .bind(&email)
-    .fetch_optional(&state.db)
     .await
     {
-        Ok(row) => row,
+        Ok(Some((id, status, login, created_at))) => Some(MyApplicationSummary {
+            id,
+            status,
+            login,
+            created_at,
+        }),
+        Ok(None) => None,
         Err(e) => {
             return response::internal_error(format!("Failed to load citizenship application: {e}"));
         }
     };
 
-    let mayor = match sqlx::query_as::<_, MyApplicationSummary>(
-        r#"
-        SELECT id::text AS id, status, login, created_at
-        FROM mayor_applications
-        WHERE lower(external_email) = lower($1)
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
+    let mayor = match crate::candidates::latest_by_email_kind(
+        &state.db,
+        &email,
+        crate::candidates::KIND_MAYOR,
     )
-    .bind(&email)
-    .fetch_optional(&state.db)
     .await
     {
-        Ok(row) => row,
+        Ok(Some((id, status, login, created_at))) => Some(MyApplicationSummary {
+            id,
+            status,
+            login,
+            created_at,
+        }),
+        Ok(None) => None,
         Err(e) => {
             return response::internal_error(format!("Failed to load mayor application: {e}"));
         }
@@ -338,8 +336,9 @@ pub async fn submit_application(
     let email_month_exists: bool = sqlx::query_scalar(
         r#"
         SELECT EXISTS(
-            SELECT 1 FROM applications
-            WHERE lower(email) = lower($1)
+            SELECT 1 FROM candidates
+            WHERE kind = 'citizenship'
+              AND lower(email) = lower($1)
               AND created_at >= date_trunc('month', now())
               AND created_at <  (date_trunc('month', now()) + interval '1 month')
         )
@@ -366,19 +365,26 @@ pub async fn submit_application(
         return response::bad_request("Гражданин с таким логином уже существует в системе");
     }
 
-    let citizen_exists_by_email: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM citizens WHERE lower(email) = lower($1) LIMIT 1)",
-    )
-    .bind(&email)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(false);
+    let citizen_exists_by_email: bool = match email_belongs_to_citizen(&state.db, &email).await {
+        Ok(v) => v,
+        Err(e) => {
+            return response::internal_error(format!("Failed to check citizen email: {e}"));
+        }
+    };
     if citizen_exists_by_email {
-        return response::bad_request("Гражданин с таким email уже существует в системе");
+        clear_recent_email_verification(&email);
+        return citizen_use_app_forbidden();
     }
 
     let app_login_exists: bool = sqlx::query_scalar(
-        "SELECT EXISTS(SELECT 1 FROM applications WHERE LOWER(login) = LOWER($1) LIMIT 1)",
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM candidates
+            WHERE kind = 'citizenship'
+              AND lower(COALESCE(payload->>'login', '')) = lower($1)
+            LIMIT 1
+        )
+        "#,
     )
     .bind(&login)
     .fetch_one(&state.db)
@@ -425,28 +431,27 @@ pub async fn submit_application(
     };
 
     let id = Uuid::new_v4();
-    let now = Utc::now();
 
-    if let Err(e) = sqlx::query(
-        r#"
-        INSERT INTO applications
-            (id, login, full_name, passport_data, email, reason, status, verification_code,
-             created_at, updated_at, confirmed_at, external_email)
-        VALUES
-            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $5)
-        "#,
+    // Source of truth: candidates only (legacy /api/applications is a read facade).
+    if let Err(e) = crate::candidates::upsert_citizenship(
+        &state.db,
+        id,
+        &email,
+        &full_name,
+        status,
+        None,
+        serde_json::json!({
+            "login": login,
+            "full_name": full_name,
+            "passport_data": passport_data,
+            "reason": reason,
+            "verification_code": verification_code,
+            "confirmed_at": confirmed_at,
+            "external_email": email,
+        }),
+        None,
+        None,
     )
-    .bind(id)
-    .bind(&login)
-    .bind(&full_name)
-    .bind(&passport_data)
-    .bind(&email)
-    .bind(&reason)
-    .bind(status)
-    .bind(&verification_code)
-    .bind(now)
-    .bind(confirmed_at)
-    .execute(&state.db)
     .await
     {
         if auto_confirm {
@@ -500,24 +505,24 @@ pub async fn verify_application_code(
         Err(_) => return response::bad_request("Некорректный id заявки"),
     };
 
-    let row: Option<(String, String, String)> = sqlx::query_as(
-        r#"
-        SELECT email, verification_code, status
-        FROM applications
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-
-    let Some((email, stored_hash, status)) = row else {
-        return response::not_found("Заявка не найдена");
+    let row = match crate::candidates::get_candidate(&state.db, id).await {
+        Ok(Some(r)) if r.kind == crate::candidates::KIND_CITIZENSHIP => r,
+        Ok(Some(_)) => return response::not_found("Заявка не найдена"),
+        Ok(None) => return response::not_found("Заявка не найдена"),
+        Err(e) => return response::internal_error(format!("Failed to load application: {e}")),
     };
 
-    if status != "pending" {
+    let Some(email) = row.email.clone() else {
+        return response::bad_request("У заявки нет email");
+    };
+    let stored_hash = row
+        .payload
+        .get("verification_code")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+    if row.status != "pending" {
         return response::bad_request("Код больше не требуется для этой заявки");
     }
 
@@ -531,24 +536,20 @@ pub async fn verify_application_code(
         return response::bad_request(msg);
     }
 
-    let updated = sqlx::query(
-        r#"
-        UPDATE applications
-        SET status = 'confirmed',
-            confirmed_at = now(),
-            updated_at = now()
-        WHERE id = $1
-          AND status = 'pending'
-        "#,
+    if let Err(e) = crate::candidates::mark_status(
+        &state.db,
+        id,
+        "confirmed",
+        None,
+        Some(serde_json::json!({
+            "confirmed_at": Utc::now(),
+            "verification_code": serde_json::Value::Null,
+        })),
+        None,
     )
-    .bind(id)
-    .execute(&state.db)
     .await
-    .map(|r| r.rows_affected() as i64)
-    .unwrap_or(0);
-
-    if updated == 0 {
-        return response::bad_request("Заявка уже подтверждена или находится в другом статусе");
+    {
+        return response::internal_error(format!("Failed to confirm application: {e}"));
     }
 
     if let Some(smtp) = SmtpConfig::from_env() {
@@ -582,35 +583,48 @@ pub async fn get_application_status(
         Err(_) => return response::bad_request("Некорректный id заявки"),
     };
 
-    match sqlx::query_as::<_, ApplicationStatusRow>(
-        r#"
-        SELECT id, login, full_name, status, citizen_id, created_at, updated_at, confirmed_at,
-               review_note, reviewed_by, reviewed_at
-        FROM applications
-        WHERE id = $1
-        "#,
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    {
-        Ok(Some(row)) => {
+    match crate::candidates::get_candidate(&state.db, id).await {
+        Ok(Some(row)) if row.kind == crate::candidates::KIND_CITIZENSHIP => {
+            let login = row
+                .payload
+                .get("login")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            let full_name = row
+                .payload
+                .get("full_name")
+                .and_then(|v| v.as_str())
+                .or(row.display_name.as_deref())
+                .unwrap_or("")
+                .to_string();
+            let confirmed_at = row
+                .payload
+                .get("confirmed_at")
+                .and_then(|v| v.as_str())
+                .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                .map(|dt| dt.with_timezone(&Utc));
+            let review_note = row
+                .payload
+                .get("review_note")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
             let out = ApplicationStatusResponse {
-                id: row.id.to_string(),
-                login: row.login,
-                full_name: row.full_name,
+                id: row.id,
+                login,
+                full_name,
                 status: row.status,
                 citizen_id: row.citizen_id,
                 created_at: row.created_at,
                 updated_at: row.updated_at,
-                confirmed_at: row.confirmed_at,
-                review_note: row.review_note,
-                reviewed_by: row.reviewed_by,
-                reviewed_at: row.reviewed_at,
+                confirmed_at,
+                review_note,
+                reviewed_by: row.decided_by,
+                reviewed_at: row.decided_at,
             };
             Json(ApiResponse::success(out)).into_response()
         }
-        Ok(None) => response::not_found("Application not found"),
+        Ok(Some(_)) | Ok(None) => response::not_found("Application not found"),
         Err(e) => response::internal_error(format!("Failed to load application: {e}")),
     }
 }
@@ -631,18 +645,12 @@ async fn update_application_review_status(
         Err(_) => return response::bad_request("Некорректный id заявки"),
     };
 
-    let current_status: Option<String> = sqlx::query_scalar(
-        "SELECT status FROM applications WHERE id = $1",
-    )
-    .bind(id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten();
-
-    let Some(current_status) = current_status else {
-        return response::not_found("Заявка не найдена");
+    let candidate = match crate::candidates::get_candidate(&state.db, id).await {
+        Ok(Some(r)) if r.kind == crate::candidates::KIND_CITIZENSHIP => r,
+        Ok(Some(_)) | Ok(None) => return response::not_found("Заявка не найдена"),
+        Err(e) => return response::internal_error(format!("Failed to load application: {e}")),
     };
+    let current_status = candidate.status.clone();
 
     match next_status {
         "approved" if current_status != "confirmed" => {
@@ -661,25 +669,25 @@ async fn update_application_review_status(
     let note_for_email = note.clone();
 
     if next_status == "approved" {
-        let app_row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
-            r#"
-            SELECT login, full_name, passport_data, email, status, external_email
-            FROM applications
-            WHERE id = $1
-            "#,
-        )
-        .bind(id)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+        let login = candidate
+            .payload
+            .get("login")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let email = candidate.email.clone().unwrap_or_default();
+        let external_email = candidate
+            .payload
+            .get("external_email")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string())
+            .or_else(|| candidate.email.clone());
 
-        let Some((login, _full_name, _passport_data, email, status, external_email)) = app_row else {
-            return response::not_found("Заявка не найдена");
-        };
-
-        if status != "confirmed" {
-            return response::bad_request("Одобрить можно только подтверждённую заявку");
+        if login.is_empty() {
+            return response::bad_request("В заявке отсутствует логин");
+        }
+        if email.is_empty() {
+            return response::bad_request("В заявке отсутствует email");
         }
 
         let citizen_exists: bool = sqlx::query_scalar(
@@ -755,24 +763,18 @@ async fn update_application_review_status(
             .execute(&mut *tx)
             .await?;
 
-            sqlx::query(
-                r#"
-                UPDATE applications
-                SET status = 'approved',
-                    citizen_id = $2,
-                    review_note = $3,
-                    reviewed_by = $4,
-                    reviewed_at = $5,
-                    updated_at = $5
-                WHERE id = $1
-                "#,
+            crate::candidates::mark_status_tx(
+                &mut tx,
+                id,
+                "approved",
+                Some(&auth.citizen_name),
+                Some(serde_json::json!({
+                    "review_note": note,
+                    "reviewed_by": auth.citizen_name,
+                    "reviewed_at": now,
+                })),
+                Some(&citizen_id),
             )
-            .bind(id)
-            .bind(&citizen_id)
-            .bind(note.clone())
-            .bind(&auth.citizen_name)
-            .bind(now)
-            .execute(&mut *tx)
             .await?;
 
             Ok::<(), sqlx::Error>(())
@@ -824,8 +826,6 @@ async fn update_application_review_status(
 
         push_key_to_peers(&state, &api_key, Role::Citizen, &login).await;
 
-        // Credentials to confirmed external_email via external SMTP (soft-fail).
-        // Old applications without external_email: skip with log (compat).
         send_registration_credentials_soft(
             external_email.as_deref(),
             &citizen_id,
@@ -846,33 +846,23 @@ async fn update_application_review_status(
         .into_response();
     }
 
-    let target_email: Option<String> = if next_status == "rejected" {
-        sqlx::query_scalar("SELECT email FROM applications WHERE id = $1")
-            .bind(id)
-            .fetch_optional(&state.db)
-            .await
-            .ok()
-            .flatten()
+    let target_email = if next_status == "rejected" {
+        candidate.email.clone()
     } else {
         None
     };
 
-    match sqlx::query(
-        r#"
-        UPDATE applications
-        SET status = $2,
-            review_note = $3,
-            reviewed_by = $4,
-            reviewed_at = now(),
-            updated_at = now()
-        WHERE id = $1
-        "#,
+    match crate::candidates::mark_status(
+        &state.db,
+        id,
+        next_status,
+        Some(&auth.citizen_name),
+        Some(serde_json::json!({
+            "review_note": note,
+            "reviewed_by": auth.citizen_name,
+        })),
+        None,
     )
-    .bind(id)
-    .bind(next_status)
-    .bind(&note)
-    .bind(&auth.citizen_name)
-    .execute(&state.db)
     .await
     {
         Ok(_) => {

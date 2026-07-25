@@ -11,9 +11,16 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
+use sqlx::PgPool;
+
 use crate::email::{send_verification_code, SmtpConfig};
 use crate::response::{self, ApiResponse};
 use crate::AppState;
+
+/// UI + API message when a registered citizen tries to use the website login/session.
+pub const CITIZEN_USE_APP_MESSAGE: &str = "Вход для граждан через приложение";
+/// Machine-readable code paired with [`CITIZEN_USE_APP_MESSAGE`].
+pub const CITIZEN_USE_APP_CODE: &str = "citizen_use_app";
 
 /// TTL for the 6-digit verification code and for the post-verify session mark.
 /// Mark lifetime must match the code so the verified-email session expires with it.
@@ -150,13 +157,51 @@ pub fn mark_email_recently_verified(email: &str) {
 /// Peek whether a recent register email verification is still valid (does not consume).
 /// Used by `/api/my-applications` so lookups do not burn the apply auto-confirm mark.
 pub fn peek_recent_email_verification(email: &str) -> bool {
+    recent_email_verification_expires_in(email).is_some()
+}
+
+/// Remaining TTL of the verified-email mark, if still valid (does not consume or refresh).
+pub fn recent_email_verification_expires_in(email: &str) -> Option<u64> {
     let email = normalize_email(email);
     if !is_valid_email(&email) {
-        return false;
+        return None;
     }
     let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
     purge_expired_verified(&mut map);
-    map.get(&email).is_some_and(|expires_at| *expires_at > Instant::now())
+    let expires_at = map.get(&email)?;
+    let now = Instant::now();
+    if *expires_at <= now {
+        return None;
+    }
+    Some(expires_at.duration_since(now).as_secs().max(1))
+}
+
+/// Extend a live verified-email mark by [`CODE_TTL`] from now (activity refresh).
+/// Returns new `expires_in_secs`, or `None` if the mark was missing/expired.
+pub fn refresh_recent_email_verification(email: &str) -> Option<u64> {
+    let email = normalize_email(email);
+    if !is_valid_email(&email) {
+        return None;
+    }
+    let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
+    purge_expired_verified(&mut map);
+    let now = Instant::now();
+    let expires_at = map.get(&email)?;
+    if *expires_at <= now {
+        return None;
+    }
+    map.insert(email, now + CODE_TTL);
+    Some(CODE_TTL.as_secs())
+}
+
+/// Drop a verified-email mark without consuming it for apply auto-confirm semantics.
+pub fn clear_recent_email_verification(email: &str) {
+    let email = normalize_email(email);
+    if !is_valid_email(&email) {
+        return;
+    }
+    let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
+    map.remove(&email);
 }
 
 /// Consume a recent register email verification, if still valid.
@@ -169,6 +214,49 @@ pub fn take_recent_email_verification(email: &str) -> bool {
     let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
     purge_expired_verified(&mut map);
     map.remove(&email).is_some()
+}
+
+/// True if `email` belongs to a real citizen (not a Candidate/applicant chat placeholder).
+pub async fn email_belongs_to_citizen(pool: &PgPool, email: &str) -> Result<bool, sqlx::Error> {
+    let email = normalize_email(email);
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM citizens
+            WHERE lower(email) = lower($1)
+              AND NOT (
+                status = 'applicant'
+                AND COALESCE(role, '') = 'Candidate'
+              )
+            LIMIT 1
+        )
+        "#,
+    )
+    .bind(&email)
+    .fetch_one(pool)
+    .await
+}
+
+/// Citizenship and/or street-mayor application exists for this email.
+pub async fn email_has_candidate_application(
+    pool: &PgPool,
+    email: &str,
+) -> Result<bool, sqlx::Error> {
+    let email = normalize_email(email);
+    crate::candidates::email_has_application(pool, &email).await
+}
+
+/// 403 with UI text «Вход для граждан через приложение» and `data.code = citizen_use_app`.
+pub fn citizen_use_app_forbidden() -> Response {
+    (
+        axum::http::StatusCode::FORBIDDEN,
+        Json(ApiResponse {
+            status: "error".to_string(),
+            data: Some(serde_json::json!({ "code": CITIZEN_USE_APP_CODE })),
+            error: Some(CITIZEN_USE_APP_MESSAGE.to_string()),
+        }),
+    )
+        .into_response()
 }
 
 fn generate_code() -> String {
@@ -263,7 +351,7 @@ fn parse_json_body<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, Resp
 }
 
 pub async fn send_code_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -274,6 +362,15 @@ pub async fn send_code_handler(
 
     let email = normalize_email(&req.email);
     let ip = client_ip(connect_info.as_ref());
+
+    match email_belongs_to_citizen(&state.db, &email).await {
+        Ok(true) => return citizen_use_app_forbidden(),
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "failed to check citizen email on send-code");
+            return response::internal_error("Не удалось проверить email. Попробуйте позже.");
+        }
+    }
 
     match issue_verification_code(&email, &ip).await {
         Ok(_code) => {
@@ -306,7 +403,7 @@ pub async fn send_code_handler(
 }
 
 pub async fn verify_code_handler(
-    State(_state): State<Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
     body: Bytes,
 ) -> impl IntoResponse {
     let req: VerifyCodeRequest = match parse_json_body(&body) {
@@ -314,12 +411,31 @@ pub async fn verify_code_handler(
         Err(response) => return response,
     };
 
-    match consume_verification_code(&req.email, &req.code) {
-        Ok(()) => Json(ApiResponse::success(VerifyCodeResponse {
-            message: "Email подтверждён".to_string(),
-            expires_in_secs: CODE_TTL.as_secs(),
-        }))
-        .into_response(),
+    let email = normalize_email(&req.email);
+
+    match consume_verification_code(&email, &req.code) {
+        Ok(()) => {
+            match email_belongs_to_citizen(&state.db, &email).await {
+                Ok(true) => {
+                    // Do not leave a web session mark for citizens.
+                    clear_recent_email_verification(&email);
+                    return citizen_use_app_forbidden();
+                }
+                Ok(false) => {}
+                Err(e) => {
+                    clear_recent_email_verification(&email);
+                    tracing::error!(error = %e, "failed to check citizen email on verify-code");
+                    return response::internal_error(
+                        "Не удалось проверить email. Попробуйте позже.",
+                    );
+                }
+            }
+            Json(ApiResponse::success(VerifyCodeResponse {
+                message: "Email подтверждён".to_string(),
+                expires_in_secs: CODE_TTL.as_secs(),
+            }))
+            .into_response()
+        }
         Err(message) => response::bad_request(message),
     }
 }
@@ -372,5 +488,17 @@ mod tests {
         assert!(peek_recent_email_verification(email));
         assert!(take_recent_email_verification(email));
         assert!(!peek_recent_email_verification(email));
+    }
+
+    #[test]
+    fn recent_verify_refresh_extends_ttl() {
+        let email = "apply-refresh@example.com";
+        mark_email_recently_verified(email);
+        let before = recent_email_verification_expires_in(email).expect("mark present");
+        assert!(before > 0);
+        let refreshed = refresh_recent_email_verification(email).expect("refresh ok");
+        assert_eq!(refreshed, CODE_TTL.as_secs());
+        assert!(peek_recent_email_verification(email));
+        assert!(refresh_recent_email_verification("missing-refresh@example.com").is_none());
     }
 }

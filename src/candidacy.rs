@@ -349,6 +349,33 @@ pub async fn nominate_candidate(
         .await
         .map_err(|(_, body)| pending_submit_error(body))?;
 
+    let email: Option<String> = sqlx::query_scalar("SELECT email FROM citizens WHERE id = $1")
+        .bind(&cid)
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .flatten();
+
+    let _ = crate::candidates::upsert_role(
+        &state.db,
+        &candidacy_id,
+        email.as_deref(),
+        &candidate_name,
+        "Active",
+        &cid,
+        serde_json::json!({
+            "target_role": target_role,
+            "votes_for": 0,
+            "votes_against": 0,
+            "threshold": threshold,
+            "nominator_id": nominator_id,
+            "legacy_table": "candidacies",
+        }),
+        None,
+    )
+    .await;
+
     fetch_candidacy(&state.db, &candidacy_id).await
 }
 
@@ -428,6 +455,21 @@ pub async fn approve_candidate(
     submit_pending_event(state.clone(), event)
         .await
         .map_err(|(_, body)| pending_submit_error(body))?;
+
+    if let Ok(uuid) = Uuid::parse_str(candidacy_id) {
+        let _ = crate::candidates::mark_status(
+            &state.db,
+            uuid,
+            "Approved",
+            Some(auth_name),
+            Some(serde_json::json!({
+                "approved_at": now,
+                "target_role": row.target_role,
+            })),
+            Some(&row.citizen_id),
+        )
+        .await;
+    }
 
     fetch_candidacy(&state.db, candidacy_id).await
 }
@@ -584,6 +626,21 @@ pub async fn appoint_candidate(
     submit_pending_event(state.clone(), role_event)
         .await
         .map_err(|(_, body)| pending_submit_error(body))?;
+
+    if let Ok(uuid) = Uuid::parse_str(candidacy_id) {
+        let _ = crate::candidates::mark_status(
+            &state.db,
+            uuid,
+            "Appointed",
+            Some(&auth.citizen_name),
+            Some(serde_json::json!({
+                "appointed_at": now,
+                "target_role": candidacy.target_role,
+            })),
+            Some(&candidacy.citizen_id),
+        )
+        .await;
+    }
 
     fetch_candidacy(&state.db, candidacy_id).await
 }
