@@ -1,27 +1,38 @@
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration as StdDuration, Instant};
 
 use axum::{
-    extract::{Extension, Path, Query, State},
+    extract::{ConnectInfo, Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
 };
 use chrono::{Duration, Utc};
 use serde::{Deserialize, Serialize};
-use sqlx::PgPool;
+use sqlx::{PgPool, Postgres, Transaction};
 use tokio::time;
 use uuid::Uuid;
 
+use crate::applications::{recaptcha_required, verify_recaptcha_with_ip};
 use crate::auth::{AuthContext, KeyStore};
 use crate::block_producer;
 use crate::blockchain::{
+    build_signed_citizen_added_event, build_signed_citizen_role_event,
     build_signed_mayor_application_timed_out_event, build_signed_mayor_confirmed_event,
     build_signed_mayor_election_announced_event, build_signed_mayor_election_candidate_event,
     build_signed_mayor_election_endorse_event, build_signed_mayor_election_vote_cast_event,
     build_signed_mayor_election_vote_result_event, build_signed_mayor_election_vote_started_event,
-    build_signed_node_started_event,
+    build_signed_node_started_event, build_signed_passport_issued_event,
+};
+use crate::citizen::hash_key;
+use crate::client_ip;
+use crate::email::{
+    notify_email, send_mayor_street_application, send_registration_credentials_soft, SmtpConfig,
 };
 use crate::gossip;
+use crate::keys::push_key_to_peers;
 use crate::models::Event;
 use crate::node_generator::{
     allocate_mayor_node_id, format_secret_for_package, generate_node_secret_hex,
@@ -29,10 +40,51 @@ use crate::node_generator::{
 };
 use crate::pending;
 use crate::nodes::{Node, NodeStatus};
+use crate::register_verify::{is_valid_email, normalize_email, take_recent_email_verification};
 use crate::response::{self, ApiResponse};
 use crate::types::Role;
-use crate::validator::EventValidator;
+use crate::validator::{normalize_and_validate_citizen_name, EventValidator};
 use crate::AppState;
+
+static STREET_MAYOR_SUBMIT_RATE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
+
+fn allow_street_mayor_submit(ip: &str) -> bool {
+    let mutex = STREET_MAYOR_SUBMIT_RATE.get_or_init(|| Mutex::new(HashMap::new()));
+    let mut map = mutex.lock().expect("street mayor submit rate mutex");
+
+    let now = Instant::now();
+    let max_age = StdDuration::from_secs(120);
+    map.retain(|_, t| now.duration_since(*t) < max_age);
+
+    let min_interval = StdDuration::from_secs(60);
+    if let Some(last) = map.get(ip) {
+        if now.duration_since(*last) < min_interval {
+            return false;
+        }
+    }
+
+    map.insert(ip.to_string(), now);
+    true
+}
+
+fn generate_temp_public_key_hex() -> String {
+    format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
+}
+
+fn generate_citizen_api_key() -> String {
+    format!("qz_citizen_{}", Uuid::new_v4().simple())
+}
+
+fn validate_non_empty_len(value: &str, field: &'static str, max: usize) -> Result<String, String> {
+    let s = value.trim().to_string();
+    if s.is_empty() {
+        return Err(format!("{field} обязателен"));
+    }
+    if s.len() > max {
+        return Err(format!("{field} слишком длинное (макс. {max} символов)"));
+    }
+    Ok(s)
+}
 
 /// Absolute majority: floor(n/2)+1 == 50%+1 of cast votes.
 pub fn absolute_majority_threshold(total_votes: i64) -> i64 {
@@ -111,12 +163,57 @@ pub struct MayorApplyResponse {
     pub sync_peer: String,
 }
 
+/// Public street application (website, no Bearer).
+#[derive(Debug, Deserialize)]
+pub struct StreetMayorApplicationRequest {
+    pub login: String,
+    pub full_name: String,
+    pub email: String,
+    pub reason: String,
+    #[serde(default)]
+    pub ip: Option<String>,
+    #[serde(default)]
+    pub captcha_token: Option<String>,
+    #[serde(default)]
+    pub email_already_verified: Option<bool>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct StreetMayorApplicationResponse {
+    pub id: String,
+    pub status: String,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sync_peer: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ReviewMayorApplicationRequest {
+    pub note: Option<String>,
+    /// Optional IP override when street application was submitted without one.
+    #[serde(default)]
+    pub ip: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ListMayorApplicationsQuery {
+    pub status: Option<String>,
+}
+
 #[derive(Debug, Serialize)]
 pub struct MayorApplicationStatusResponse {
     pub status: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub login: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub full_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub citizen_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub review_note: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1130,7 +1227,9 @@ pub async fn expire_pending_mayor_applications(
         SELECT a.id, a.citizen_id, c.role AS previous_role
         FROM mayor_applications a
         JOIN citizens c ON c.id = a.citizen_id
-        WHERE a.status = 'pending' AND a.expires_at < NOW()
+        WHERE a.status = 'pending'
+          AND a.citizen_id IS NOT NULL
+          AND a.expires_at < NOW()
         ORDER BY a.expires_at ASC
         "#,
     )
@@ -1380,44 +1479,28 @@ pub async fn apply_for_mayor_node(
     let expires_at = now + Duration::hours(24);
     let sync_peer = select_mayor_sync_peer(&state).await?;
 
-    let citizen_row: Option<(String, Option<String>)> = sqlx::query_as(
-        "SELECT name, email FROM citizens WHERE id = $1",
+    let citizen_email: Option<String> = sqlx::query_scalar(
+        "SELECT email FROM citizens WHERE id = $1",
     )
     .bind(&citizen_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| MayorError::Database(e.to_string()))?;
+    .map_err(|e| MayorError::Database(e.to_string()))?
+    .flatten();
 
-    let (citizen_name, citizen_email) = citizen_row.unwrap_or_else(|| (citizen_id.clone(), None));
     let external_email = citizen_email
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("")
-        .to_string();
-
-    let (internal_email, mail_password, mail_created) = if !external_email.is_empty() {
-        crate::mail::provision_mailbox_for_application(
-            &format!("mayor.{}", citizen_id),
-            &external_email,
-        )
-        .await
-    } else {
-        tracing::info!(%citizen_id, "mayor apply: no citizen email — skip mailbox");
-        (
-            crate::mail::build_internal_email(&format!("mayor.{}", citizen_id)),
-            crate::mail::generate_mail_password(),
-            false,
-        )
-    };
+        .map(str::to_string);
 
     sqlx::query(
         r#"
         INSERT INTO mayor_applications (
             id, citizen_id, node_ip, sync_peer, status, created_at, expires_at,
-            external_email, internal_email, mail_password, mail_created
+            external_email
         )
-        VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7, $8, $9, $10)
+        VALUES ($1, $2, $3, $4, 'pending', $5, $6, $7)
         "#,
     )
     .bind(application_id)
@@ -1426,14 +1509,7 @@ pub async fn apply_for_mayor_node(
     .bind(&sync_peer)
     .bind(now)
     .bind(expires_at)
-    .bind(if external_email.is_empty() {
-        None::<String>
-    } else {
-        Some(external_email)
-    })
-    .bind(&internal_email)
-    .bind(&mail_password)
-    .bind(mail_created)
+    .bind(&external_email)
     .execute(&state.db)
     .await
     .map_err(|e| {
@@ -1449,12 +1525,694 @@ pub async fn apply_for_mayor_node(
         MayorError::Database(e.to_string())
     })?;
 
-    let _ = citizen_name; // reserved for future mail templates
-
     Ok(MayorApplyResponse {
         application_id: application_id.to_string(),
         sync_peer,
     })
+}
+
+/// Public street mayor application (website): no Bearer, email-verified → confirmed.
+pub async fn apply_street_mayor_application(
+    state: Arc<AppState>,
+    client_ip: &str,
+    req: StreetMayorApplicationRequest,
+) -> Result<StreetMayorApplicationResponse, MayorError> {
+    if let Err(msg) = crate::auth::ensure_recaptcha_secret() {
+        return Err(MayorError::Message(msg));
+    }
+    if recaptcha_required() {
+        let token = req.captcha_token.as_deref().unwrap_or("");
+        if let Err(msg) = verify_recaptcha_with_ip(token, Some(client_ip)).await {
+            return Err(MayorError::bad_request(msg));
+        }
+    }
+
+    let login = normalize_and_validate_citizen_name(&req.login)
+        .map_err(|msg| MayorError::bad_request(msg))?;
+    let full_name = validate_non_empty_len(&req.full_name, "ФИО", 200)
+        .map_err(MayorError::bad_request)?;
+    let reason = validate_non_empty_len(&req.reason, "Мотивация", 5000)
+        .map_err(MayorError::bad_request)?;
+
+    let email = normalize_email(&req.email);
+    if !is_valid_email(&email) {
+        return Err(MayorError::bad_request("Введите корректный email-адрес"));
+    }
+
+    let node_ip = match req.ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(ip) => {
+            if !is_valid_node_ip(ip) {
+                return Err(MayorError::bad_request(
+                    "Укажите корректный IP-адрес или адрес узла",
+                ));
+            }
+            if mayor_application_ip_taken(&state.db, ip).await? {
+                return Err(MayorError::bad_request(
+                    "Этот IP уже занят другой заявкой на узел мэра",
+                ));
+            }
+            Some(ip.to_string())
+        }
+        None => None,
+    };
+
+    let email_active: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM mayor_applications
+            WHERE citizen_id IS NULL
+              AND lower(external_email) = lower($1)
+              AND status = ANY($2)
+        )
+        "#,
+    )
+    .bind(&email)
+    .bind(&["pending", "confirmed"][..])
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+    if email_active {
+        return Err(MayorError::bad_request(
+            "На этот email уже есть активная заявка на мэрство",
+        ));
+    }
+
+    let login_active: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM mayor_applications
+            WHERE citizen_id IS NULL
+              AND lower(login) = lower($1)
+              AND status = ANY($2)
+        )
+        "#,
+    )
+    .bind(&login)
+    .bind(&["pending", "confirmed"][..])
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+    if login_active {
+        return Err(MayorError::bad_request(
+            "Логин уже используется в заявке на мэрство",
+        ));
+    }
+
+    let client_claims_verified = req.email_already_verified.unwrap_or(false);
+    let auto_confirm = client_claims_verified && take_recent_email_verification(&email);
+    if !auto_confirm {
+        return Err(MayorError::bad_request(
+            "Сначала подтвердите email через вход на сайте, затем подайте заявку снова",
+        ));
+    }
+
+    let application_id = Uuid::new_v4();
+    let now = Utc::now();
+    // Review window (node 24h timer starts only after admin approve → pending).
+    let expires_at = now + Duration::days(30);
+    let sync_peer = select_mayor_sync_peer(&state).await?;
+
+    sqlx::query(
+        r#"
+        INSERT INTO mayor_applications (
+            id, citizen_id, node_ip, sync_peer, status, created_at, expires_at,
+            external_email, login, full_name, reason, confirmed_at
+        )
+        VALUES ($1, NULL, $2, $3, 'confirmed', $4, $5, $6, $7, $8, $9, $4)
+        "#,
+    )
+    .bind(application_id)
+    .bind(&node_ip)
+    .bind(&sync_peer)
+    .bind(now)
+    .bind(expires_at)
+    .bind(&email)
+    .bind(&login)
+    .bind(&full_name)
+    .bind(&reason)
+    .execute(&state.db)
+    .await
+    .map_err(|e| {
+        if let sqlx::Error::Database(db_err) = &e {
+            let c = db_err.constraint();
+            if c == Some("idx_mayor_applications_node_ip_active")
+                || c == Some("idx_mayor_applications_street_email_active")
+                || c == Some("idx_mayor_applications_street_login_active")
+            {
+                return MayorError::bad_request(
+                    "Заявка не создана: email, логин или IP уже участвуют в активной заявке",
+                );
+            }
+        }
+        MayorError::Database(e.to_string())
+    })?;
+
+    if let Some(smtp) = SmtpConfig::from_env() {
+        let notify_to = notify_email().unwrap_or_else(|| smtp.user.clone());
+        if let Err(e) = send_mayor_street_application(
+            &smtp,
+            &notify_to,
+            &full_name,
+            &email,
+            &login,
+            &reason,
+        )
+        .await
+        {
+            tracing::warn!(to = %notify_to, error = %e, "failed to send mayor street application notification");
+        }
+    }
+
+    Ok(StreetMayorApplicationResponse {
+        id: application_id.to_string(),
+        status: "confirmed".to_string(),
+        message: "Заявка принята и ожидает рассмотрения. Email уже был подтверждён.".to_string(),
+        sync_peer: Some(sync_peer),
+    })
+}
+
+#[derive(Debug, sqlx::FromRow)]
+struct StreetMayorReviewRow {
+    id: Uuid,
+    status: String,
+    login: Option<String>,
+    full_name: Option<String>,
+    external_email: Option<String>,
+    reason: Option<String>,
+    node_ip: Option<String>,
+    citizen_id: Option<String>,
+}
+
+/// Admin approve of a street mayor application: create/link citizen, enter node pending flow.
+pub async fn approve_street_mayor_application(
+    state: Arc<AppState>,
+    auth: &AuthContext,
+    application_id: Uuid,
+    req: ReviewMayorApplicationRequest,
+) -> Result<serde_json::Value, MayorError> {
+    if auth.is_node || !auth.can_change_citizen_role() {
+        return Err(MayorError::forbidden(
+            "Только Aiya или Founder могут одобрять заявки на мэрство",
+        ));
+    }
+
+    let app = sqlx::query_as::<_, StreetMayorReviewRow>(
+        r#"
+        SELECT id, status, login, full_name, external_email, reason, node_ip, citizen_id
+        FROM mayor_applications
+        WHERE id = $1
+        "#,
+    )
+    .bind(application_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?
+    .ok_or_else(|| MayorError::not_found("Заявка на мэрство не найдена"))?;
+
+    if app.citizen_id.is_some() {
+        return Err(MayorError::bad_request(
+            "Заявка уже привязана к гражданину — используйте обычный поток узла",
+        ));
+    }
+    if app.status != "confirmed" {
+        return Err(MayorError::bad_request(
+            "Одобрить можно только подтверждённую заявку с сайта (status=confirmed)",
+        ));
+    }
+
+    let login = app
+        .login
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| MayorError::bad_request("У заявки не указан логин"))?
+        .to_string();
+    let email = app
+        .external_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| MayorError::bad_request("У заявки не указан email"))?
+        .to_string();
+
+    let node_ip = req
+        .ip
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .or_else(|| {
+            app.node_ip
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(|s| s.to_string())
+        })
+        .ok_or_else(|| {
+            MayorError::bad_request("Укажите IP узла в заявке или в теле approve ({ip})")
+        })?;
+
+    if !is_valid_node_ip(&node_ip) {
+        return Err(MayorError::bad_request(
+            "Укажите корректный IP-адрес или адрес узла",
+        ));
+    }
+
+    // Allow same application to keep its IP; block other active apps.
+    let ip_taken_other: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM mayor_applications
+            WHERE node_ip = $1 AND status = ANY($2) AND id <> $3
+        )
+        "#,
+    )
+    .bind(&node_ip)
+    .bind(MAYOR_APPLICATION_ACTIVE_STATUSES)
+    .bind(application_id)
+    .fetch_one(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+    if ip_taken_other {
+        return Err(MayorError::bad_request(
+            "Этот IP уже занят другой заявкой на узел мэра",
+        ));
+    }
+
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string());
+
+    // Link existing citizen by email, otherwise create a new one.
+    let existing: Option<(String, String, String)> = sqlx::query_as(
+        "SELECT id, name, status FROM citizens WHERE lower(email) = lower($1) LIMIT 1",
+    )
+    .bind(&email)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let now = Utc::now();
+    let expires_at = now + Duration::hours(24);
+    let sync_peer = select_mayor_sync_peer(&state).await?;
+
+    let (citizen_id, citizen_login, created_api_key) = if let Some((cid, cname, cstatus)) = existing
+    {
+        if cstatus != "active" {
+            return Err(MayorError::bad_request(format!(
+                "Гражданин с этим email существует, но статус: {cstatus}"
+            )));
+        }
+        if citizen_has_active_mayor_application(&state.db, &cid).await? {
+            return Err(MayorError::bad_request(
+                "У гражданина с этим email уже есть активная заявка на узел мэра",
+            ));
+        }
+        (cid, cname, None)
+    } else {
+        let login_taken: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM citizens WHERE LOWER(name) = LOWER($1) LIMIT 1)",
+        )
+        .bind(&login)
+        .fetch_one(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+        if login_taken {
+            return Err(MayorError::bad_request(
+                "Гражданин с таким логином уже существует",
+            ));
+        }
+
+        let citizen_id = Uuid::new_v4().to_string();
+        let passport_id = Uuid::new_v4().to_string();
+        let api_key = generate_citizen_api_key();
+        let api_key_hash = hash_key(&api_key);
+        let api_key_id = Uuid::new_v4().to_string();
+        let public_key = generate_temp_public_key_hex();
+        let now_ts = now.timestamp();
+        let passport_expires = now_ts + 365 * 24 * 60 * 60;
+
+        let mut tx: Transaction<'_, Postgres> = state
+            .db
+            .begin()
+            .await
+            .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO citizens
+                (id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email, email_verified)
+            VALUES
+                ($1, $2, $3, $4, $5, $6, TRUE, $7, FALSE, $8, TRUE)
+            "#,
+        )
+        .bind(&citizen_id)
+        .bind(&login)
+        .bind(&public_key)
+        .bind("active")
+        .bind(Role::Citizen.as_str())
+        .bind(now_ts)
+        .bind(passport_expires)
+        .bind(&email)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid)
+            VALUES ($1, $2, $3, $4, TRUE)
+            "#,
+        )
+        .bind(&passport_id)
+        .bind(&citizen_id)
+        .bind(now_ts)
+        .bind(passport_expires)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            INSERT INTO api_keys (id, citizen_id, key_hash, role, created_at, expires_at, is_active, last_used)
+            VALUES ($1, $2, $3, $4, $5, NULL, TRUE, NULL)
+            "#,
+        )
+        .bind(&api_key_id)
+        .bind(&citizen_id)
+        .bind(&api_key_hash)
+        .bind(Role::Citizen.as_str())
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        sqlx::query(
+            r#"
+            UPDATE mayor_applications
+            SET citizen_id = $2,
+                node_ip = $3,
+                sync_peer = $4,
+                status = 'pending',
+                expires_at = $5,
+                review_note = $6,
+                reviewed_by = $7,
+                reviewed_at = $8
+            WHERE id = $1 AND status = 'confirmed' AND citizen_id IS NULL
+            "#,
+        )
+        .bind(application_id)
+        .bind(&citizen_id)
+        .bind(&node_ip)
+        .bind(&sync_peer)
+        .bind(expires_at)
+        .bind(&note)
+        .bind(&auth.citizen_name)
+        .bind(now)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        let citizen_added_event = build_signed_citizen_added_event(
+            &format!("citizen_add_{}", citizen_id),
+            &citizen_id,
+            &login,
+            &public_key,
+            "Quazar Portal",
+            Role::Citizen.as_str(),
+            &auth.citizen_name,
+            now_ts,
+        );
+        let _ = submit_mayor_pending_event(state.clone(), citizen_added_event).await;
+
+        let passport_event = build_signed_passport_issued_event(
+            &format!("passport_issue_{}", passport_id),
+            &passport_id,
+            &citizen_id,
+            &login,
+            now_ts,
+            passport_expires,
+            &auth.citizen_name,
+            now_ts,
+        );
+        let _ = submit_mayor_pending_event(state.clone(), passport_event).await;
+
+        let role_event = build_signed_citizen_role_event(
+            &format!("citizen_role_{}_{}", citizen_id, now_ts),
+            &citizen_id,
+            &login,
+            Role::Citizen.as_str(),
+            &auth.citizen_name,
+            now_ts,
+        );
+        let _ = submit_mayor_pending_event(state.clone(), role_event).await;
+
+        push_key_to_peers(&state, &api_key, Role::Citizen, &login).await;
+
+        send_registration_credentials_soft(
+            Some(&email),
+            &citizen_id,
+            &login,
+            &api_key,
+            &public_key,
+        )
+        .await;
+
+        (citizen_id, login, Some(api_key))
+    };
+
+    // Existing citizen path: only update mayor application (citizen already in tx path above for new).
+    if created_api_key.is_none() {
+        let updated = sqlx::query(
+            r#"
+            UPDATE mayor_applications
+            SET citizen_id = $2,
+                node_ip = $3,
+                sync_peer = $4,
+                status = 'pending',
+                expires_at = $5,
+                review_note = $6,
+                reviewed_by = $7,
+                reviewed_at = $8
+            WHERE id = $1 AND status = 'confirmed' AND citizen_id IS NULL
+            "#,
+        )
+        .bind(application_id)
+        .bind(&citizen_id)
+        .bind(&node_ip)
+        .bind(&sync_peer)
+        .bind(expires_at)
+        .bind(&note)
+        .bind(&auth.citizen_name)
+        .bind(now)
+        .execute(&state.db)
+        .await
+        .map_err(|e| MayorError::Database(e.to_string()))?;
+
+        if updated.rows_affected() == 0 {
+            return Err(MayorError::bad_request(
+                "Заявка уже обработана или недоступна для одобрения",
+            ));
+        }
+    }
+
+    let mut out = serde_json::json!({
+        "id": application_id.to_string(),
+        "status": "pending",
+        "citizen_id": citizen_id,
+        "login": citizen_login,
+        "sync_peer": sync_peer,
+        "node_ip": node_ip,
+        "message": "Заявка одобрена. Гражданин привязан — можно получать пакет узла (GET /api/mayor/:id/package)."
+    });
+    if let Some(key) = created_api_key {
+        out["api_key"] = serde_json::Value::String(key);
+        out["message"] = serde_json::Value::String(
+            "Заявка одобрена. Создан гражданин и API-ключ; пакет узла — GET /api/mayor/:id/package."
+                .to_string(),
+        );
+    }
+    Ok(out)
+}
+
+pub async fn reject_street_mayor_application(
+    state: Arc<AppState>,
+    auth: &AuthContext,
+    application_id: Uuid,
+    req: ReviewMayorApplicationRequest,
+) -> Result<serde_json::Value, MayorError> {
+    if auth.is_node || !auth.can_change_citizen_role() {
+        return Err(MayorError::forbidden(
+            "Только Aiya или Founder могут отклонять заявки на мэрство",
+        ));
+    }
+
+    let note = req
+        .note
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .ok_or_else(|| MayorError::bad_request("Для отклонения укажите причину"))?;
+
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM mayor_applications WHERE id = $1")
+            .bind(application_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let Some(status) = status else {
+        return Err(MayorError::not_found("Заявка на мэрство не найдена"));
+    };
+
+    if !matches!(status.as_str(), "pending" | "confirmed") {
+        return Err(MayorError::bad_request(
+            "Отклонить можно только pending или confirmed заявку",
+        ));
+    }
+
+    // Only street (no citizen) or pre-node street pending after mistaken state.
+    let citizen_id: Option<String> =
+        sqlx::query_scalar("SELECT citizen_id FROM mayor_applications WHERE id = $1")
+            .bind(application_id)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| MayorError::Database(e.to_string()))?
+            .flatten();
+
+    if citizen_id.is_some() && status == "pending" {
+        return Err(MayorError::bad_request(
+            "Заявку гражданина с узлом нельзя отклонить этим методом — дождитесь timeout или обрабатывайте вручную",
+        ));
+    }
+
+    let updated = sqlx::query(
+        r#"
+        UPDATE mayor_applications
+        SET status = 'rejected',
+            review_note = $2,
+            reviewed_by = $3,
+            reviewed_at = $4
+        WHERE id = $1 AND status = ANY($5) AND citizen_id IS NULL
+        "#,
+    )
+    .bind(application_id)
+    .bind(&note)
+    .bind(&auth.citizen_name)
+    .bind(Utc::now())
+    .bind(&["pending", "confirmed"][..])
+    .execute(&state.db)
+    .await
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    if updated.rows_affected() == 0 {
+        return Err(MayorError::bad_request(
+            "Заявка уже обработана или недоступна для отклонения",
+        ));
+    }
+
+    Ok(serde_json::json!({
+        "id": application_id.to_string(),
+        "status": "rejected",
+        "message": "Заявка отклонена"
+    }))
+}
+
+pub async fn list_street_mayor_applications(
+    state: Arc<AppState>,
+    auth: &AuthContext,
+    query: ListMayorApplicationsQuery,
+) -> Result<serde_json::Value, MayorError> {
+    if auth.is_node || !auth.can_change_citizen_role() {
+        return Err(MayorError::forbidden(
+            "Только Aiya или Founder могут просматривать заявки на мэрство",
+        ));
+    }
+
+    #[derive(Debug, sqlx::FromRow)]
+    struct Row {
+        id: Uuid,
+        status: String,
+        login: Option<String>,
+        full_name: Option<String>,
+        external_email: Option<String>,
+        reason: Option<String>,
+        node_ip: Option<String>,
+        citizen_id: Option<String>,
+        created_at: chrono::DateTime<Utc>,
+        review_note: Option<String>,
+        reviewed_by: Option<String>,
+        reviewed_at: Option<chrono::DateTime<Utc>>,
+    }
+
+    let status_filter = query
+        .status
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let rows = if let Some(st) = status_filter {
+        sqlx::query_as::<_, Row>(
+            r#"
+            SELECT id, status, login, full_name, external_email, reason, node_ip, citizen_id,
+                   created_at, review_note, reviewed_by, reviewed_at
+            FROM mayor_applications
+            WHERE citizen_id IS NULL AND status = $1
+            ORDER BY created_at DESC
+            LIMIT 200
+            "#,
+        )
+        .bind(st)
+        .fetch_all(&state.db)
+        .await
+    } else {
+        sqlx::query_as::<_, Row>(
+            r#"
+            SELECT id, status, login, full_name, external_email, reason, node_ip, citizen_id,
+                   created_at, review_note, reviewed_by, reviewed_at
+            FROM mayor_applications
+            WHERE citizen_id IS NULL
+            ORDER BY created_at DESC
+            LIMIT 200
+            "#,
+        )
+        .fetch_all(&state.db)
+        .await
+    }
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let applications: Vec<serde_json::Value> = rows
+        .into_iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id.to_string(),
+                "status": r.status,
+                "login": r.login,
+                "full_name": r.full_name,
+                "email": r.external_email,
+                "reason": r.reason,
+                "node_ip": r.node_ip,
+                "citizen_id": r.citizen_id,
+                "created_at": r.created_at,
+                "review_note": r.review_note,
+                "reviewed_by": r.reviewed_by,
+                "reviewed_at": r.reviewed_at,
+            })
+        })
+        .collect();
+
+    Ok(serde_json::json!({
+        "applications": applications,
+        "total": applications.len(),
+    }))
 }
 
 fn russian_hours_word(hours: i64) -> &'static str {
@@ -1499,14 +2257,18 @@ pub fn mayor_application_status_message(
             }
         }
         "confirmed" => {
+            // Street apply (email verified, awaiting admin): no node_id yet.
+            // Node lifecycle confirmed: node_id is set after sync.
             if let Some(id) = node_id.filter(|s| !s.is_empty()) {
                 format!("Узел {id} успешно подключён к сети Quazar.")
             } else {
-                "Узел мэра успешно подключён к сети Quazar.".to_string()
+                "Email подтверждён. Заявка ожидает рассмотрения администрацией.".to_string()
             }
         }
+        "rejected" => "Заявка на мэрство отклонена.".to_string(),
         "timed_out" => {
-            "Срок действия заявки истёк. Подайте новую заявку через /api/mayor/apply.".to_string()
+            "Срок действия заявки истёк. Подайте новую заявку через /api/mayor/apply или сайт."
+                .to_string()
         }
         other => format!("Статус заявки: {other}."),
     }
@@ -1516,9 +2278,17 @@ pub async fn get_mayor_application_status(
     pool: &PgPool,
     application_id: Uuid,
 ) -> Result<MayorApplicationStatusResponse, MayorError> {
-    let row: Option<(String, Option<String>, chrono::DateTime<Utc>)> = sqlx::query_as(
+    let row: Option<(
+        String,
+        Option<String>,
+        chrono::DateTime<Utc>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    )> = sqlx::query_as(
         r#"
-        SELECT status, node_id, expires_at
+        SELECT status, node_id, expires_at, login, full_name, citizen_id, review_note
         FROM mayor_applications
         WHERE id = $1
         "#,
@@ -1528,23 +2298,32 @@ pub async fn get_mayor_application_status(
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
 
-    let (status, node_id, expires_at) =
+    let (status, node_id, expires_at, login, full_name, citizen_id, review_note) =
         row.ok_or_else(|| MayorError::not_found("Заявка на узел мэра не найдена"))?;
 
-    let message =
+    let mut message =
         mayor_application_status_message(&status, node_id.as_deref(), expires_at, Utc::now());
+    if status == "rejected" {
+        if let Some(note) = review_note.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            message = format!("{message} Причина: {note}");
+        }
+    }
 
     Ok(MayorApplicationStatusResponse {
         status,
         node_id,
         message,
+        login,
+        full_name,
+        citizen_id,
+        review_note,
     })
 }
 
 #[derive(Debug, sqlx::FromRow)]
 struct PendingMayorApplicationRow {
     id: uuid::Uuid,
-    citizen_id: String,
+    citizen_id: Option<String>,
     sync_peer: Option<String>,
     node_id: Option<String>,
     node_secret: Option<String>,
@@ -1623,14 +2402,18 @@ pub async fn build_mayor_setup_package(
         MayorError::not_found("Заявка на узел мэра для этого IP не найдена или не в статусе pending")
     })?;
 
-    if app.citizen_id != key_data.citizen_id {
+    let app_citizen_id = app.citizen_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+        MayorError::bad_request("Заявка ещё не привязана к гражданину (ожидает одобрения)")
+    })?;
+
+    if app_citizen_id != key_data.citizen_id {
         return Err(MayorError::forbidden(
             "API key не принадлежит гражданину этой заявки",
         ));
     }
 
     let citizen_name: String = sqlx::query_scalar("SELECT name FROM citizens WHERE id = $1")
-        .bind(&app.citizen_id)
+        .bind(app_citizen_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?
@@ -1691,7 +2474,7 @@ pub async fn build_mayor_setup_package(
         node_secret: format_secret_for_package(&node_secret),
         sync_peer,
         peer_url,
-        qz_id: app.citizen_id,
+        qz_id: app_citizen_id.to_string(),
         citizen_name,
         network_id,
         version,
@@ -1718,7 +2501,11 @@ pub async fn deliver_mayor_node_package(
     .map_err(|e| MayorError::Database(e.to_string()))?
     .ok_or_else(|| MayorError::not_found("Заявка на узел мэра не найдена"))?;
 
-    if app.citizen_id != citizen_id {
+    let app_citizen_id = app.citizen_id.as_deref().filter(|s| !s.is_empty()).ok_or_else(|| {
+        MayorError::bad_request("Заявка ещё не привязана к гражданину (ожидает одобрения)")
+    })?;
+
+    if app_citizen_id != citizen_id {
         return Err(MayorError::forbidden(
             "Пакет установки доступен только автору заявки",
         ));
@@ -1904,14 +2691,17 @@ pub async fn register_mayor_node_started(
         }
     }
 
+    let citizen_id = app.require_citizen_id()?;
+    let node_ip = app.require_node_ip()?;
+
     let citizen_name: String = sqlx::query_scalar("SELECT name FROM citizens WHERE id = $1")
-        .bind(&app.citizen_id)
+        .bind(citizen_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?
         .ok_or_else(|| MayorError::not_found("Гражданин заявки не найден"))?;
 
-    let node_url = resolve_register_node_url(req.url.as_deref(), &app.node_ip);
+    let node_url = resolve_register_node_url(req.url.as_deref(), node_ip);
     let version = resolve_network_version(&state.db)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?;
@@ -1947,7 +2737,7 @@ pub async fn register_mayor_node_started(
     let event = build_signed_node_started_event(
         &event_id,
         &app.id.to_string(),
-        &app.citizen_id,
+        citizen_id,
         &citizen_name,
         node_id,
         &node_url,
@@ -2054,12 +2844,30 @@ fn node_secrets_match(stored: &str, provided: &str) -> bool {
 #[derive(Debug, sqlx::FromRow)]
 struct MayorConfirmApplicationRow {
     id: Uuid,
-    citizen_id: String,
-    node_ip: String,
+    citizen_id: Option<String>,
+    node_ip: Option<String>,
     node_id: Option<String>,
     node_secret: Option<String>,
     status: String,
     package_delivered_at: Option<chrono::DateTime<Utc>>,
+}
+
+impl MayorConfirmApplicationRow {
+    fn require_citizen_id(&self) -> Result<&str, MayorError> {
+        self.citizen_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| MayorError::bad_request("У заявки не привязан гражданин"))
+    }
+
+    fn require_node_ip(&self) -> Result<&str, MayorError> {
+        self.node_ip
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| MayorError::bad_request("У заявки не указан IP узла"))
+    }
 }
 
 async fn network_block_count(pool: &PgPool) -> Result<i64, MayorError> {
@@ -2154,7 +2962,7 @@ pub async fn verify_mayor_node_synced(
         network_blocks
     } else {
         let url = if node_url.trim().is_empty() {
-            format!("http://{}:8080", app.node_ip.trim())
+            format!("http://{}:8080", app.require_node_ip()?)
         } else {
             node_url
         };
@@ -2253,8 +3061,10 @@ pub async fn confirm_mayor_node(
 
     verify_mayor_node_synced(&state, &app).await?;
 
+    let citizen_id = app.require_citizen_id()?;
+
     let citizen_name: String = sqlx::query_scalar("SELECT name FROM citizens WHERE id = $1")
-        .bind(&app.citizen_id)
+        .bind(citizen_id)
         .fetch_optional(&state.db)
         .await
         .map_err(|e| MayorError::Database(e.to_string()))?
@@ -2265,7 +3075,7 @@ pub async fn confirm_mayor_node(
     let event = build_signed_mayor_confirmed_event(
         &event_id,
         &app.id.to_string(),
-        &app.citizen_id,
+        citizen_id,
         &citizen_name,
         node_id,
         &state.node_id,
@@ -2274,9 +3084,9 @@ pub async fn confirm_mayor_node(
 
     submit_mayor_pending_event(state.clone(), event).await?;
 
-    // Notify mayor on internal mailbox (best-effort) after confirmation event is queued.
+    // Notify mayor on external email (best-effort) after confirmation event is queued.
     let mail_meta: Option<(Option<String>, Option<String>)> = sqlx::query_as(
-        "SELECT ma.internal_email, c.email FROM mayor_applications ma \
+        "SELECT ma.external_email, c.email FROM mayor_applications ma \
          JOIN citizens c ON c.id = ma.citizen_id WHERE ma.id = $1",
     )
     .bind(app.id)
@@ -2285,18 +3095,27 @@ pub async fn confirm_mayor_node(
     .ok()
     .flatten();
 
-    if let Some((internal, _ext)) = mail_meta {
-        // No new API key here — send identity + node context reminder.
+    if let Some((ext, citizen_email)) = mail_meta {
+        let to = ext
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .or_else(|| {
+                citizen_email
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+            });
         let pk: String = sqlx::query_scalar("SELECT public_key FROM citizens WHERE id = $1")
-            .bind(&app.citizen_id)
+            .bind(citizen_id)
             .fetch_optional(&state.db)
             .await
             .ok()
             .flatten()
             .unwrap_or_default();
-        crate::mail::send_credentials_to_internal_mailbox(
-            internal.as_deref(),
-            &app.citizen_id,
+        send_registration_credentials_soft(
+            to,
+            citizen_id,
             &citizen_name,
             "(см. ранее выданный API-ключ гражданина)",
             &pk,
@@ -2447,6 +3266,79 @@ pub async fn mayor_apply_handler(
 ) -> impl IntoResponse {
     match apply_for_mayor_node(state, &auth, req).await {
         Ok(resp) => (StatusCode::CREATED, Json(ApiResponse::success(resp))).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+/// POST /api/mayor/application — public street apply (no Bearer).
+pub async fn street_mayor_application_handler(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    connect: ConnectInfo<SocketAddr>,
+    Json(req): Json<StreetMayorApplicationRequest>,
+) -> impl IntoResponse {
+    let trusted = state.trusted_proxies.snapshot().await;
+    let ip = client_ip::resolve_from_connect(&headers, Some(&connect), &trusted);
+    if !allow_street_mayor_submit(&ip) {
+        return response::too_many_requests(
+            "Слишком часто. Подождите минуту и попробуйте снова.",
+        )
+        .into_response();
+    }
+
+    match apply_street_mayor_application(state, &ip, req).await {
+        Ok(resp) => (StatusCode::CREATED, Json(ApiResponse::success(resp))).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+pub async fn list_street_mayor_applications_handler(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ListMayorApplicationsQuery>,
+) -> impl IntoResponse {
+    match list_street_mayor_applications(state, &auth, query).await {
+        Ok(resp) => Json(ApiResponse::success(resp)).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+pub async fn approve_street_mayor_application_handler(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ReviewMayorApplicationRequest>,
+) -> impl IntoResponse {
+    let application_id = match Uuid::parse_str(id.trim()) {
+        Ok(u) => u,
+        Err(_) => {
+            return MayorError::bad_request("Некорректный идентификатор заявки")
+                .to_response()
+                .into_response();
+        }
+    };
+    match approve_street_mayor_application(state, &auth, application_id, req).await {
+        Ok(resp) => Json(ApiResponse::success(resp)).into_response(),
+        Err(e) => e.to_response().into_response(),
+    }
+}
+
+pub async fn reject_street_mayor_application_handler(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+    Json(req): Json<ReviewMayorApplicationRequest>,
+) -> impl IntoResponse {
+    let application_id = match Uuid::parse_str(id.trim()) {
+        Ok(u) => u,
+        Err(_) => {
+            return MayorError::bad_request("Некорректный идентификатор заявки")
+                .to_response()
+                .into_response();
+        }
+    };
+    match reject_street_mayor_application(state, &auth, application_id, req).await {
+        Ok(resp) => Json(ApiResponse::success(resp)).into_response(),
         Err(e) => e.to_response().into_response(),
     }
 }

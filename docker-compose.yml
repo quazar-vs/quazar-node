@@ -17,45 +17,12 @@ services:
       timeout: 5s
       retries: 5
 
-  # Lightweight Postfix + Dovecot (replaces docker-mailserver)
-  mailserver:
-    build: ./mail
-    image: quazar-mail:local
-    hostname: mail.quazar.website
-    domainname: quazar.website
-    restart: always
-    stop_grace_period: 30s
-    ports:
-      - "25:25"
-      - "143:143"
-      - "465:465"
-      - "587:587"
-      - "993:993"
-    environment:
-      MAIL_DOMAIN: ${MAIL_DOMAIN:-quazar.website}
-      MAIL_HOSTNAME: ${MAIL_HOSTNAME:-mail.quazar.website}
-      POSTMASTER: ${MAIL_FROM:-no-reply@quazar.website}
-      SEED_MAIL_PASSWORD: ${SMTP_PASSWORD:-}
-    volumes:
-      - quazar_mail_data:/var/mail/vhosts
-      - quazar_mail_users:/etc/dovecot/users
-      - quazar_mail_maps:/etc/postfix/maps
-      - quazar_mail_ssl:/etc/ssl/mail
-    healthcheck:
-      test: ["CMD-SHELL", "nc -z 127.0.0.1 25 && nc -z 127.0.0.1 587"]
-      interval: 20s
-      timeout: 5s
-      retries: 5
-      start_period: 40s
-
   quazar-node:
     build: .
     restart: always
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      # MAIL_AUTO_CREATE: docker exec into mailserver
-      - /var/run/docker.sock:/var/run/docker.sock
       # VPN SSH pubkeys written by node into host authorized_keys
       - /var/lib/quazar/tunnel:/var/lib/quazar/tunnel
     environment:
@@ -77,20 +44,20 @@ services:
       QUAZAR_NETWORK_URL: ${QUAZAR_NETWORK_URL:-}
       QUAZAR_BOOTSTRAP_PEERS: ${QUAZAR_BOOTSTRAP_PEERS:-}
       RUST_LOG: ${RUST_LOG:-info}
-      SMTP_HOST: ${SMTP_HOST:-mailserver}
+      # External SMTP (outbound only; no internal mailserver)
+      SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
       SMTP_USERNAME: ${SMTP_USERNAME:-}
       SMTP_PASSWORD: ${SMTP_PASSWORD:-}
       SMTP_FROM: ${SMTP_FROM:-}
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Квазар}
-      SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-true}
+      SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-false}
+      NOTIFY_EMAIL: ${NOTIFY_EMAIL:-}
+      # Legacy Gmail SMTP aliases (used only if SMTP_* unset)
       GMAIL_USER: ${GMAIL_USER:-}
       GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
       GMAIL_FROM_NAME: ${GMAIL_FROM_NAME:-}
-      MAIL_AUTO_CREATE: ${MAIL_AUTO_CREATE:-true}
-      MAIL_DOMAIN: ${MAIL_DOMAIN:-quazar.website}
-      MAIL_FROM: ${MAIL_FROM:-no-reply@quazar.website}
-      MAIL_CONTAINER: ${MAIL_CONTAINER:-quazar-mailserver-1}
       SSH_TUNNEL_ENABLED: ${SSH_TUNNEL_ENABLED:-false}
       SSH_GATEWAY_PORTS: ${SSH_GATEWAY_PORTS:-yes}
       SSH_KEEPALIVE_INTERVAL: ${SSH_KEEPALIVE_INTERVAL:-60}
@@ -106,8 +73,6 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      mailserver:
-        condition: service_healthy
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:8080/status"]
       interval: 10s
@@ -117,7 +82,3 @@ services:
 
 volumes:
   quazar_pg_data:
-  quazar_mail_data:
-  quazar_mail_users:
-  quazar_mail_maps:
-  quazar_mail_ssl:

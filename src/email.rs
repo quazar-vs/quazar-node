@@ -20,11 +20,14 @@ pub struct SmtpConfig {
 
 impl SmtpConfig {
     pub fn from_env() -> Option<Self> {
+        // SMTP_FROM for envelope From; SMTP_USERNAME / SMTP_USER for auth login.
         let user = std::env::var("SMTP_FROM")
             .or_else(|_| std::env::var("SMTP_USERNAME"))
+            .or_else(|_| std::env::var("SMTP_USER"))
             .or_else(|_| std::env::var("GMAIL_USER"))
             .ok()?;
         let username = std::env::var("SMTP_USERNAME")
+            .or_else(|_| std::env::var("SMTP_USER"))
             .or_else(|_| std::env::var("GMAIL_USER"))
             .unwrap_or_else(|_| user.clone());
         let app_password = std::env::var("SMTP_PASSWORD")
@@ -33,7 +36,12 @@ impl SmtpConfig {
         if user.trim().is_empty() || app_password.trim().is_empty() {
             return None;
         }
-        let host = std::env::var("SMTP_HOST").unwrap_or_else(|_| "smtp.gmail.com".to_string());
+        let host = match std::env::var("SMTP_HOST") {
+            // Explicit empty host disables outbound SMTP (soft-fail at call sites).
+            Ok(h) if h.trim().is_empty() => return None,
+            Ok(h) => h.trim().to_string(),
+            Err(_) => "smtp.gmail.com".to_string(),
+        };
         let port = std::env::var("SMTP_PORT")
             .ok()
             .and_then(|v| v.parse().ok())
@@ -52,10 +60,97 @@ impl SmtpConfig {
             username: username.trim().to_string(),
             app_password: app_password.trim().to_string(),
             from_name,
-            host: host.trim().to_string(),
+            host,
             port,
             tls_insecure,
         })
+    }
+}
+
+/// Admin notification recipient (`NOTIFY_EMAIL`), if set.
+pub fn notify_email() -> Option<String> {
+    std::env::var("NOTIFY_EMAIL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn passport_download_url() -> String {
+    std::env::var("PASSPORT_DOWNLOAD_URL").unwrap_or_else(|_| {
+        "https://github.com/quazar-vs/quazar-passport/releases".to_string()
+    })
+}
+
+pub fn registration_credentials_body(
+    qz_id: &str,
+    name: &str,
+    api_key: &str,
+    public_key: &str,
+    passport_url: &str,
+) -> String {
+    format!(
+        "Здравствуйте!\n\n\
+         Ваша заявка в Квазаре одобрена. Данные для входа:\n\n\
+         QZ-ID: {qz_id}\n\
+         Имя: {name}\n\
+         API-ключ: {api_key}\n\
+         Публичный ключ: {public_key}\n\n\
+         Скачать Quazar Passport:\n\
+         {passport_url}\n\n\
+         Инструкция:\n\
+         1. Сохраните API-ключ в безопасном месте.\n\
+         2. Войдите на портал Квазара с вашим логином и API-ключом.\n\
+         3. При необходимости импортируйте паспорт по ссылке выше.\n\n\
+         С уважением,\n\
+         Квазар\n"
+    )
+}
+
+/// Best-effort: send registration credentials to confirmed external email.
+/// Returns Ok(()) if SMTP is missing or send fails after logging — callers may ignore Err
+/// or treat it as soft failure; prefer `send_registration_credentials_soft`.
+pub async fn send_registration_credentials(
+    to: &str,
+    qz_id: &str,
+    name: &str,
+    api_key: &str,
+    public_key: &str,
+    passport_url: Option<&str>,
+) -> Result<(), String> {
+    let Some(config) = SmtpConfig::from_env() else {
+        return Err("SMTP not configured".into());
+    };
+    let url = passport_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(passport_download_url);
+    let body = registration_credentials_body(qz_id, name, api_key, public_key, &url);
+    send_plain_email(
+        &config,
+        to,
+        "Данные для входа в Квазар",
+        body,
+    )
+    .await
+}
+
+/// Soft-fail wrapper: empty/missing `to` or send errors are logged, never panic.
+pub async fn send_registration_credentials_soft(
+    to: Option<&str>,
+    qz_id: &str,
+    name: &str,
+    api_key: &str,
+    public_key: &str,
+) {
+    let Some(to) = to.map(str::trim).filter(|s| !s.is_empty()) else {
+        tracing::info!(%qz_id, "no external_email — skip credentials email");
+        return;
+    };
+    if let Err(e) =
+        send_registration_credentials(to, qz_id, name, api_key, public_key, None).await
+    {
+        tracing::warn!(to = %to, error = %e, "failed to send registration credentials email");
     }
 }
 
@@ -250,6 +345,64 @@ pub async fn send_citizenship_application(
     .map_err(|e| format!("SMTP task failed: {e}"))?
 }
 
+fn send_mayor_street_application_blocking(
+    config: &SmtpConfig,
+    to_email: &str,
+    name: &str,
+    applicant_email: &str,
+    login: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let body = format!(
+        "--- НОВАЯ ЗАЯВКА НА МЭРСТВО (С САЙТА) ---\n\
+         ФИО: {name}\n\
+         Логин: {login}\n\
+         Email: {email}\n\
+         Мотивация: {reason}\n\
+         --- КОНЕЦ ЗАЯВКИ ---",
+        email = applicant_email,
+    );
+    send_plain_email_blocking(
+        config,
+        to_email,
+        "Новая заявка на мэрство Квазара",
+        body,
+    )
+}
+
+pub async fn send_mayor_street_application(
+    config: &SmtpConfig,
+    to_email: &str,
+    name: &str,
+    applicant_email: &str,
+    login: &str,
+    reason: &str,
+) -> Result<(), String> {
+    let config = config.clone();
+    let to_email = to_email.to_string();
+    let name = name.to_string();
+    let applicant_email = applicant_email.to_string();
+    let login = login.to_string();
+    let reason = reason.to_string();
+
+    timeout(
+        Duration::from_secs(25),
+        tokio::task::spawn_blocking(move || {
+            send_mayor_street_application_blocking(
+                &config,
+                &to_email,
+                &name,
+                &applicant_email,
+                &login,
+                &reason,
+            )
+        }),
+    )
+    .await
+    .map_err(|_| "SMTP send timed out (check network or SMTP credentials)".to_string())?
+    .map_err(|e| format!("SMTP task failed: {e}"))?
+}
+
 pub async fn send_citizenship_confirmation(
     config: &SmtpConfig,
     to_email: &str,
@@ -373,4 +526,55 @@ pub async fn send_citizenship_rejection(
     .await
     .map_err(|_| "SMTP send timed out (check network or SMTP credentials)".to_string())?
     .map_err(|e| format!("SMTP task failed: {e}"))?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn credentials_body_contains_fields() {
+        let body = registration_credentials_body(
+            "qz-1",
+            "alice",
+            "key-xyz",
+            "pubkey",
+            "https://example.com/passport",
+        );
+        assert!(body.contains("QZ-ID: qz-1"));
+        assert!(body.contains("Имя: alice"));
+        assert!(body.contains("API-ключ: key-xyz"));
+        assert!(body.contains("https://example.com/passport"));
+    }
+
+    #[test]
+    fn from_env_empty_host_disables() {
+        std::env::set_var("SMTP_FROM", "a@b.c");
+        std::env::set_var("SMTP_USERNAME", "a@b.c");
+        std::env::set_var("SMTP_PASSWORD", "secret");
+        std::env::set_var("SMTP_HOST", "");
+        assert!(SmtpConfig::from_env().is_none());
+        std::env::remove_var("SMTP_FROM");
+        std::env::remove_var("SMTP_USERNAME");
+        std::env::remove_var("SMTP_PASSWORD");
+        std::env::remove_var("SMTP_HOST");
+    }
+
+    #[test]
+    fn smtp_user_alias_works() {
+        std::env::remove_var("SMTP_USERNAME");
+        std::env::remove_var("GMAIL_USER");
+        std::env::set_var("SMTP_FROM", "from@example.com");
+        std::env::set_var("SMTP_USER", "user@example.com");
+        std::env::set_var("SMTP_PASSWORD", "secret");
+        std::env::set_var("SMTP_HOST", "smtp.example.com");
+        let cfg = SmtpConfig::from_env().expect("config");
+        assert_eq!(cfg.username, "user@example.com");
+        assert_eq!(cfg.user, "from@example.com");
+        assert_eq!(cfg.host, "smtp.example.com");
+        std::env::remove_var("SMTP_FROM");
+        std::env::remove_var("SMTP_USER");
+        std::env::remove_var("SMTP_PASSWORD");
+        std::env::remove_var("SMTP_HOST");
+    }
 }

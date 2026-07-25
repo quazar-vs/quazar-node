@@ -26,14 +26,17 @@ use crate::blockchain::{
 use crate::citizen::hash_key;
 use crate::client_ip;
 use crate::email::{
-    send_citizenship_application, send_citizenship_approval, send_citizenship_confirmation,
-    send_citizenship_rejection, SmtpConfig,
+    notify_email, send_citizenship_application, send_citizenship_confirmation,
+    send_citizenship_rejection, send_registration_credentials_soft, SmtpConfig,
 };
 use crate::gossip;
 use crate::keys::push_key_to_peers;
 use crate::models::Event;
 use crate::pending;
-use crate::register_verify::{consume_verification_code, issue_verification_code, is_valid_email, normalize_email};
+use crate::register_verify::{
+    consume_verification_code, issue_verification_code, is_valid_email, normalize_email,
+    take_recent_email_verification,
+};
 use crate::response::{self, ApiResponse};
 use crate::validator::{normalize_and_validate_citizen_name, EventValidator};
 use crate::AppState;
@@ -131,6 +134,11 @@ pub struct SubmitApplicationRequest {
     /// Google reCAPTCHA v2/v3 response token.
     #[serde(default)]
     pub captcha_token: Option<String>,
+    /// Client hint: email was already confirmed via `/auth/register/verify-code`
+    /// (sessionStorage `quazar_email_verified`). Server only auto-confirms when a
+    /// matching recent verify-code consume exists in memory.
+    #[serde(default)]
+    pub email_already_verified: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -293,29 +301,42 @@ pub async fn submit_application(
         return response::bad_request("Логин уже используется в заявках");
     }
 
-    // Generate + send the verification code to applicant email (1st email).
-    let code = match issue_verification_code(&email, &ip).await {
-        Ok(c) => c,
-        Err(msg) => return response::bad_request(msg),
+    // Prefer auto-confirm when the same email recently passed /auth/register/verify-code
+    // (client also sends email_already_verified from sessionStorage).
+    let client_claims_verified = req.email_already_verified.unwrap_or(false);
+    let auto_confirm = client_claims_verified && take_recent_email_verification(&email);
+
+    let (status, verification_code, confirmed_at, message) = if auto_confirm {
+        (
+            "confirmed",
+            String::new(),
+            Some(Utc::now()),
+            "Заявка принята и ожидает рассмотрения. Email уже был подтверждён.".to_string(),
+        )
+    } else {
+        // Generate + send the verification code to applicant email (1st email).
+        let code = match issue_verification_code(&email, &ip).await {
+            Ok(c) => c,
+            Err(msg) => return response::bad_request(msg),
+        };
+        (
+            "pending",
+            sha256_hex(&code),
+            None,
+            "Заявка принята. Проверьте email: пришёл код подтверждения.".to_string(),
+        )
     };
-    let code_hash = sha256_hex(&code);
 
     let id = Uuid::new_v4();
     let now = Utc::now();
-
-    // Best-effort: create internal mailbox and email credentials to external address.
-    let (internal_email, mail_password, mail_created) =
-        crate::mail::provision_mailbox_for_application(&login, &email).await;
 
     if let Err(e) = sqlx::query(
         r#"
         INSERT INTO applications
             (id, login, full_name, passport_data, email, reason, status, verification_code,
-             created_at, updated_at, confirmed_at,
-             external_email, internal_email, mail_password, mail_created)
+             created_at, updated_at, confirmed_at, external_email)
         VALUES
-            ($1, $2, $3, $4, $5, $6, 'pending', $7, $8, $8, NULL,
-             $5, $9, $10, $11)
+            ($1, $2, $3, $4, $5, $6, $7, $8, $9, $9, $10, $5)
         "#,
     )
     .bind(id)
@@ -324,32 +345,45 @@ pub async fn submit_application(
     .bind(&passport_data)
     .bind(&email)
     .bind(&reason)
-    .bind(&code_hash)
+    .bind(status)
+    .bind(&verification_code)
     .bind(now)
-    .bind(&internal_email)
-    .bind(&mail_password)
-    .bind(mail_created)
+    .bind(confirmed_at)
     .execute(&state.db)
     .await
     {
+        if auto_confirm {
+            crate::register_verify::mark_email_recently_verified(&email);
+        }
         return response::internal_error(format!("Failed to save application: {e}"));
     }
 
-    // 2nd email: notify Quazar team (best-effort).
+    // Notify admins (best-effort). Prefer NOTIFY_EMAIL over SMTP From.
     if let Some(smtp) = SmtpConfig::from_env() {
-        if let Err(e) = send_citizenship_application(&smtp, &smtp.user, &full_name, &email, &reason)
-            .await
+        let notify_to = notify_email().unwrap_or_else(|| smtp.user.clone());
+        if let Err(e) =
+            send_citizenship_application(&smtp, &notify_to, &full_name, &email, &reason).await
         {
-            tracing::warn!(to = %smtp.user, error = %e, "failed to send citizenship application notification");
+            tracing::warn!(to = %notify_to, error = %e, "failed to send citizenship application notification");
+        }
+        if auto_confirm {
+            if let Err(e) = send_citizenship_confirmation(&smtp, &email, &id.to_string()).await {
+                tracing::warn!(
+                    email = %email,
+                    application_id = %id,
+                    error = %e,
+                    "failed to send citizenship confirmation email"
+                );
+            }
         }
     } else {
-        tracing::warn!("GMAIL_USER / GMAIL_APP_PASSWORD not configured — skipping notification email");
+        tracing::warn!("SMTP not configured — skipping notification email");
     }
 
     Json(ApiResponse::success(SubmitApplicationResponse {
         id: id.to_string(),
-        status: "pending".to_string(),
-        message: "Заявка принята. Проверьте email: пришёл код подтверждения.".to_string(),
+        status: status.to_string(),
+        message,
     }))
     .into_response()
 }
@@ -532,7 +566,7 @@ async fn update_application_review_status(
     if next_status == "approved" {
         let app_row: Option<(String, String, String, String, String, Option<String>)> = sqlx::query_as(
             r#"
-            SELECT login, full_name, passport_data, email, status, internal_email
+            SELECT login, full_name, passport_data, email, status, external_email
             FROM applications
             WHERE id = $1
             "#,
@@ -543,7 +577,7 @@ async fn update_application_review_status(
         .ok()
         .flatten();
 
-        let Some((login, _full_name, _passport_data, email, status, internal_email)) = app_row else {
+        let Some((login, _full_name, _passport_data, email, status, external_email)) = app_row else {
             return response::not_found("Заявка не найдена");
         };
 
@@ -693,25 +727,16 @@ async fn update_application_review_status(
 
         push_key_to_peers(&state, &api_key, Role::Citizen, &login).await;
 
-        // Credentials go to internal mailbox when provisioned; fallback to external email.
-        crate::mail::send_credentials_to_internal_mailbox(
-            internal_email.as_deref(),
+        // Credentials to confirmed external_email via external SMTP (soft-fail).
+        // Old applications without external_email: skip with log (compat).
+        send_registration_credentials_soft(
+            external_email.as_deref(),
             &citizen_id,
             &login,
             &api_key,
             &public_key,
         )
         .await;
-
-        if internal_email.as_deref().unwrap_or("").is_empty() {
-            if let Some(smtp) = SmtpConfig::from_env() {
-                if let Err(e) = send_citizenship_approval(&smtp, &email, &login, &api_key).await {
-                    tracing::warn!(email = %email, error = %e, "failed to send citizenship approval email");
-                }
-            } else {
-                tracing::warn!("SMTP not configured — skipping approval email");
-            }
-        }
 
         return Json(ApiResponse::success(serde_json::json!({
             "id": id.to_string(),

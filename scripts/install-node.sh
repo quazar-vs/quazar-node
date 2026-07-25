@@ -279,10 +279,10 @@ if [[ "${running// /}" -gt 0 ]]; then
   eval "$COMPOSE ps"
 fi
 
-# --- Override для публичного :8080 без обязательного mailserver ---
+# --- Override: публичный :8080 ---
 if [[ -f "$OVERRIDE_SRC" ]]; then
   cp "$OVERRIDE_SRC" "$OVERRIDE_DST"
-  log "Применён ${OVERRIDE_DST} (порт 8080, без зависимости от mailserver)"
+  log "Применён ${OVERRIDE_DST} (порт 8080)"
 fi
 
 NETWORK_URL="${NETWORK_URL%/}"
@@ -405,7 +405,7 @@ umask 077
 
 chmod 600 "$ENV_FILE" 2>/dev/null || true
 
-# --- Docker Compose: только postgres + API (без mailserver на чистом узле) ---
+# --- Docker Compose: postgres + API ---
 log "Запуск: ${COMPOSE} up -d --build postgres quazar-node"
 eval "$COMPOSE up -d --build postgres quazar-node"
 
@@ -481,7 +481,7 @@ cat <<EOF
     1. Убедитесь, что порт 8080 открыт в файрволе и доступен из интернета.
     2. В панели сети дождитесь подтверждения узла (node-started отправлен).
     3. ADMIN_API_KEY сгенерирован локально — храните в ${ENV_FILE} (не публикуйте).
-    4. При проблемах с почтой на этом узле настройте SMTP_* или поднимите mailserver.
+    4. Для исходящей почты (коды, credentials) настройте SMTP_* / NOTIFY_EMAIL в .env.
 
 ================================================================================
 EOF

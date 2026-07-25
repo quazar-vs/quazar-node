@@ -7,12 +7,10 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-use crate::email::{send_citizenship_application, SmtpConfig};
+use crate::email::{notify_email, send_citizenship_application, SmtpConfig};
 use crate::response::{self, ApiResponse};
 use crate::validator::normalize_and_validate_citizen_name;
 use crate::AppState;
-
-const ADMIN_EMAIL: &str = "quazarvs@gmail.com";
 
 #[derive(Deserialize)]
 pub struct CitizenshipApplicationRequest {
@@ -62,16 +60,17 @@ pub async fn citizenship_application_handler(
     }
 
     let Some(smtp) = SmtpConfig::from_env() else {
-        tracing::error!("GMAIL_USER / GMAIL_APP_PASSWORD not configured");
+        tracing::error!("SMTP not configured (SMTP_* / GMAIL_*)");
         return response::internal_error(
             "Отправка email не настроена на сервере. Обратитесь к администратору.",
         );
     };
 
-    if let Err(e) = send_citizenship_application(&smtp, ADMIN_EMAIL, &name, email, reason).await {
+    let notify_to = notify_email().unwrap_or_else(|| smtp.user.clone());
+    if let Err(e) = send_citizenship_application(&smtp, &notify_to, &name, email, reason).await {
         tracing::error!(applicant = %email, error = %e, "failed to send citizenship application email");
         return response::internal_error(
-            "Не удалось отправить заявку. Попробуйте позже или напишите на quazarvs@gmail.com",
+            "Не удалось отправить заявку. Попробуйте позже или напишите администратору.",
         );
     }
 

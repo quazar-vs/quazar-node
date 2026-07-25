@@ -54,9 +54,18 @@ curl http://localhost:8080/status
 | `QUAZAR_TRUSTED_PROXIES` | Доп. IP/CIDR прокси (через запятую) для `X-Forwarded-For` / `X-Real-IP`. Основной источник — таблица `nodes` (`alive`, без локальных адресов); env нужен для локального nginx (`127.0.0.1`), которого нет в реестре |
 | `QUAZAR_API_KEYS` | Доп. ключи при старте: `ключ:Роль:имя_гражданина` (через запятую) |
 | `QUAZAR_INIT_TEST_KEYS` | `true` — синхронизировать тестовые ключи в PostgreSQL; для prod-like оставляйте `false` |
-| `GMAIL_USER` | Gmail-адрес отправителя (например `quazarvs@gmail.com`) |
-| `GMAIL_APP_PASSWORD` | [App Password](https://myaccount.google.com/apppasswords) для SMTP |
-| `GMAIL_FROM_NAME` | Имя отправителя в письме (default: `Квазар`) |
+| `GMAIL_USER` | Legacy: Gmail-адрес отправителя (если SMTP_* не заданы) |
+| `GMAIL_APP_PASSWORD` | Legacy: [App Password](https://myaccount.google.com/apppasswords) |
+| `GMAIL_FROM_NAME` | Legacy: имя отправителя (default: `Квазар`) |
+| `SMTP_HOST` | Хост внешнего SMTP (исходящая почта: коды, credentials, уведомления) |
+| `SMTP_PORT` | Порт SMTP (default `587`; `465` = SMTPS) |
+| `SMTP_USERNAME` / `SMTP_USER` | Логин SMTP (`SMTP_USER` — alias) |
+| `SMTP_PASSWORD` | Пароль SMTP |
+| `SMTP_FROM` | Адрес From |
+| `SMTP_FROM_NAME` | Имя отправителя (default: `Квазар`) |
+| `SMTP_TLS_INSECURE` | `true` — принимать невалидный TLS-сертификат (только отладка) |
+| `NOTIFY_EMAIL` | Ящик админов для уведомлений о новых заявках |
+| `PASSPORT_DOWNLOAD_URL` | Ссылка на Quazar Passport в письме с credentials |
 
 Подписи событий:
 - `ed25519_<128 hex>` — подпись hash события приватным ключом (POST /event)
@@ -90,7 +99,7 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 - `POST /keys`, `GET /keys`, `POST /keys/revoke` — управление API-ключами (Aiya / Founder), хранятся в PostgreSQL
 - `POST /keys/sync` — выровнять `api_keys.role` по реестру `citizens` (Aiya / Founder); возвращает `{ "updated": N }`
 - `POST /auth/login`, `GET /auth/check` — публичный вход по паролю и проверка наличия пароля
-- `POST /auth/register/send-code`, `POST /auth/register/verify-code` — отправка и проверка кода регистрации с лендинга (Gmail SMTP, см. `GMAIL_*`)
+- `POST /auth/register/send-code`, `POST /auth/register/verify-code` — отправка и проверка кода регистрации с лендинга (внешний SMTP, см. `SMTP_*`)
 - `POST /auth/set-password` — установка/смена пароля (требуется API-ключ гражданина)
 - `POST /api/application` — публичная заявка на гражданство (поле `captcha_token` — токен Google reCAPTCHA v2/v3)
 - `GET /api/public-config` — публичный конфиг (`recaptcha_site_key`, `recaptcha_required`)

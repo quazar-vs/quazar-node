@@ -18,6 +18,8 @@ use crate::AppState;
 const CODE_TTL: Duration = Duration::from_secs(10 * 60);
 const RESEND_COOLDOWN: Duration = Duration::from_secs(60);
 const MAX_SENDS_PER_IP_PER_HOUR: u32 = 10;
+/// How long a successful `/auth/register/verify-code` can auto-confirm a citizenship application.
+const RECENT_VERIFY_TTL: Duration = Duration::from_secs(24 * 60 * 60);
 
 #[derive(Clone)]
 struct PendingCode {
@@ -29,6 +31,9 @@ struct PendingCode {
 static CODES: LazyLock<Mutex<HashMap<String, PendingCode>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 static IP_SEND_COUNTS: LazyLock<Mutex<HashMap<String, (u32, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+/// Emails that passed register verify-code recently (in-memory; used to skip a second apply code).
+static RECENTLY_VERIFIED: LazyLock<Mutex<HashMap<String, Instant>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
 pub fn normalize_email(email: &str) -> String {
@@ -120,7 +125,37 @@ pub fn consume_verification_code(email: &str, code: &str) -> Result<(), String> 
         return Err("Неверный код. Проверьте письмо и попробуйте снова.".to_string());
     }
     codes.remove(&email);
+    drop(codes);
+    mark_email_recently_verified(&email);
     Ok(())
+}
+
+fn purge_expired_verified(map: &mut HashMap<String, Instant>) {
+    let now = Instant::now();
+    map.retain(|_, expires_at| *expires_at > now);
+}
+
+/// Record that `email` completed register verify-code (for apply auto-confirm).
+pub fn mark_email_recently_verified(email: &str) {
+    let email = normalize_email(email);
+    if !is_valid_email(&email) {
+        return;
+    }
+    let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
+    purge_expired_verified(&mut map);
+    map.insert(email, Instant::now() + RECENT_VERIFY_TTL);
+}
+
+/// Consume a recent register email verification, if still valid.
+/// Returns `true` once; subsequent calls return `false` until email is verified again.
+pub fn take_recent_email_verification(email: &str) -> bool {
+    let email = normalize_email(email);
+    if !is_valid_email(&email) {
+        return false;
+    }
+    let mut map = RECENTLY_VERIFIED.lock().expect("recently verified lock");
+    purge_expired_verified(&mut map);
+    map.remove(&email).is_some()
 }
 
 fn generate_code() -> String {
@@ -236,7 +271,7 @@ pub async fn send_code_handler(
         }
         Err(message) => {
             if message.contains("не настроена") {
-                tracing::error!("GMAIL_USER / GMAIL_APP_PASSWORD not configured");
+                tracing::error!("SMTP not configured (SMTP_* / GMAIL_*)");
                 return response::internal_error(
                     "Отправка email не настроена на сервере. Обратитесь к администратору.",
                 );
@@ -303,5 +338,13 @@ mod tests {
         let body = Bytes::new();
         let result: Result<SendCodeRequest, _> = parse_json_body(&body);
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn recent_verify_mark_can_be_taken_once() {
+        let email = "apply-auto-confirm@example.com";
+        mark_email_recently_verified(email);
+        assert!(take_recent_email_verification(email));
+        assert!(!take_recent_email_verification(email));
     }
 }

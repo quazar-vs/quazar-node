@@ -1,6 +1,5 @@
 # Applied by scripts/install-node.sh on mayor nodes (copied to docker-compose.override.yml).
 # - Publishes API on all interfaces (not only 127.0.0.1)
-# - Starts without waiting for optional mailserver (outbound mail can use network SMTP / Gmail)
 services:
   quazar-node:
     ports:

@@ -51,6 +51,15 @@ services:
       QUAZAR_SYNC_INTERVAL_SECS: "60"
       QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
       QUAZAR_BOOTSTRAP_PEERS: QZ-NODE-2@http://quazar-node-2:8080
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Квазар}
+      SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-false}
+      NOTIFY_EMAIL: ${NOTIFY_EMAIL:-}
     depends_on:
       postgres:
         condition: service_healthy
@@ -82,6 +91,15 @@ services:
       QUAZAR_SYNC_INTERVAL_SECS: "60"
       QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
       QUAZAR_BOOTSTRAP_PEERS: QZ-NODE-1@http://quazar-node:8080
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Квазар}
+      SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-false}
+      NOTIFY_EMAIL: ${NOTIFY_EMAIL:-}
     depends_on:
       postgres-2:
         condition: service_healthy

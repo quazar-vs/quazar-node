@@ -29,7 +29,6 @@ mod citizenship_application;
 mod citizenship_portal;
 mod db;
 mod email;
-mod mail;
 mod exchange;
 mod crypto;
 mod gossip;
@@ -96,11 +95,13 @@ use referendum::{
     vote_handler as vote_referendum_handler,
 };
 use mayor::{
-    create_election_handler, endorse_handler, finalize_handler, get_election_handler,
-    list_elections_handler, mayor_application_status_handler, mayor_apply_handler,
+    approve_street_mayor_application_handler, create_election_handler, endorse_handler,
+    finalize_handler, get_election_handler, list_elections_handler,
+    list_street_mayor_applications_handler, mayor_application_status_handler, mayor_apply_handler,
     mayor_confirm_handler, mayor_node_started_handler, mayor_package_handler,
     mayor_setup_package_handler, nominate_handler as mayor_nominate_handler,
-    start_election_handler, start_mayor_timeout_worker, vote_handler as mayor_vote_handler,
+    reject_street_mayor_application_handler, start_election_handler, start_mayor_timeout_worker,
+    street_mayor_application_handler, vote_handler as mayor_vote_handler,
 };
 use handlers::{background_sync, background_vpn_cleanup};
 use http::{auth_middleware, build_cors_layer, public_rate_limit_middleware, rate_limit_middleware};
@@ -285,6 +286,10 @@ async fn main() {
             "/api/mayor/status/:id",
             get(mayor_application_status_handler),
         )
+        .route(
+            "/api/mayor/application",
+            post(street_mayor_application_handler),
+        )
         .route("/api/mayor/node-started", post(mayor_node_started_handler))
         .route("/api/mayor/confirm", post(mayor_confirm_handler))
         .route("/chat/admin/send", post(admin_send_message_handler))
@@ -376,6 +381,18 @@ async fn main() {
         .route("/mayor/:id/finalize", post(finalize_handler))
         .route("/api/mayor/apply", post(mayor_apply_handler))
         .route("/api/mayor/:id/package", get(mayor_package_handler))
+        .route(
+            "/api/mayor/applications",
+            get(list_street_mayor_applications_handler),
+        )
+        .route(
+            "/api/mayor/application/:id/approve",
+            post(approve_street_mayor_application_handler),
+        )
+        .route(
+            "/api/mayor/application/:id/reject",
+            post(reject_street_mayor_application_handler),
+        )
         .route("/chat/messages", get(list_messages_handler))
         .route("/chat/search", get(search_messages_handler))
         .route("/chat/send", post(send_message_handler))

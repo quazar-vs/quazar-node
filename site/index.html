@@ -782,17 +782,20 @@
     }
 
     .form-group input[readonly],
-    .form-group input.input-readonly {
-      background: var(--ll-paper-2);
-      border-color: rgba(241, 200, 35, 0.35);
-      color: var(--ll-navy);
-      cursor: default;
+    .form-group input.input-readonly,
+    .form-group input:disabled {
+      background: #e6e4df;
+      border-color: rgba(47, 58, 74, 0.18);
+      color: var(--text-muted);
+      cursor: not-allowed;
+      opacity: 0.92;
       user-select: all;
     }
 
     .form-group input[readonly]:focus,
-    .form-group input.input-readonly:focus {
-      border-color: rgba(241, 200, 35, 0.35);
+    .form-group input.input-readonly:focus,
+    .form-group input:disabled:focus {
+      border-color: rgba(47, 58, 74, 0.18);
       box-shadow: none;
       outline: none;
     }
@@ -873,53 +876,201 @@
     }
     .form-success p { color: var(--text-muted); }
 
-    #application-form.hidden,
-    #applyGate.hidden { display: none; }
-
-    .apply-gate {
-      text-align: center;
-      padding: 2rem 1rem;
+    .form-wrapper.apply-portal {
+      max-width: 720px;
     }
 
-    .apply-gate-icon {
-      width: 3rem;
-      height: 3rem;
-      margin: 0 auto 1rem;
-      border-radius: 50%;
-      background: var(--ll-forest-soft);
-      border: 1px solid rgba(26, 107, 74, 0.25);
+    .apply-tabs {
       display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 1.1rem;
-      color: var(--ll-forest);
-      font-weight: 700;
+      flex-wrap: wrap;
+      gap: 0.35rem;
+      margin-bottom: 1.25rem;
     }
 
-    .apply-gate h3 {
-      font-family: var(--font-display);
+    .apply-tabs button {
+      font: inherit;
+      font-weight: 650;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: var(--radius);
+      padding: 0.45rem 0.95rem;
+      cursor: pointer;
+      transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
+    }
+
+    .apply-tabs button.active {
+      border-color: transparent;
+      background: var(--ll-yellow);
       color: var(--ll-navy);
-      margin-bottom: 0.75rem;
-      font-size: 1.35rem;
     }
 
-    .apply-gate p {
+    .apply-tabs button:disabled {
+      opacity: 0.45;
+      cursor: not-allowed;
+    }
+
+    .apply-kind {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 0.5rem;
+      margin-bottom: 1.25rem;
+    }
+
+    .apply-kind label {
+      display: flex;
+      flex-direction: column;
+      gap: 0.2rem;
+      margin: 0;
+      padding: 0.75rem 0.9rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      cursor: pointer;
+      background: transparent;
       color: var(--text-muted);
-      font-size: 0.95rem;
-      line-height: 1.65;
-      max-width: 420px;
-      margin: 0 auto 1.5rem;
+      transition: border-color 0.15s ease, background 0.15s ease, color 0.15s ease;
     }
 
-    .char-counter {
-      font-size: 0.75rem;
+    .apply-kind label strong {
+      font-size: 0.98rem;
+      color: inherit;
+    }
+
+    .apply-kind label span {
+      font-size: 0.82rem;
+      line-height: 1.35;
+      opacity: 0.9;
+    }
+
+    .apply-kind input {
+      position: absolute;
+      opacity: 0;
+      pointer-events: none;
+    }
+
+    .apply-kind label:has(input:checked) {
+      border-color: transparent;
+      background: var(--ll-yellow);
+      color: var(--ll-navy);
+    }
+
+    .apply-portal .row2 {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 1rem;
+    }
+
+    @media (max-width: 720px) {
+      .apply-portal .row2 { grid-template-columns: 1fr; }
+      .apply-kind { grid-template-columns: 1fr; }
+    }
+
+    .apply-portal .field-hint {
       color: var(--text-muted);
-      text-align: right;
-      margin-top: 0.25rem;
+      font-size: 0.84rem;
+      margin: -0.5rem 0 1rem;
     }
 
-    .char-counter.warn { color: var(--ll-yellow-deep); }
-    .char-counter.over { color: var(--red); }
+    .apply-message {
+      display: none;
+      margin-top: 1rem;
+      padding: 0.85rem 1rem;
+      border-radius: var(--radius);
+      font-size: 0.92rem;
+      line-height: 1.5;
+    }
+
+    .apply-message.show { display: block; }
+    .apply-message.ok {
+      background: rgba(26, 107, 74, 0.1);
+      border: 1px solid rgba(26, 107, 74, 0.28);
+      color: var(--ll-forest);
+    }
+    .apply-message.err {
+      background: rgba(158, 42, 43, 0.08);
+      border: 1px solid rgba(158, 42, 43, 0.3);
+      color: var(--red);
+    }
+    .apply-message.info {
+      background: rgba(47, 90, 109, 0.1);
+      border: 1px solid rgba(47, 90, 109, 0.25);
+      color: #2f5a6d;
+    }
+
+    .apply-pill {
+      display: inline-flex;
+      align-items: center;
+      padding: 0.15rem 0.55rem;
+      border-radius: var(--radius);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.02em;
+      text-transform: uppercase;
+    }
+    .apply-pill.pending { background: rgba(47, 90, 109, 0.14); color: #2f5a6d; }
+    .apply-pill.confirmed,
+    .apply-pill.approved { background: rgba(26, 107, 74, 0.14); color: var(--ll-forest); }
+    .apply-pill.rejected,
+    .apply-pill.timed_out { background: rgba(158, 42, 43, 0.12); color: var(--red); }
+
+    .apply-status-card dl {
+      display: grid;
+      grid-template-columns: 10rem 1fr;
+      gap: 0.55rem 0.75rem;
+      margin: 1rem 0 0;
+    }
+    .apply-status-card dt { color: var(--text-muted); }
+    .apply-status-card dd { margin: 0; overflow-wrap: anywhere; }
+    @media (max-width: 640px) {
+      .apply-status-card dl { grid-template-columns: 1fr; }
+    }
+
+    .apply-list { display: grid; gap: 0.8rem; }
+    .apply-card {
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.9rem;
+      background: var(--ll-paper);
+    }
+    .apply-card-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 0.8rem;
+      align-items: flex-start;
+    }
+    .apply-card-title { font-size: 1.05rem; font-weight: 700; margin: 0; color: var(--ll-navy); }
+    .apply-actions { display: flex; gap: 0.5rem; flex-wrap: wrap; margin-top: 0.8rem; }
+    .apply-filters { display: flex; flex-wrap: wrap; gap: 0.4rem; margin-bottom: 1rem; }
+    .apply-filters button {
+      font: inherit;
+      border: 1px solid var(--border);
+      background: transparent;
+      color: var(--text-muted);
+      border-radius: var(--radius);
+      padding: 0.35rem 0.75rem;
+      cursor: pointer;
+    }
+    .apply-filters button.active {
+      background: rgba(241, 200, 35, 0.28);
+      border-color: rgba(241, 200, 35, 0.75);
+      color: var(--ll-navy);
+    }
+    .apply-muted-box {
+      margin-top: 0.8rem;
+      padding: 0.75rem 0.9rem;
+      border-radius: var(--radius);
+      background: rgba(19, 38, 45, 0.04);
+      color: var(--text-muted);
+    }
+
+    .hp-field {
+      position: absolute;
+      left: -10000px;
+      top: auto;
+      width: 1px;
+      height: 1px;
+      overflow: hidden;
+    }
 
     /* Footer */
     footer {
@@ -1483,7 +1634,7 @@
         <a href="#about">О нас</a>
         <a href="#chat">Чат</a>
         <a href="#constitution" class="constitution-link">Конституция</a>
-        <a href="/applications/">Заявки</a>
+        <a href="#apply">Заявки</a>
         <a href="#register" class="nav-register" id="registerLink">Вход</a>
       </nav>
     </div>
@@ -1610,8 +1761,8 @@
         <div class="steps">
           <div class="step" data-animate>
             <div class="step-number">01</div>
-            <h3>Войдите</h3>
-            <p>Укажи email и введи код из письма для входа — затем заполни заявку с желаемым именем и описанием вклада</p>
+            <h3>Подайте заявку</h3>
+            <p>Войдите с email, заполните форму заявки и отправьте её на рассмотрение</p>
           </div>
           <div class="step" data-animate>
             <div class="step-number">02</div>
@@ -1631,57 +1782,16 @@
       <div class="container">
         <div class="section-header center">
           <span class="tag">Заявка</span>
-          <h2>Подать заявку на гражданство</h2>
-          <p>Заполни форму — мы свяжемся с тобой в ближайшее время</p>
+          <h2>Подать заявку</h2>
+          <p>Выберите тип: гражданство или мэрство. Email — из подтверждённой сессии входа</p>
         </div>
-        <div class="form-wrapper">
-          <div id="applyGate" class="apply-gate">
-            <div class="apply-gate-icon" aria-hidden="true">✦</div>
-            <h3>Войдите для подачи заявки</h3>
-            <p>Подтвердите email для входа, чтобы подать заявку на гражданство Квазара. Мы отправим 6-значный код на вашу почту.</p>
-            <button type="button" class="btn btn-primary cta-apply">Войти</button>
-          </div>
-
-          <form id="application-form" class="hidden" novalidate>
-            <input type="text" name="_honey" style="display:none" tabindex="-1" autocomplete="off" aria-hidden="true">
-
-            <div class="form-submit-error" id="formSubmitError" role="alert"></div>
-
-            <div class="form-group">
-              <label for="name">Желаемое имя <span class="hint">(латиница, макс. 13 символов)</span></label>
-              <input type="text" id="name" name="desired_name" maxlength="13" placeholder="QuazarCitizen" required autocomplete="off">
-              <div class="char-counter" id="charCounter">0 / 13</div>
-              <div class="error-msg" id="nameError">Введите имя латиницей (A–Z, a–z), не более 13 символов</div>
-            </div>
-
-            <div class="form-group">
-              <label for="email">Email для связи <span class="hint">(подтверждён при входе)</span></label>
-              <input type="email" id="email" name="email" placeholder="you@example.com" required autocomplete="email" aria-readonly="true">
-              <div class="error-msg" id="emailError">Введите корректный email-адрес</div>
-            </div>
-
-            <div class="form-group">
-              <label for="contribution">Чем можешь быть полезен Квазару?</label>
-              <textarea id="contribution" name="contribution" placeholder="Опиши свои навыки, идеи или проекты..." required></textarea>
-              <div class="error-msg" id="contributionError">Это поле обязательно для заполнения</div>
-            </div>
-
-            <div class="form-group">
-              <div class="checkbox-group">
-                <input type="checkbox" id="consent" name="consent" value="yes" required>
-                <label for="consent">Я согласен(на) с условиями вступления и обработкой данных в соответствии с <a href="#constitution" class="constitution-link">Конституцией Квазара</a></label>
-              </div>
-              <div class="error-msg" id="consentError">Необходимо дать согласие</div>
-            </div>
-
-            <button type="submit" class="btn btn-primary form-submit" id="submitBtn">Отправить заявку</button>
-          </form>
-
-          <div class="form-success" id="formSuccess">
-            <div class="success-icon">✓</div>
-            <h3>Заявка отправлена!</h3>
-            <p>Мы рассмотрим её и свяжемся с вами по email. Добро пожаловать в будущее Квазара.</p>
-          </div>
+        <div class="form-wrapper apply-portal">
+          <nav class="apply-tabs" aria-label="Заявка">
+            <button type="button" data-route="apply" class="active">Подать заявку</button>
+            <button type="button" data-route="status" disabled>Статус</button>
+          </nav>
+          <div id="applyView"></div>
+          <div id="applyMessage" class="apply-message" role="status" aria-live="polite"></div>
         </div>
       </div>
     </section>
@@ -1731,7 +1841,7 @@
         <div class="footer-links">
           <a href="https://github.com/quazar-vs/quazar-node" target="_blank" rel="noopener">GitHub</a>
           <a href="#constitution" class="constitution-link">Конституция</a>
-          <a href="/applications/">Портал заявок</a>
+          <a href="#apply">Портал заявок</a>
           <a href="mailto:quazarvs@gmail.com">quazarvs@gmail.com</a>
         </div>
       </div>
@@ -1787,8 +1897,8 @@
         <div id="registerSuccess" class="register-success-panel" hidden>
           <div class="success-icon">✓</div>
           <h3>Вы вошли!</h3>
-          <p>Email подтверждён. Теперь заполните заявку на гражданство Квазара.</p>
-          <button type="button" class="btn btn-primary cta-apply" id="registerGoApply" style="margin-top:1.5rem">Перейти к заявке</button>
+          <p>Email подтверждён. Можно подать заявку — email подставится автоматически.</p>
+          <button type="button" class="btn btn-primary" id="registerCloseSuccess" style="margin-top:1.5rem">К заявке</button>
         </div>
       </div>
     </div>
@@ -2081,122 +2191,8 @@
 
       animated.forEach(function (el) { observer.observe(el); });
 
-      /* Form validation & AJAX submit */
-      const form = document.getElementById('application-form');
-      const submitBtn = document.getElementById('submitBtn');
-      const formSubmitError = document.getElementById('formSubmitError');
-      const formSuccess = document.getElementById('formSuccess');
-      const honeyInput = form.querySelector('[name="_honey"]');
-      const nameInput = document.getElementById('name');
-      const emailInput = document.getElementById('email');
-      const contributionInput = document.getElementById('contribution');
-      const consentInput = document.getElementById('consent');
-      const charCounter = document.getElementById('charCounter');
-      const latinRegex = /^[A-Za-z]+$/;
       const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       const SUBMIT_TIMEOUT_MS = 35000;
-      const submitBtnDefaultHtml = submitBtn.innerHTML;
-
-      nameInput.addEventListener('input', function () {
-        var len = nameInput.value.length;
-        charCounter.textContent = len + ' / 13';
-        charCounter.className = 'char-counter' + (len > 13 ? ' over' : len > 10 ? ' warn' : '');
-        nameInput.value = nameInput.value.replace(/[^A-Za-z]/g, '');
-      });
-
-      function showError(input, errorEl, show) {
-        if (show) {
-          input.classList.add('error');
-          errorEl.classList.add('show');
-        } else {
-          input.classList.remove('error');
-          errorEl.classList.remove('show');
-        }
-        return !show;
-      }
-
-      function validate() {
-        var valid = true;
-
-        var nameVal = nameInput.value.trim();
-        if (!nameVal || !latinRegex.test(nameVal) || nameVal.length > 13) {
-          valid = showError(nameInput, document.getElementById('nameError'), true) && valid;
-        } else {
-          showError(nameInput, document.getElementById('nameError'), false);
-        }
-
-        var emailVal = emailInput.value.trim();
-        if (!emailVal || !emailRegex.test(emailVal)) {
-          valid = showError(emailInput, document.getElementById('emailError'), true) && valid;
-        } else {
-          showError(emailInput, document.getElementById('emailError'), false);
-        }
-
-        var contribVal = contributionInput.value.trim();
-        if (!contribVal) {
-          valid = showError(contributionInput, document.getElementById('contributionError'), true) && valid;
-        } else {
-          showError(contributionInput, document.getElementById('contributionError'), false);
-        }
-
-        if (!consentInput.checked) {
-          document.getElementById('consentError').classList.add('show');
-          valid = false;
-        } else {
-          document.getElementById('consentError').classList.remove('show');
-        }
-
-        return valid;
-      }
-
-      function hideSubmitError() {
-        formSubmitError.textContent = '';
-        formSubmitError.classList.remove('show');
-      }
-
-      function showSubmitError(message) {
-        formSubmitError.textContent = message;
-        formSubmitError.classList.add('show');
-      }
-
-      function setSubmitting(isSubmitting) {
-        submitBtn.disabled = isSubmitting;
-        submitBtn.innerHTML = isSubmitting ? '⏳ Отправка...' : submitBtnDefaultHtml;
-      }
-
-      form.addEventListener('submit', function (e) {
-        e.preventDefault();
-        hideSubmitError();
-
-        if (!isEmailVerified()) {
-          showSubmitError('Войдите, чтобы отправить заявку.');
-          openRegister();
-          return;
-        }
-
-        if (!validate()) return;
-
-        if (honeyInput && honeyInput.value.trim()) return;
-
-        setSubmitting(true);
-
-        quazarApiPost('/api/citizenship-application', {
-          name: nameInput.value.trim(),
-          email: getVerifiedEmail(),
-          reason: contributionInput.value.trim()
-        })
-          .then(function () {
-            form.classList.add('hidden');
-            formSuccess.classList.add('show');
-          })
-          .catch(function (err) {
-            var message = err.name === 'AbortError'
-              ? 'Превышено время ожидания (35 с). Проверьте соединение и попробуйте снова.'
-              : (err.message || 'Не удалось отправить заявку. Попробуйте позже или напишите на quazarvs@gmail.com');
-            showSubmitError(message);
-            setSubmitting(false);
-          });
-      });
 
       /* Constitution viewer (embedded, no network fetch) */
       var modal = document.getElementById('constitutionModal');
@@ -2370,7 +2366,6 @@
       var registerStep1 = document.getElementById('registerStep1');
       var registerStep2 = document.getElementById('registerStep2');
       var registerSuccess = document.getElementById('registerSuccess');
-      var applyGate = document.getElementById('applyGate');
       var regEmailInput = document.getElementById('regEmail');
       var regConsentInput = document.getElementById('regConsent');
       var verifyCodeInput = document.getElementById('verifyCode');
@@ -2381,7 +2376,7 @@
       var registerEmailDisplay = document.getElementById('registerEmailDisplay');
       var resendCodeBtn = document.getElementById('resendCode');
       var backToEmailBtn = document.getElementById('backToEmail');
-      var registerGoApply = document.getElementById('registerGoApply');
+      var registerCloseSuccess = document.getElementById('registerCloseSuccess');
 
       var QUAZAR_EMAIL = 'quazarvs@gmail.com';
 
@@ -2495,41 +2490,24 @@
         } catch (e) { /* ignore */ }
       }
 
-      function updateApplyAccess() {
-        var verified = isEmailVerified();
-        var verifiedEmail = getVerifiedEmail();
-
-        if (verified) {
-          applyGate.classList.add('hidden');
-          form.classList.remove('hidden');
-          emailInput.value = verifiedEmail;
-          emailInput.readOnly = true;
-          emailInput.setAttribute('aria-readonly', 'true');
-          emailInput.classList.add('input-readonly');
-          emailInput.setAttribute('tabindex', '-1');
-        } else {
-          applyGate.classList.remove('hidden');
-          form.classList.add('hidden');
-          emailInput.value = '';
-          emailInput.readOnly = false;
-          emailInput.removeAttribute('aria-readonly');
-          emailInput.classList.remove('input-readonly');
-          emailInput.removeAttribute('tabindex');
-        }
+      function isApplyHash(hash) {
+        var h = (hash || '').replace(/^#/, '');
+        return h === 'apply' || h.indexOf('apply/') === 0 || h === 'заявка' || h.indexOf('заявка/') === 0;
       }
 
-      function goToApply() {
-        updateApplyAccess();
-        if (!isEmailVerified()) {
-          openRegister();
-          return;
-        }
+      function scrollToApply() {
         nav.classList.remove('open');
         menuToggle.textContent = '☰';
+        var applyEl = document.getElementById('apply');
+        if (applyEl) applyEl.scrollIntoView({ behavior: 'smooth' });
+      }
+
+      function goToApplyForm() {
+        // location.hash (not pushState) so the apply portal re-renders
         if (window.location.hash !== '#apply') {
-          setPageHash('#apply');
+          window.location.hash = 'apply';
         }
-        document.getElementById('apply').scrollIntoView({ behavior: 'smooth' });
+        scrollToApply();
       }
 
       function handleApplyCta(e) {
@@ -2537,11 +2515,11 @@
           e.preventDefault();
           e.stopPropagation();
         }
-        if (isEmailVerified()) {
-          goToApply();
-        } else {
-          openRegister(e);
+        if (!isEmailVerified()) {
+          openRegister();
+          return;
         }
+        goToApplyForm();
       }
 
       document.querySelectorAll('.cta-apply').forEach(function (btn) {
@@ -2720,6 +2698,14 @@
         regEmailInput.focus();
       }
 
+      window.quazarAuth = {
+        getVerifiedEmail: getVerifiedEmail,
+        isEmailVerified: isEmailVerified,
+        saveVerifiedEmail: saveVerifiedEmail,
+        openLogin: openRegister,
+        goToApply: goToApplyForm
+      };
+
       function closeRegister() {
         registerModal.classList.remove('open');
         if (!modal.classList.contains('open')) {
@@ -2777,10 +2763,12 @@
         if (e.target === registerModal) closeRegister();
       });
 
-      registerGoApply.addEventListener('click', function (e) {
-        closeRegister();
-        goToApply();
-      });
+      if (registerCloseSuccess) {
+        registerCloseSuccess.addEventListener('click', function () {
+          closeRegister();
+          goToApplyForm();
+        });
+      }
 
       verifyCodeInput.addEventListener('input', function () {
         verifyCodeInput.value = verifyCodeInput.value.replace(/\D/g, '').slice(0, 6);
@@ -2844,8 +2832,12 @@
           .then(function () {
             saveVerifiedEmail(pending.email);
             clearPendingRegistration();
-            updateApplyAccess();
             showRegisterStep(3);
+            try {
+              window.dispatchEvent(new CustomEvent('quazar:email-verified', {
+                detail: { email: pending.email }
+              }));
+            } catch (e) { /* ignore */ }
           })
           .catch(function (err) {
             var message = err.message || 'Ошибка проверки кода';
@@ -2899,16 +2891,9 @@
         }
       });
 
-      updateApplyAccess();
-
       function handleApplyHash() {
-        if (window.location.hash === '#apply') {
-          if (isEmailVerified()) {
-            updateApplyAccess();
-          } else {
-            clearPageHash();
-            openRegister();
-          }
+        if (isApplyHash(window.location.hash)) {
+          scrollToApply();
         }
       }
 
@@ -2916,13 +2901,16 @@
         openRegister();
       } else if (window.location.hash === '#constitution') {
         openConstitution();
-      } else if (window.location.hash === '#apply') {
+      } else if (isApplyHash(window.location.hash)) {
         handleApplyHash();
       }
 
       window.addEventListener('hashchange', function () {
         if (window.location.hash === '#register') openRegister();
-        else if (window.location.hash === '#apply') handleApplyHash();
+        else if (isApplyHash(window.location.hash)) {
+          if (registerModal.classList.contains('open')) closeRegister();
+          handleApplyHash();
+        }
         else if (registerModal.classList.contains('open')) closeRegister();
         else if (window.location.hash === '#constitution') openConstitution();
         else if (modal.classList.contains('open')) closeConstitution();
@@ -2930,7 +2918,10 @@
 
       window.addEventListener('popstate', function () {
         if (window.location.hash === '#register') openRegister();
-        else if (window.location.hash === '#apply') handleApplyHash();
+        else if (isApplyHash(window.location.hash)) {
+          if (registerModal.classList.contains('open')) closeRegister();
+          handleApplyHash();
+        }
         else if (registerModal.classList.contains('open')) closeRegister();
         else if (window.location.hash === '#constitution') openConstitution();
         else if (modal.classList.contains('open')) {
@@ -3198,5 +3189,855 @@
       }
     })();
   </script>
+
+  <script>
+    (function () {
+      'use strict';
+
+      function resolveApiBase() {
+        if (window.QUAZAR_API_BASE) return String(window.QUAZAR_API_BASE).replace(/\/$/, '');
+        var host = location.hostname;
+        if (host === 'localhost' || host === '127.0.0.1' || host === '[::1]') return 'http://127.0.0.1:8080';
+        if (host === 'quazar.website' || host === 'www.quazar.website') return location.origin;
+        return 'https://api.quazar.website';
+      }
+
+      var API_BASE = resolveApiBase();
+      var MSG = document.getElementById('applyMessage');
+      var VIEW = document.getElementById('applyView');
+      if (!MSG || !VIEW) return;
+
+      var SESSION_ID_KEY = 'quazar_app_id';
+      var SESSION_KIND_KEY = 'quazar_app_kind';
+      var SESSION_MAYOR_PEER_KEY = 'quazar_mayor_sync_peer';
+      var SUBMIT_RATE_KEY = 'quazar_app_last_submit';
+      var ADMIN_KEY = 'quazar_admin_api_key';
+      var MAYOR_KEY = 'quazar_mayor_api_key';
+      var VERIFIED_EMAIL_KEY = 'quazar_email_verified';
+      var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      var keepMessageOnNextRender = false;
+
+      function getApplyKind() {
+        var kind = '';
+        try { kind = String(sessionStorage.getItem(SESSION_KIND_KEY) || '').trim(); } catch (_) {}
+        return kind === 'mayor' ? 'mayor' : 'citizenship';
+      }
+
+      function setApplyKind(kind) {
+        var next = kind === 'mayor' ? 'mayor' : 'citizenship';
+        try { sessionStorage.setItem(SESSION_KIND_KEY, next); } catch (_) {}
+        return next;
+      }
+
+      function getMayorApiKey() {
+        try {
+          var own = String(sessionStorage.getItem(MAYOR_KEY) || '').trim();
+          if (own) return own;
+          return String(sessionStorage.getItem('quazar_chat_api_key') || '').trim();
+        } catch (_) {
+          return '';
+        }
+      }
+
+      function saveMayorApiKey(key) {
+        try {
+          if (key) sessionStorage.setItem(MAYOR_KEY, key);
+          else sessionStorage.removeItem(MAYOR_KEY);
+        } catch (_) {}
+      }
+
+      function getConfirmedEmail() {
+        if (window.quazarAuth && typeof window.quazarAuth.getVerifiedEmail === 'function') {
+          return String(window.quazarAuth.getVerifiedEmail() || '').trim();
+        }
+        try {
+          return String(sessionStorage.getItem(VERIFIED_EMAIL_KEY) || '').trim();
+        } catch (e) {
+          return '';
+        }
+      }
+
+      function hasConfirmedEmail() {
+        var email = getConfirmedEmail();
+        return !!email && emailRegex.test(email);
+      }
+
+      function openLoginForApply() {
+        if (window.quazarAuth && typeof window.quazarAuth.openLogin === 'function') {
+          window.quazarAuth.openLogin();
+          return;
+        }
+        location.hash = 'register';
+      }
+
+      var recaptchaSiteKey = window.QUAZAR_RECAPTCHA_SITE_KEY
+        ? String(window.QUAZAR_RECAPTCHA_SITE_KEY)
+        : '';
+      var recaptchaRequired = false;
+      var recaptchaWidgetId = null;
+
+      async function loadPublicConfig() {
+        try {
+          var res = await fetch(API_BASE + '/api/public-config', {
+            headers: { Accept: 'application/json' }
+          });
+          var body = await res.json();
+          var data = (body && body.data) || {};
+          if (!recaptchaSiteKey && data.recaptcha_site_key) {
+            recaptchaSiteKey = String(data.recaptcha_site_key);
+          }
+          recaptchaRequired = !!data.recaptcha_required;
+        } catch (_) { /* keep defaults */ }
+      }
+
+      function loadRecaptchaScript() {
+        return new Promise(function (resolve, reject) {
+          if (window.grecaptcha && window.grecaptcha.render) {
+            resolve();
+            return;
+          }
+          var existing = document.querySelector('script[data-quazar-recaptcha]');
+          if (existing) {
+            existing.addEventListener('load', function () { resolve(); });
+            existing.addEventListener('error', function () { reject(new Error('reCAPTCHA script failed')); });
+            return;
+          }
+          var s = document.createElement('script');
+          s.src = 'https://www.google.com/recaptcha/api.js?render=explicit';
+          s.async = true;
+          s.defer = true;
+          s.dataset.quazarRecaptcha = '1';
+          s.onload = function () { resolve(); };
+          s.onerror = function () { reject(new Error('Не удалось загрузить reCAPTCHA')); };
+          document.head.appendChild(s);
+        });
+      }
+
+      async function ensureRecaptchaWidget() {
+        var mount = document.getElementById('recaptcha-mount');
+        if (!mount || !recaptchaSiteKey) return;
+        await loadRecaptchaScript();
+        await new Promise(function (resolve) {
+          window.grecaptcha.ready(function () { resolve(); });
+        });
+        if (recaptchaWidgetId !== null) {
+          try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
+          return;
+        }
+        mount.innerHTML = '';
+        recaptchaWidgetId = window.grecaptcha.render(mount, {
+          sitekey: recaptchaSiteKey,
+          theme: 'light'
+        });
+      }
+
+      function getCaptchaToken() {
+        if (!recaptchaSiteKey || !window.grecaptcha || recaptchaWidgetId === null) return '';
+        try {
+          return window.grecaptcha.getResponse(recaptchaWidgetId) || '';
+        } catch (_) {
+          return '';
+        }
+      }
+
+      function showMessage(text, type) {
+        MSG.textContent = text;
+        MSG.className = 'apply-message show ' + (type || 'info');
+      }
+      function clearMessage() {
+        MSG.className = 'apply-message';
+        MSG.textContent = '';
+      }
+
+      function pill(status) {
+        return '<span class="apply-pill ' + status + '">' + status + '</span>';
+      }
+
+      function escapeHtml(s) {
+        return String(s == null ? '' : s)
+          .replace(/&/g, '&amp;')
+          .replace(/</g, '&lt;')
+          .replace(/>/g, '&gt;')
+          .replace(/"/g, '&quot;');
+      }
+
+      function formatDate(iso) {
+        try {
+          return new Date(iso).toLocaleString('ru-RU', { dateStyle: 'medium', timeStyle: 'short' });
+        } catch (_) {
+          return iso;
+        }
+      }
+
+      function canSubmitClient() {
+        var last = Number(localStorage.getItem(SUBMIT_RATE_KEY) || 0);
+        return Date.now() - last >= 60 * 1000;
+      }
+      function markSubmitted() {
+        localStorage.setItem(SUBMIT_RATE_KEY, String(Date.now()));
+      }
+
+      async function api(path, options) {
+        var res = await fetch(API_BASE + path, options);
+        var body = null;
+        try { body = await res.json(); } catch (_) {}
+        if (!res.ok) {
+          var err = (body && (body.error || body.message)) || ('HTTP ' + res.status);
+          throw new Error(err);
+        }
+        return body;
+      }
+
+      function authHeaders(json) {
+        var key = sessionStorage.getItem(ADMIN_KEY) || '';
+        var headers = { Accept: 'application/json' };
+        if (json) headers['Content-Type'] = 'application/json';
+        if (key) headers.Authorization = 'Bearer ' + key;
+        return headers;
+      }
+
+      function normalizeApplyPath(raw) {
+        var path = String(raw || '').replace(/^#/, '');
+        if (path === 'заявка' || path.indexOf('заявка/') === 0) {
+          path = 'apply' + path.slice('заявка'.length);
+        }
+        return path;
+      }
+
+      function parseHash() {
+        var path = normalizeApplyPath(location.hash || '#apply');
+        var parts = path.split('/').filter(Boolean);
+        if (!parts.length) return { route: 'apply' };
+        if (parts[0] !== 'apply') return null;
+        if (parts.length === 1) return { route: 'apply' };
+        // Old #apply/verify/:id links → status (verify step removed)
+        if (parts[1] === 'verify') {
+          return { route: 'status', kind: 'citizenship', id: parts[2] || '' };
+        }
+        if (parts[1] === 'mayor' && parts[2] === 'status') {
+          return { route: 'status', kind: 'mayor', id: parts[3] || '' };
+        }
+        if (parts[1] === 'status') {
+          return { route: 'status', kind: getApplyKind(), id: parts[2] || '' };
+        }
+        if (parts[1] === 'admin') return { route: 'admin' };
+        return { route: 'apply' };
+      }
+
+      function setRoute(route, id, kind) {
+        if (route === 'apply') {
+          location.hash = 'apply';
+          return;
+        }
+        if (route === 'status') {
+          var k = kind || getApplyKind();
+          setApplyKind(k);
+          if (k === 'mayor') {
+            location.hash = 'apply/mayor/status/' + encodeURIComponent(id);
+          } else {
+            location.hash = 'apply/status/' + encodeURIComponent(id);
+          }
+          return;
+        }
+        if (route === 'admin') location.hash = 'apply/admin';
+      }
+
+      function syncTabs(state) {
+        document.querySelectorAll('.apply-tabs button').forEach(function (btn) {
+          var route = btn.dataset.route;
+          // Admin is hash-only (#apply/admin) — no tab button
+          if (route === state.route) btn.classList.add('active');
+          else btn.classList.remove('active');
+          if (route === 'status') btn.disabled = !(state.id || sessionStorage.getItem(SESSION_ID_KEY));
+        });
+      }
+
+      function renderApplyGate() {
+        VIEW.innerHTML = ''
+          + '<div class="apply-muted-box">'
+          + '  <p style="margin:0 0 0.75rem">Чтобы подать заявку, сначала войдите с подтверждённым email. Поле email в форме будет только для чтения.</p>'
+          + '  <button type="button" class="btn btn-primary" id="portalLoginBtn">Войти</button>'
+          + '</div>';
+        var btn = document.getElementById('portalLoginBtn');
+        if (btn) {
+          btn.addEventListener('click', function () {
+            openLoginForApply();
+          });
+        }
+        showMessage('Сначала войдите с email — поле нельзя заполнить вручную.', 'info');
+        openLoginForApply();
+      }
+
+      function renderKindSwitcher(kind) {
+        return ''
+          + '<fieldset class="apply-kind" id="portalApplyKind">'
+          + '  <legend class="visually-hidden" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Тип заявки</legend>'
+          + '  <label>'
+          + '    <input type="radio" name="apply_kind" value="citizenship"' + (kind === 'citizenship' ? ' checked' : '') + '>'
+          + '    <strong>Гражданство</strong>'
+          + '    <span>Новый гражданин Квазара</span>'
+          + '  </label>'
+          + '  <label>'
+          + '    <input type="radio" name="apply_kind" value="mayor"' + (kind === 'mayor' ? ' checked' : '') + '>'
+          + '    <strong>Мэрство</strong>'
+          + '    <span>Заявка с сайта (без API-ключа)</span>'
+          + '  </label>'
+          + '</fieldset>';
+      }
+
+      function renderCitizenshipFields(confirmedEmail) {
+        return ''
+          + '  <div class="hp-field" aria-hidden="true">'
+          + '    <label for="portal_website">Website</label>'
+          + '    <input type="text" id="portal_website" name="website" tabindex="-1" autocomplete="off">'
+          + '  </div>'
+          + '  <div class="row2">'
+          + '    <div class="form-group"><label for="portal_login">Логин</label>'
+          + '      <input id="portal_login" required maxlength="13" pattern="[A-Za-z]{1,13}" title="Только латиница (A–Z, a–z), 1–13 символов" placeholder="например: ivan" autocomplete="username">'
+          + '    </div>'
+          + '    <div class="form-group"><label for="portal_email">Email <span class="hint">(подтверждённый)</span></label>'
+          + '      <input id="portal_email" class="input-readonly" required maxlength="254" type="email" readonly tabindex="-1" aria-readonly="true" value="' + escapeHtml(confirmedEmail) + '" autocomplete="email">'
+          + '    </div>'
+          + '  </div>'
+          + '  <p class="field-hint">Логин: только латиница (A–Z, a–z), без цифр и спецсимволов, 1–13 символов. Регистр не важен. Email нельзя изменить — он из подтверждённой сессии входа.</p>'
+          + '  <div class="form-group"><label for="portal_full_name">ФИО</label>'
+          + '    <input id="portal_full_name" required maxlength="200" placeholder="Иван Иванов" autocomplete="name">'
+          + '  </div>'
+          + '  <div class="form-group"><label for="portal_passport">Данные паспорта</label>'
+          + '    <textarea id="portal_passport" required maxlength="2000" placeholder="Серия/номер, кем выдан, дата"></textarea>'
+          + '  </div>'
+          + '  <div class="form-group"><label for="portal_reason">Причина</label>'
+          + '    <textarea id="portal_reason" required maxlength="5000" placeholder="Коротко: зачем вам гражданство Квазара"></textarea>'
+          + '  </div>'
+          + '  <div class="form-group" id="recaptcha-field" style="display:none"><label>Проверка</label><div id="recaptcha-mount"></div></div>'
+          + '  <button class="btn btn-primary form-submit" type="submit" id="portalSubmitBtn">Подать заявку на гражданство</button>'
+          + '  <p class="field-hint">Не более 1 заявки в месяц на один email.</p>';
+      }
+
+      function renderMayorFields(confirmedEmail) {
+        return ''
+          + '  <div class="hp-field" aria-hidden="true">'
+          + '    <label for="portal_website">Website</label>'
+          + '    <input type="text" id="portal_website" name="website" tabindex="-1" autocomplete="off">'
+          + '  </div>'
+          + '  <div class="row2">'
+          + '    <div class="form-group"><label for="portal_login">Логин</label>'
+          + '      <input id="portal_login" required maxlength="13" pattern="[A-Za-z]{1,13}" title="Только латиница (A–Z, a–z), 1–13 символов" placeholder="например: ivan" autocomplete="username">'
+          + '    </div>'
+          + '    <div class="form-group"><label for="portal_email">Email <span class="hint">(подтверждённый)</span></label>'
+          + '      <input id="portal_email" class="input-readonly" required maxlength="254" type="email" readonly tabindex="-1" aria-readonly="true" value="' + escapeHtml(confirmedEmail) + '" autocomplete="email">'
+          + '    </div>'
+          + '  </div>'
+          + '  <p class="field-hint">Заявка «с улицы»: без API-ключа. После одобрения администратор создаст или привяжет гражданина. Уже граждане могут подать заявку из приложения (Bearer).</p>'
+          + '  <div class="form-group"><label for="portal_full_name">ФИО</label>'
+          + '    <input id="portal_full_name" required maxlength="200" placeholder="Иван Иванов" autocomplete="name">'
+          + '  </div>'
+          + '  <div class="form-group"><label for="portal_reason">Мотивация</label>'
+          + '    <textarea id="portal_reason" required maxlength="5000" placeholder="Почему вы хотите стать мэром / запустить узел"></textarea>'
+          + '  </div>'
+          + '  <div class="form-group"><label for="portal_mayor_ip">IP / адрес узла <span class="hint">(необязательно)</span></label>'
+          + '    <input id="portal_mayor_ip" maxlength="512" placeholder="например: 203.0.113.10" autocomplete="off">'
+          + '  </div>'
+          + '  <div class="form-group" id="recaptcha-field" style="display:none"><label>Проверка</label><div id="recaptcha-mount"></div></div>'
+          + '  <button class="btn btn-primary form-submit" type="submit" id="portalSubmitBtn">Подать заявку на мэрство</button>';
+      }
+
+      function bindKindSwitcher() {
+        var radios = document.querySelectorAll('input[name="apply_kind"]');
+        radios.forEach(function (radio) {
+          radio.addEventListener('change', function () {
+            if (!radio.checked) return;
+            setApplyKind(radio.value);
+            renderApply();
+          });
+        });
+      }
+
+      function renderApply() {
+        if (!hasConfirmedEmail()) {
+          renderApplyGate();
+          return;
+        }
+
+        var confirmedEmail = getConfirmedEmail();
+        var kind = getApplyKind();
+        var fields = kind === 'mayor'
+          ? renderMayorFields(confirmedEmail)
+          : renderCitizenshipFields(confirmedEmail);
+
+        VIEW.innerHTML = ''
+          + renderKindSwitcher(kind)
+          + '<form class="stack" id="portal-apply-form" novalidate>'
+          + fields
+          + '</form>';
+
+        bindKindSwitcher();
+        document.getElementById('portal-apply-form').addEventListener('submit', onSubmit);
+
+        recaptchaWidgetId = null;
+        loadPublicConfig().then(function () {
+          var field = document.getElementById('recaptcha-field');
+          if (field && (recaptchaRequired || recaptchaSiteKey)) {
+            field.style.display = 'block';
+            return ensureRecaptchaWidget();
+          }
+        }).catch(function (err) {
+          showMessage(err.message || String(err), 'err');
+        });
+      }
+
+      async function onSubmitCitizenship(btn) {
+        var honey = document.getElementById('portal_website');
+        if (honey && honey.value.trim()) return;
+
+        var login = document.getElementById('portal_login').value.trim();
+        var email = getConfirmedEmail();
+        var emailInput = document.getElementById('portal_email');
+        if (emailInput) emailInput.value = email;
+        var full_name = document.getElementById('portal_full_name').value.trim();
+        var passport_data = document.getElementById('portal_passport').value.trim();
+        var reason = document.getElementById('portal_reason').value.trim();
+
+        if (!hasConfirmedEmail()) {
+          showMessage('Сначала войдите с подтверждённым email.', 'err');
+          openLoginForApply();
+          return;
+        }
+
+        if (!login || !email || !full_name || !passport_data || !reason) {
+          showMessage('Заполните все поля.', 'err');
+          return;
+        }
+
+        var loginNorm = login.toLowerCase();
+        if (loginNorm.length < 1 || loginNorm.length > 13) {
+          showMessage('Логин должен быть от 1 до 13 символов.', 'err');
+          return;
+        }
+        if (!/^[a-z]+$/.test(loginNorm)) {
+          showMessage('Логин: только латинские буквы (A–Z, a–z), без цифр и спецсимволов.', 'err');
+          return;
+        }
+        if (loginNorm === 'successful') {
+          showMessage('Имя Successful зарезервировано за основателем.', 'err');
+          return;
+        }
+
+        btn.disabled = true;
+        try {
+          var captcha_token = getCaptchaToken();
+          if ((recaptchaRequired || recaptchaSiteKey) && !captcha_token) {
+            showMessage('Пройдите проверку reCAPTCHA.', 'err');
+            btn.disabled = false;
+            return;
+          }
+          var payload = {
+            login: loginNorm,
+            full_name: full_name,
+            passport_data: passport_data,
+            email: email,
+            reason: reason,
+            captcha_token: captcha_token || undefined,
+            email_already_verified: true
+          };
+          var res = await api('/api/application', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload)
+          });
+
+          markSubmitted();
+          var id = (res.data && res.data.id) ? res.data.id : '';
+          if (!id) throw new Error('Не удалось получить ID заявки');
+
+          sessionStorage.setItem(SESSION_ID_KEY, id);
+          setApplyKind('citizenship');
+          try { sessionStorage.removeItem(SESSION_MAYOR_PEER_KEY); } catch (_) {}
+          keepMessageOnNextRender = true;
+          showMessage((res.data && res.data.message) || 'Заявка принята и ожидает рассмотрения.', 'ok');
+          setRoute('status', id, 'citizenship');
+        } catch (err) {
+          showMessage(err.message || String(err), 'err');
+          if (window.grecaptcha && recaptchaWidgetId !== null) {
+            try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
+          }
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      async function onSubmitMayor(btn) {
+        var honey = document.getElementById('portal_website');
+        if (honey && honey.value.trim()) return;
+
+        var email = getConfirmedEmail();
+        var emailInput = document.getElementById('portal_email');
+        if (emailInput) emailInput.value = email;
+
+        if (!hasConfirmedEmail()) {
+          showMessage('Сначала войдите с подтверждённым email.', 'err');
+          openLoginForApply();
+          return;
+        }
+
+        var login = document.getElementById('portal_login').value.trim();
+        var full_name = document.getElementById('portal_full_name').value.trim();
+        var reason = document.getElementById('portal_reason').value.trim();
+        var ipEl = document.getElementById('portal_mayor_ip');
+        var ip = ipEl ? ipEl.value.trim() : '';
+
+        if (!login || !full_name || !reason) {
+          showMessage('Заполните логин, ФИО и мотивацию.', 'err');
+          return;
+        }
+
+        var loginNorm = login.toLowerCase();
+        if (loginNorm.length < 1 || loginNorm.length > 13) {
+          showMessage('Логин должен быть от 1 до 13 символов.', 'err');
+          return;
+        }
+        if (!/^[a-z]+$/.test(loginNorm)) {
+          showMessage('Логин: только латинские буквы (A–Z, a–z), без цифр и спецсимволов.', 'err');
+          return;
+        }
+        if (loginNorm === 'successful') {
+          showMessage('Имя Successful зарезервировано за основателем.', 'err');
+          return;
+        }
+        if (ip) {
+          if (/\s/.test(ip)) {
+            showMessage('IP / адрес узла не должен содержать пробелы.', 'err');
+            return;
+          }
+          if (!/[0-9]/.test(ip)) {
+            showMessage('Укажите корректный IP-адрес или адрес узла.', 'err');
+            return;
+          }
+        }
+
+        btn.disabled = true;
+        try {
+          var captcha_token = getCaptchaToken();
+          if ((recaptchaRequired || recaptchaSiteKey) && !captcha_token) {
+            showMessage('Пройдите проверку reCAPTCHA.', 'err');
+            btn.disabled = false;
+            return;
+          }
+          var payload = {
+            login: loginNorm,
+            full_name: full_name,
+            email: email,
+            reason: reason,
+            captcha_token: captcha_token || undefined,
+            email_already_verified: true
+          };
+          if (ip) payload.ip = ip;
+
+          var res = await api('/api/mayor/application', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Accept': 'application/json'
+            },
+            body: JSON.stringify(payload)
+          });
+
+          markSubmitted();
+          var id = (res.data && res.data.id) ? res.data.id : '';
+          if (!id) throw new Error('Не удалось получить ID заявки мэра');
+
+          sessionStorage.setItem(SESSION_ID_KEY, id);
+          setApplyKind('mayor');
+          if (res.data && res.data.sync_peer) {
+            try { sessionStorage.setItem(SESSION_MAYOR_PEER_KEY, String(res.data.sync_peer)); } catch (_) {}
+          }
+          keepMessageOnNextRender = true;
+          showMessage((res.data && res.data.message) || 'Заявка на мэрство принята и ожидает рассмотрения.', 'ok');
+          setRoute('status', id, 'mayor');
+        } catch (err) {
+          showMessage(err.message || String(err), 'err');
+          if (window.grecaptcha && recaptchaWidgetId !== null) {
+            try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
+          }
+        } finally {
+          btn.disabled = false;
+        }
+      }
+
+      async function onSubmit(e) {
+        e.preventDefault();
+        clearMessage();
+
+        if (!canSubmitClient()) {
+          showMessage('Слишком часто. Подождите минуту.', 'err');
+          return;
+        }
+
+        var btn = document.getElementById('portalSubmitBtn');
+        if (!btn) return;
+
+        if (getApplyKind() === 'mayor') {
+          await onSubmitMayor(btn);
+        } else {
+          await onSubmitCitizenship(btn);
+        }
+      }
+
+      async function loadCitizenshipStatus(id, resPanel) {
+        var res = await api('/api/application/' + encodeURIComponent(id), {
+          method: 'GET',
+          headers: { Accept: 'application/json' }
+        });
+        var a = res.data;
+        resPanel.innerHTML = ''
+          + '<h3 style="font-family:var(--font-display);margin:0 0 0.6rem;font-size:1.35rem;color:var(--ll-navy);">' + escapeHtml(a.full_name) + '</h3>'
+          + pill(a.status)
+          + '<dl>'
+          + '<dt>Тип</dt><dd>Гражданство</dd>'
+          + '<dt>ID</dt><dd><code>' + escapeHtml(a.id) + '</code></dd>'
+          + '<dt>Логин</dt><dd>' + escapeHtml(a.login) + '</dd>'
+          + '<dt>Citizen ID</dt><dd>' + escapeHtml(a.citizen_id || '—') + '</dd>'
+          + '<dt>Создана</dt><dd>' + escapeHtml(formatDate(a.created_at)) + '</dd>'
+          + '<dt>Обновлена</dt><dd>' + escapeHtml(formatDate(a.updated_at)) + '</dd>'
+          + '<dt>Подтверждена</dt><dd>' + (a.confirmed_at ? escapeHtml(formatDate(a.confirmed_at)) : '—') + '</dd>'
+          + '<dt>Решение</dt><dd>' + (a.reviewed_at ? escapeHtml(formatDate(a.reviewed_at)) : '—') + '</dd>'
+          + '<dt>Кем проверена</dt><dd>' + escapeHtml(a.reviewed_by || '—') + '</dd>'
+          + '<dt>Комментарий</dt><dd>' + escapeHtml(a.review_note || '—') + '</dd>'
+          + '</dl>';
+      }
+
+      async function loadMayorStatus(id, resPanel) {
+        var res = await api('/api/mayor/status/' + encodeURIComponent(id), {
+          method: 'GET',
+          headers: { Accept: 'application/json' }
+        });
+        var a = res.data || {};
+        var peer = '';
+        try { peer = String(sessionStorage.getItem(SESSION_MAYOR_PEER_KEY) || ''); } catch (_) {}
+        resPanel.innerHTML = ''
+          + '<h3 style="font-family:var(--font-display);margin:0 0 0.6rem;font-size:1.35rem;color:var(--ll-navy);">'
+          + escapeHtml(a.full_name || 'Заявка на мэрство')
+          + '</h3>'
+          + pill(a.status || 'unknown')
+          + '<p class="field-hint" style="margin:0.75rem 0 0">' + escapeHtml(a.message || '') + '</p>'
+          + '<dl>'
+          + '<dt>Тип</dt><dd>Мэрство</dd>'
+          + '<dt>ID</dt><dd><code>' + escapeHtml(id) + '</code></dd>'
+          + '<dt>Логин</dt><dd>' + escapeHtml(a.login || '—') + '</dd>'
+          + '<dt>Citizen ID</dt><dd>' + escapeHtml(a.citizen_id || '—') + '</dd>'
+          + '<dt>Node ID</dt><dd>' + escapeHtml(a.node_id || '—') + '</dd>'
+          + '<dt>Sync peer</dt><dd>' + (peer ? '<code>' + escapeHtml(peer) + '</code>' : '—') + '</dd>'
+          + '<dt>Комментарий</dt><dd>' + escapeHtml(a.review_note || '—') + '</dd>'
+          + '</dl>';
+      }
+
+      async function loadStatus(id, kind) {
+        var resPanel = document.getElementById('portalStatusOut');
+        if (!resPanel) return;
+        resPanel.innerHTML = '<p class="field-hint">Загрузка…</p>';
+        var k = kind === 'mayor' ? 'mayor' : 'citizenship';
+        try {
+          if (k === 'mayor') await loadMayorStatus(id, resPanel);
+          else await loadCitizenshipStatus(id, resPanel);
+        } catch (err) {
+          resPanel.innerHTML = '<p class="field-hint">' + escapeHtml(err.message || String(err)) + '</p>';
+        }
+      }
+
+      function renderStatus(state) {
+        var id = state.id || sessionStorage.getItem(SESSION_ID_KEY) || '';
+        var kind = state.kind || getApplyKind();
+        if (!id) {
+          VIEW.innerHTML = '<p class="field-hint">Сначала отправьте заявку.</p>';
+          return;
+        }
+        setApplyKind(kind);
+        var hint = kind === 'mayor'
+          ? 'Статус заявки на мэрство. После подтверждения email её рассматривает администрация; затем — запуск узла.'
+          : 'Статус заявки на гражданство. После принятия она ожидает рассмотрения администратором.';
+        VIEW.innerHTML = ''
+          + '<p class="field-hint">' + hint + '</p>'
+          + '<div class="apply-status-card" id="portalStatusOut"></div>';
+        loadStatus(id, kind);
+      }
+
+      async function adminAction(id, action, note) {
+        return api('/api/application/' + encodeURIComponent(id) + '/' + action, {
+          method: 'POST',
+          headers: authHeaders(true),
+          body: JSON.stringify({ note: note || null })
+        });
+      }
+
+      async function renderAdmin() {
+        VIEW.innerHTML = ''
+          + '<p class="field-hint">Доступно для Aiya / Founder по API-ключу.</p>'
+          + '<div class="form-group"><label for="portalAdminKey">API-ключ администратора</label>'
+          + '  <input id="portalAdminKey" type="password" placeholder="Bearer key" autocomplete="off"></div>'
+          + '<div style="margin-bottom:1rem"><button class="btn btn-primary" id="portalSaveAdminKey" type="button">Сохранить ключ</button></div>'
+          + '<div class="apply-filters">'
+          + '  <button type="button" data-filter="all" class="active">Все</button>'
+          + '  <button type="button" data-filter="pending">pending</button>'
+          + '  <button type="button" data-filter="confirmed">confirmed</button>'
+          + '  <button type="button" data-filter="approved">approved</button>'
+          + '  <button type="button" data-filter="rejected">rejected</button>'
+          + '</div>'
+          + '<div id="portalAdminList" class="apply-list"><p class="field-hint">Сначала сохраните ключ.</p></div>';
+
+        document.getElementById('portalAdminKey').value = sessionStorage.getItem(ADMIN_KEY) || '';
+        document.getElementById('portalSaveAdminKey').addEventListener('click', function () {
+          var key = document.getElementById('portalAdminKey').value.trim();
+          if (key) {
+            sessionStorage.setItem(ADMIN_KEY, key);
+            showMessage('Админ-ключ сохранён в sessionStorage.', 'ok');
+            loadAdminList('all');
+          } else {
+            sessionStorage.removeItem(ADMIN_KEY);
+            showMessage('Админ-ключ очищен.', 'info');
+            document.getElementById('portalAdminList').innerHTML = '<p class="field-hint">Сначала сохраните ключ.</p>';
+          }
+        });
+
+        document.querySelectorAll('.apply-filters [data-filter]').forEach(function (btn) {
+          btn.addEventListener('click', function () {
+            document.querySelectorAll('.apply-filters [data-filter]').forEach(function (x) { x.classList.remove('active'); });
+            btn.classList.add('active');
+            loadAdminList(btn.dataset.filter);
+          });
+        });
+
+        if (sessionStorage.getItem(ADMIN_KEY)) loadAdminList('all');
+      }
+
+      async function loadAdminList(filter) {
+        var out = document.getElementById('portalAdminList');
+        if (!out) return;
+        if (!sessionStorage.getItem(ADMIN_KEY)) {
+          out.innerHTML = '<p class="field-hint">Сначала сохраните ключ.</p>';
+          return;
+        }
+        out.innerHTML = '<p class="field-hint">Загрузка…</p>';
+        try {
+          var qs = filter && filter !== 'all' ? ('?status=' + encodeURIComponent(filter)) : '';
+          var res = await api('/api/applications' + qs, {
+            method: 'GET',
+            headers: authHeaders(false)
+          });
+          var items = (res.data && res.data.applications) || [];
+          if (!items.length) {
+            out.innerHTML = '<p class="field-hint">Заявок нет.</p>';
+            return;
+          }
+          out.innerHTML = items.map(function (a) {
+            var canApprove = a.status === 'confirmed';
+            var canReject = a.status === 'pending' || a.status === 'confirmed';
+            return ''
+              + '<div class="apply-card" data-id="' + escapeHtml(a.id) + '">'
+              + '  <div class="apply-card-head">'
+              + '    <div>'
+              + '      <p class="apply-card-title">' + escapeHtml(a.full_name) + ' <span class="field-hint">(@' + escapeHtml(a.login) + ')</span></p>'
+              + '      <div class="field-hint">' + escapeHtml(a.email) + ' · ' + escapeHtml(formatDate(a.created_at)) + '</div>'
+              + (a.citizen_id ? '      <div class="field-hint">citizen_id: <code>' + escapeHtml(a.citizen_id) + '</code></div>' : '')
+              + '    </div>'
+              +      pill(a.status)
+              + '  </div>'
+              + '  <div class="apply-muted-box"><strong>Причина:</strong> ' + escapeHtml(a.reason) + '</div>'
+              + '  <div class="apply-muted-box"><strong>Комментарий:</strong> ' + escapeHtml(a.review_note || '—') + '</div>'
+              + '  <div class="form-group" style="margin-top:0.8rem;margin-bottom:0"><label>Комментарий модератора</label>'
+              + '    <textarea class="review-note" placeholder="Причина отклонения или служебная заметка"></textarea></div>'
+              + '  <div class="apply-actions">'
+              + '    <button type="button" class="btn btn-primary do-approve"' + (canApprove ? '' : ' disabled') + '>Approve</button>'
+              + '    <button type="button" class="btn btn-secondary do-reject"' + (canReject ? '' : ' disabled') + '>Reject</button>'
+              + '    <button type="button" class="btn btn-secondary do-open-status">Открыть статус</button>'
+              + '  </div>'
+              + '</div>';
+          }).join('');
+
+          out.querySelectorAll('.apply-card').forEach(function (card) {
+            var id = card.dataset.id;
+            var noteEl = card.querySelector('.review-note');
+            var approveBtn = card.querySelector('.do-approve');
+            var rejectBtn = card.querySelector('.do-reject');
+            var openBtn = card.querySelector('.do-open-status');
+
+            if (approveBtn) approveBtn.addEventListener('click', async function () {
+              approveBtn.disabled = true;
+              rejectBtn.disabled = true;
+              try {
+                await adminAction(id, 'approve', noteEl.value.trim());
+                showMessage('Заявка одобрена.', 'ok');
+                loadAdminList(filter);
+              } catch (err) {
+                showMessage(err.message || String(err), 'err');
+                approveBtn.disabled = false;
+                rejectBtn.disabled = false;
+              }
+            });
+
+            if (rejectBtn) rejectBtn.addEventListener('click', async function () {
+              rejectBtn.disabled = true;
+              approveBtn.disabled = true;
+              try {
+                await adminAction(id, 'reject', noteEl.value.trim());
+                showMessage('Заявка отклонена.', 'ok');
+                loadAdminList(filter);
+              } catch (err) {
+                showMessage(err.message || String(err), 'err');
+                rejectBtn.disabled = false;
+                approveBtn.disabled = false;
+              }
+            });
+
+            if (openBtn) openBtn.addEventListener('click', function () {
+              sessionStorage.setItem(SESSION_ID_KEY, id);
+              setRoute('status', id, 'citizenship');
+            });
+          });
+        } catch (err) {
+          out.innerHTML = '<p class="field-hint">' + escapeHtml(err.message || String(err)) + '</p>';
+        }
+      }
+
+      function render() {
+        var state = parseHash();
+        if (!state) return;
+        var id = state.id || sessionStorage.getItem(SESSION_ID_KEY) || '';
+        state.id = id;
+        if (state.kind) setApplyKind(state.kind);
+        else if (state.route === 'status') state.kind = getApplyKind();
+        // Rewrite legacy verify URLs to status in the address bar
+        if (/^#?apply\/verify\//.test(normalizeApplyPath(location.hash || ''))) {
+          if (id) {
+            setRoute('status', id, 'citizenship');
+            return;
+          }
+        }
+        syncTabs(state);
+        if (keepMessageOnNextRender) keepMessageOnNextRender = false;
+        else clearMessage();
+        if (state.route === 'apply') return renderApply();
+        if (state.route === 'status') return renderStatus(state);
+        if (state.route === 'admin') return renderAdmin();
+        renderApply();
+      }
+
+      document.querySelectorAll('.apply-tabs button').forEach(function (btn) {
+        btn.addEventListener('click', function () {
+          var route = btn.dataset.route;
+          var id = sessionStorage.getItem(SESSION_ID_KEY) || '';
+          if (route === 'apply') return setRoute('apply');
+          if (route === 'status' && id) return setRoute('status', id, getApplyKind());
+        });
+      });
+
+      window.addEventListener('hashchange', render);
+      window.addEventListener('quazar:email-verified', function () {
+        var state = parseHash();
+        if (state && state.route === 'apply') render();
+      });
+      render();
+    })();
+  </script>
+
 </body>
 </html>
