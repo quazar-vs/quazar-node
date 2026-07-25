@@ -5,145 +5,162 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="Квазар — цифровое государство без границ. Стань гражданином и строй будущее вместе с нами.">
   <title>Квазар — Цифровое государство</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700;800&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
     :root {
-      --bg-deep: #050508;
-      --bg-card: rgba(12, 10, 18, 0.75);
-      --red: #e63946;
-      --red-glow: #ff2d55;
-      --gold: #d4a853;
-      --gold-light: #f0c96e;
-      --text: #e8e6f0;
-      --text-muted: #8a8698;
-      --border: rgba(212, 168, 83, 0.2);
-      --font-display: 'Segoe UI', system-ui, sans-serif;
-      --font-body: 'Segoe UI', system-ui, sans-serif;
+      --ll-yellow: #f1c823;
+      --ll-yellow-deep: #d4a90a;
+      --ll-navy: #13262d;
+      --ll-navy-2: #1f3651;
+      --ll-blue: #2f5a6d;
+      --ll-muted: #5a7380;
+      --ll-mist: #c2d1d9;
+      --ll-paper: #f7f6f2;
+      --ll-paper-2: #efece4;
+      --ll-white: #ffffff;
+      --ll-ink: #131313;
+      --ll-forest: #1a6b4a;
+      --ll-forest-soft: rgba(26, 107, 74, 0.12);
+      --ll-crimson: #9e2a2b;
+
+      --bg: var(--ll-paper);
+      --bg-elevated: var(--ll-white);
+      --bg-deep: var(--ll-navy);
+      --text: var(--ll-ink);
+      --text-muted: var(--ll-muted);
+      --text-on-dark: #f4f1e8;
+      --text-on-dark-muted: var(--ll-mist);
+      --accent: var(--ll-yellow);
+      --accent-ink: #1a1608;
+      --border: rgba(19, 38, 45, 0.12);
+      --border-dark: rgba(241, 200, 35, 0.28);
+      --red: var(--ll-crimson);
+      --red-glow: #c43a3c;
+      --gold: var(--ll-yellow-deep);
+      --gold-light: var(--ll-yellow);
+      --bg-card: var(--ll-white);
+
+      --font-display: "Playfair Display", Georgia, "Times New Roman", serif;
+      --font-body: "Source Sans 3", "Segoe UI", sans-serif;
+      --shadow-soft: 0 18px 50px rgba(19, 38, 45, 0.08);
+      --radius: 4px;
     }
 
     html { scroll-behavior: smooth; }
 
     body {
       font-family: var(--font-body);
-      background: var(--bg-deep);
+      background: var(--bg);
       color: var(--text);
-      line-height: 1.6;
+      line-height: 1.65;
       overflow-x: hidden;
     }
 
-    /* Starfield */
-    .starfield {
+    /* Atmosphere: national land / river mist (not flat) */
+    .atmosphere {
       position: fixed;
       inset: 0;
       z-index: 0;
       pointer-events: none;
       background:
-        radial-gradient(ellipse 80% 60% at 50% 0%, rgba(230, 57, 70, 0.08) 0%, transparent 60%),
-        radial-gradient(ellipse 60% 40% at 80% 100%, rgba(212, 168, 83, 0.06) 0%, transparent 50%),
-        var(--bg-deep);
+        radial-gradient(ellipse 90% 55% at 15% -10%, rgba(241, 200, 35, 0.18), transparent 55%),
+        radial-gradient(ellipse 70% 50% at 95% 10%, rgba(47, 90, 109, 0.16), transparent 50%),
+        radial-gradient(ellipse 60% 40% at 50% 100%, rgba(26, 107, 74, 0.1), transparent 55%),
+        linear-gradient(180deg, #f9f7f1 0%, #f0eee6 45%, #e8ebe6 100%);
     }
 
-    .stars, .stars2, .stars3 {
+    .atmosphere::after {
+      content: "";
       position: absolute;
       inset: 0;
-      background-repeat: repeat;
-    }
-
-    .stars {
-      background-image:
-        radial-gradient(1px 1px at 20px 30px, #fff, transparent),
-        radial-gradient(1px 1px at 80px 120px, rgba(255,255,255,0.8), transparent),
-        radial-gradient(1.5px 1.5px at 150px 60px, #fff, transparent),
-        radial-gradient(1px 1px at 220px 180px, rgba(255,255,255,0.6), transparent),
-        radial-gradient(1px 1px at 300px 40px, #fff, transparent);
-      background-size: 350px 200px;
-      animation: drift 120s linear infinite;
-      opacity: 0.5;
-    }
-
-    .stars2 {
-      background-image:
-        radial-gradient(1px 1px at 50px 90px, rgba(212,168,83,0.9), transparent),
-        radial-gradient(1.5px 1.5px at 130px 20px, rgba(230,57,70,0.7), transparent),
-        radial-gradient(1px 1px at 200px 150px, #fff, transparent);
-      background-size: 280px 180px;
-      animation: drift 90s linear infinite reverse;
       opacity: 0.35;
-    }
-
-    .stars3 {
       background-image:
-        radial-gradient(2px 2px at 100px 100px, rgba(240,201,110,0.5), transparent),
-        radial-gradient(1px 1px at 250px 80px, rgba(255,255,255,0.4), transparent);
-      background-size: 400px 250px;
-      animation: drift 150s linear infinite;
-      opacity: 0.25;
+        linear-gradient(rgba(19, 38, 45, 0.03) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(19, 38, 45, 0.03) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: linear-gradient(180deg, rgba(0,0,0,0.45), transparent 70%);
+      animation: gridDrift 40s linear infinite;
     }
 
-    @keyframes drift {
+    @keyframes gridDrift {
       from { transform: translateY(0); }
-      to { transform: translateY(-200px); }
+      to { transform: translateY(-64px); }
     }
 
-    /* Layout */
     .container {
       width: 100%;
-      max-width: 1140px;
+      max-width: 1120px;
       margin: 0 auto;
       padding: 0 1.5rem;
       position: relative;
       z-index: 1;
     }
 
-    section { padding: 5rem 0; }
+    section { padding: 5rem 0; position: relative; z-index: 1; }
 
-    /* Header */
+    /* Header — sovereign clean bar */
     header {
       position: fixed;
-      top: 0;
-      left: 0;
-      right: 0;
+      top: 0; left: 0; right: 0;
       z-index: 100;
-      padding: 1rem 0;
-      background: rgba(5, 5, 8, 0.85);
-      backdrop-filter: blur(12px);
+      padding: 0.85rem 0;
+      background: rgba(247, 246, 242, 0.88);
+      backdrop-filter: blur(14px);
       border-bottom: 1px solid var(--border);
-      transition: box-shadow 0.3s;
+      transition: box-shadow 0.3s, background 0.3s;
     }
 
-    header.scrolled { box-shadow: 0 4px 30px rgba(230, 57, 70, 0.1); }
+    header.scrolled {
+      background: rgba(255, 255, 255, 0.94);
+      box-shadow: 0 8px 28px rgba(19, 38, 45, 0.08);
+    }
 
     .header-inner {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      max-width: 1140px;
+      max-width: 1120px;
       margin: 0 auto;
       padding: 0 1.5rem;
     }
 
     .logo {
-      font-size: 1.5rem;
+      font-family: var(--font-display);
+      font-size: 1.55rem;
       font-weight: 700;
       text-decoration: none;
-      color: var(--text);
-      letter-spacing: 0.05em;
+      color: var(--ll-navy);
+      letter-spacing: -0.02em;
+      display: inline-flex;
+      align-items: baseline;
+      gap: 0.45rem;
     }
 
     .logo span {
-      background: linear-gradient(135deg, var(--red-glow), var(--gold-light));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      color: var(--ll-navy);
     }
 
-    nav { display: flex; gap: 2rem; align-items: center; }
+    .logo .mark {
+      display: inline-block;
+      width: 0.65rem;
+      height: 0.65rem;
+      border-radius: 50%;
+      background: var(--ll-yellow);
+      box-shadow: 0 0 0 3px rgba(241, 200, 35, 0.28);
+      transform: translateY(-1px);
+    }
+
+    nav { display: flex; gap: 1.75rem; align-items: center; }
 
     nav a {
-      color: var(--text-muted);
+      color: var(--ll-blue);
       text-decoration: none;
-      font-size: 0.9rem;
+      font-size: 0.92rem;
+      font-weight: 600;
       transition: color 0.2s;
       position: relative;
     }
@@ -151,58 +168,98 @@
     nav a::after {
       content: '';
       position: absolute;
-      bottom: -4px;
-      left: 0;
-      width: 0;
-      height: 2px;
-      background: linear-gradient(90deg, var(--red), var(--gold));
+      bottom: -4px; left: 0;
+      width: 0; height: 2px;
+      background: var(--ll-yellow);
       transition: width 0.3s;
     }
 
-    nav a:hover { color: var(--gold-light); }
+    nav a:hover { color: var(--ll-navy); }
     nav a:hover::after { width: 100%; }
 
     nav a.nav-register {
-      padding: 0.45rem 1rem;
-      border: 1px solid rgba(230, 57, 70, 0.35);
-      border-radius: 8px;
-      background: rgba(230, 57, 70, 0.12);
-      color: var(--gold-light);
+      padding: 0.5rem 1.1rem;
+      border: none;
+      border-radius: var(--radius);
+      background: var(--ll-yellow);
+      color: var(--accent-ink);
+      font-weight: 700;
     }
 
     nav a.nav-register::after { display: none; }
 
     nav a.nav-register:hover {
-      color: #fff;
-      border-color: var(--red);
-      background: rgba(230, 57, 70, 0.25);
+      color: var(--accent-ink);
+      background: #f6d54a;
+      filter: brightness(1.02);
     }
 
     .menu-toggle {
       display: none;
       background: none;
-      border: none;
-      color: var(--text);
-      font-size: 1.5rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--ll-navy);
+      font-size: 1.25rem;
       cursor: pointer;
-      padding: 0.25rem;
+      padding: 0.35rem 0.55rem;
+      line-height: 1;
     }
 
-    /* Hero */
+    /* Hero — one composition, brand-first */
     .hero {
       min-height: 100vh;
       display: flex;
-      align-items: center;
-      justify-content: center;
-      text-align: center;
-      padding-top: 5rem;
+      align-items: stretch;
+      padding: 0;
       position: relative;
+      overflow: hidden;
+      background:
+        linear-gradient(115deg, rgba(19, 38, 45, 0.92) 0%, rgba(31, 54, 81, 0.78) 42%, rgba(26, 107, 74, 0.45) 100%),
+        radial-gradient(ellipse 80% 70% at 70% 40%, rgba(241, 200, 35, 0.22), transparent 55%),
+        linear-gradient(160deg, #0d1c22 0%, #1f3651 50%, #234a3a 100%);
+      color: var(--text-on-dark);
     }
 
-    .hero-content { max-width: 800px; animation: fadeUp 1s ease-out; }
+    .hero::before {
+      content: "";
+      position: absolute;
+      inset: 0;
+      background:
+        radial-gradient(circle at 20% 80%, rgba(241, 200, 35, 0.12), transparent 35%),
+        repeating-linear-gradient(
+          -18deg,
+          transparent 0,
+          transparent 18px,
+          rgba(255,255,255,0.015) 18px,
+          rgba(255,255,255,0.015) 19px
+        );
+      animation: heroPulse 12s ease-in-out infinite alternate;
+      pointer-events: none;
+    }
+
+    @keyframes heroPulse {
+      from { opacity: 0.7; transform: scale(1); }
+      to { opacity: 1; transform: scale(1.03); }
+    }
+
+    .hero .container {
+      display: flex;
+      align-items: center;
+      width: 100%;
+      padding-top: 6rem;
+      padding-bottom: 4rem;
+      position: relative;
+      z-index: 1;
+    }
+
+    .hero-content {
+      max-width: 720px;
+      animation: fadeUp 1s ease-out;
+    }
 
     @keyframes fadeUp {
-      from { opacity: 0; transform: translateY(30px); }
+      from { opacity: 0; transform: translateY(28px); }
       to { opacity: 1; transform: translateY(0); }
     }
 
@@ -210,144 +267,290 @@
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 0.4rem 1rem;
-      border: 1px solid var(--border);
-      border-radius: 100px;
-      font-size: 0.8rem;
-      color: var(--gold);
+      padding: 0.35rem 0.9rem;
+      border: 1px solid rgba(241, 200, 35, 0.45);
+      border-radius: 2px;
+      font-size: 0.78rem;
+      font-weight: 600;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--ll-yellow);
       margin-bottom: 1.5rem;
-      background: rgba(212, 168, 83, 0.05);
-      animation: pulse-border 3s ease-in-out infinite;
+      background: rgba(241, 200, 35, 0.08);
     }
 
-    @keyframes pulse-border {
-      0%, 100% { border-color: rgba(212, 168, 83, 0.2); }
-      50% { border-color: rgba(230, 57, 70, 0.4); }
+    .hero-brand {
+      font-family: var(--font-display);
+      font-size: clamp(3.4rem, 12vw, 7rem);
+      font-weight: 800;
+      line-height: 0.95;
+      letter-spacing: -0.03em;
+      color: var(--ll-white);
+      margin-bottom: 0.85rem;
+      text-shadow: 0 8px 40px rgba(0,0,0,0.25);
+      animation: brandIn 1.1s ease-out 0.15s both;
+    }
+
+    .hero-brand em {
+      font-style: normal;
+      color: var(--ll-yellow);
+    }
+
+    @keyframes brandIn {
+      from { opacity: 0; letter-spacing: 0.08em; transform: translateY(12px); }
+      to { opacity: 1; letter-spacing: -0.03em; transform: translateY(0); }
     }
 
     .hero h1 {
-      font-size: clamp(2.2rem, 6vw, 3.8rem);
-      font-weight: 800;
-      line-height: 1.15;
-      margin-bottom: 1.25rem;
-      letter-spacing: -0.02em;
+      font-family: var(--font-display);
+      font-size: clamp(1.45rem, 3.5vw, 2.15rem);
+      font-weight: 500;
+      line-height: 1.25;
+      margin-bottom: 1rem;
+      color: var(--text-on-dark);
+      max-width: 18ch;
     }
 
-    .hero h1 .highlight {
-      display: block;
-      font-size: clamp(2.8rem, 8vw, 5rem);
-      background: linear-gradient(135deg, var(--red-glow) 0%, var(--gold-light) 50%, var(--red) 100%);
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
-      background-size: 200% auto;
-      animation: shimmer 4s linear infinite;
-      filter: drop-shadow(0 0 40px rgba(230, 57, 70, 0.3));
-    }
-
-    @keyframes shimmer {
-      0% { background-position: 0% center; }
-      100% { background-position: 200% center; }
-    }
+    .hero h1 .highlight { color: var(--ll-yellow); }
 
     .hero-subtitle {
-      font-size: clamp(1rem, 2.5vw, 1.25rem);
-      color: var(--text-muted);
-      max-width: 600px;
-      margin: 0 auto 1rem;
+      font-size: clamp(1.02rem, 2.2vw, 1.2rem);
+      color: var(--text-on-dark-muted);
+      max-width: 34rem;
+      margin-bottom: 0.75rem;
+      font-weight: 400;
     }
 
     .motto {
+      font-family: var(--font-display);
       font-style: italic;
-      color: var(--gold);
-      font-size: 1rem;
-      margin-bottom: 2rem;
-      opacity: 0.9;
+      color: var(--ll-yellow);
+      font-size: 1.05rem;
+      margin-bottom: 1.75rem;
+      opacity: 0.95;
     }
 
     .citizen-counter {
       display: inline-flex;
       align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem 1.5rem;
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      margin-bottom: 2rem;
+      gap: 0.85rem;
+      padding: 0.85rem 1.35rem;
+      background: rgba(255, 255, 255, 0.06);
+      border: 1px solid rgba(241, 200, 35, 0.3);
+      border-radius: var(--radius);
+      margin-bottom: 1.75rem;
       backdrop-filter: blur(8px);
     }
 
     .citizen-counter .count {
-      font-size: 2rem;
-      font-weight: 800;
-      background: linear-gradient(135deg, var(--gold-light), var(--red));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      font-family: var(--font-display);
+      font-size: 2.1rem;
+      font-weight: 700;
+      color: var(--ll-yellow);
+      line-height: 1;
     }
 
     .citizen-counter .label {
-      font-size: 0.85rem;
-      color: var(--text-muted);
+      font-size: 0.82rem;
+      color: var(--text-on-dark-muted);
       text-align: left;
       line-height: 1.3;
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      font-weight: 600;
     }
+
+    .hero-cta { display: flex; flex-wrap: wrap; gap: 0.85rem; align-items: center; }
 
     .btn {
       display: inline-flex;
       align-items: center;
       gap: 0.5rem;
-      padding: 1rem 2.25rem;
-      font-size: 1rem;
-      font-weight: 600;
+      padding: 0.95rem 1.85rem;
+      font-size: 0.98rem;
+      font-weight: 700;
+      font-family: var(--font-body);
       border: none;
-      border-radius: 8px;
+      border-radius: var(--radius);
       cursor: pointer;
       text-decoration: none;
-      transition: transform 0.2s, box-shadow 0.3s;
+      transition: transform 0.2s, box-shadow 0.3s, background 0.2s, color 0.2s, border-color 0.2s;
     }
 
     .btn-primary {
-      background: linear-gradient(135deg, var(--red), #c1121f);
-      color: #fff;
-      box-shadow: 0 4px 25px rgba(230, 57, 70, 0.4);
+      background: var(--ll-yellow);
+      color: var(--accent-ink);
+      box-shadow: 0 8px 28px rgba(241, 200, 35, 0.35);
     }
 
     .btn-primary:hover {
       transform: translateY(-2px);
-      box-shadow: 0 8px 35px rgba(230, 57, 70, 0.55);
+      background: #f6d54a;
+      box-shadow: 0 12px 34px rgba(241, 200, 35, 0.45);
     }
 
     .btn-primary:active { transform: translateY(0); }
 
+    .hero .btn-secondary,
+    .hero .btn.btn-secondary {
+      background: transparent;
+      color: var(--text-on-dark);
+      border: 1px solid rgba(255,255,255,0.35);
+    }
+
+    .hero .btn-secondary:hover,
+    .hero .btn.btn-secondary:hover {
+      border-color: var(--ll-yellow);
+      color: var(--ll-yellow);
+    }
+
+    .btn-secondary,
+    .btn.btn-secondary {
+      background: transparent;
+      color: var(--ll-navy);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover,
+    .btn.btn-secondary:hover {
+      border-color: var(--ll-yellow-deep);
+      color: var(--ll-navy);
+      background: rgba(241, 200, 35, 0.12);
+    }
+
     /* Section titles */
     .section-header {
+      text-align: left;
+      margin-bottom: 2.75rem;
+      max-width: 40rem;
+    }
+
+    .section-header.center {
       text-align: center;
-      margin-bottom: 3.5rem;
+      margin-left: auto;
+      margin-right: auto;
     }
 
     .section-header .tag {
       display: inline-block;
-      font-size: 0.75rem;
+      font-size: 0.72rem;
       text-transform: uppercase;
-      letter-spacing: 0.15em;
-      color: var(--red);
-      margin-bottom: 0.75rem;
+      letter-spacing: 0.16em;
+      color: var(--ll-forest);
+      font-weight: 700;
+      margin-bottom: 0.65rem;
     }
 
     .section-header h2 {
-      font-size: clamp(1.75rem, 4vw, 2.5rem);
+      font-family: var(--font-display);
+      font-size: clamp(1.85rem, 4vw, 2.65rem);
       font-weight: 700;
       margin-bottom: 0.75rem;
+      color: var(--ll-navy);
+      letter-spacing: -0.02em;
+      line-height: 1.15;
     }
 
     .section-header p {
       color: var(--text-muted);
-      max-width: 560px;
-      margin: 0 auto;
+      font-size: 1.05rem;
     }
 
-    /* Cards grid */
+    /* Stats strip — Liberland-like */
+    .stats-strip {
+      background: var(--ll-navy);
+      color: var(--text-on-dark);
+      padding: 2rem 0;
+      border-top: 3px solid var(--ll-yellow);
+      position: relative;
+      z-index: 1;
+    }
+
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 1.5rem;
+      text-align: center;
+    }
+
+    .stat-item strong {
+      display: block;
+      font-family: var(--font-display);
+      font-size: clamp(1.6rem, 3vw, 2.2rem);
+      color: var(--ll-yellow);
+      line-height: 1.1;
+      margin-bottom: 0.35rem;
+    }
+
+    .stat-item span {
+      font-size: 0.82rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--ll-mist);
+      font-weight: 600;
+    }
+
+    /* About — clean institutional */
+    #about {
+      background: var(--ll-white);
+    }
+
+    .about-layout {
+      display: grid;
+      grid-template-columns: 1.1fr 0.9fr;
+      gap: 3rem;
+      align-items: start;
+    }
+
+    .about-copy p {
+      color: var(--text-muted);
+      margin-bottom: 1rem;
+      font-size: 1.05rem;
+    }
+
+    .about-copy .motto-block {
+      margin-top: 1.5rem;
+      padding: 1.25rem 1.35rem;
+      border-left: 3px solid var(--ll-yellow);
+      background: var(--ll-paper);
+      font-family: var(--font-display);
+      font-style: italic;
+      font-size: 1.15rem;
+      color: var(--ll-navy);
+    }
+
+    .feature-list {
+      display: grid;
+      gap: 1.15rem;
+    }
+
+    .feature-row {
+      padding: 1.25rem 0;
+      border-bottom: 1px solid var(--border);
+      opacity: 0;
+      transform: translateY(16px);
+    }
+
+    .feature-row.visible {
+      opacity: 1;
+      transform: translateY(0);
+      transition: opacity 0.55s ease, transform 0.55s ease;
+    }
+
+    .feature-row h3 {
+      font-family: var(--font-display);
+      font-size: 1.2rem;
+      color: var(--ll-navy);
+      margin-bottom: 0.4rem;
+    }
+
+    .feature-row p {
+      font-size: 0.95rem;
+      color: var(--text-muted);
+      line-height: 1.6;
+    }
+
+    /* Cards / benefits — minimal, not decorative cards in hero */
     .cards-3 {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -355,92 +558,108 @@
     }
 
     .card {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 2rem;
-      backdrop-filter: blur(8px);
-      transition: transform 0.3s, border-color 0.3s, box-shadow 0.3s;
+      background: transparent;
+      border: none;
+      border-top: 2px solid var(--ll-yellow);
+      border-radius: 0;
+      padding: 1.5rem 0 0.5rem;
       opacity: 0;
-      transform: translateY(20px);
+      transform: translateY(16px);
     }
 
     .card.visible {
       opacity: 1;
       transform: translateY(0);
-      transition: opacity 0.6s ease, transform 0.6s ease, border-color 0.3s, box-shadow 0.3s;
+      transition: opacity 0.55s ease, transform 0.55s ease;
     }
 
-    .card:hover {
-      transform: translateY(-4px);
-      border-color: rgba(230, 57, 70, 0.35);
-      box-shadow: 0 12px 40px rgba(0, 0, 0, 0.4), 0 0 30px rgba(230, 57, 70, 0.08);
-    }
+    .card:hover { transform: none; border-color: var(--ll-yellow); box-shadow: none; }
 
     .card-icon {
-      font-size: 2.25rem;
-      margin-bottom: 1rem;
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      color: var(--ll-forest);
+      margin-bottom: 0.75rem;
       display: block;
+      font-style: normal;
     }
 
     .card h3 {
-      font-size: 1.15rem;
-      margin-bottom: 0.75rem;
-      color: var(--gold-light);
+      font-family: var(--font-display);
+      font-size: 1.25rem;
+      margin-bottom: 0.65rem;
+      color: var(--ll-navy);
     }
 
     .card p {
-      font-size: 0.9rem;
+      font-size: 0.95rem;
       color: var(--text-muted);
       line-height: 1.65;
     }
 
-    /* Benefits */
+    #benefits {
+      background:
+        linear-gradient(180deg, var(--ll-paper) 0%, var(--ll-paper-2) 100%);
+    }
+
     .benefits-list {
       display: grid;
       grid-template-columns: repeat(5, 1fr);
-      gap: 1.25rem;
+      gap: 1rem;
     }
 
     .benefit-item {
-      text-align: center;
-      padding: 1.75rem 1rem;
-      background: var(--bg-card);
+      text-align: left;
+      padding: 1.35rem 1.1rem;
+      background: var(--ll-white);
       border: 1px solid var(--border);
-      border-radius: 14px;
-      backdrop-filter: blur(8px);
-      transition: transform 0.3s, border-color 0.3s;
+      border-radius: var(--radius);
+      transition: border-color 0.25s, transform 0.25s;
       opacity: 0;
-      transform: scale(0.95);
+      transform: translateY(12px);
+      box-shadow: var(--shadow-soft);
     }
 
     .benefit-item.visible {
       opacity: 1;
-      transform: scale(1);
-      transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.3s;
+      transform: translateY(0);
+      transition: opacity 0.5s ease, transform 0.5s ease, border-color 0.25s;
     }
 
     .benefit-item:hover {
-      border-color: rgba(212, 168, 83, 0.4);
-      transform: scale(1.03);
+      border-color: rgba(241, 200, 35, 0.65);
+      transform: translateY(-2px);
     }
 
-    .benefit-icon { font-size: 2rem; margin-bottom: 0.75rem; display: block; }
+    .benefit-icon {
+      font-size: 0.7rem;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      text-transform: uppercase;
+      color: var(--ll-yellow-deep);
+      margin-bottom: 0.65rem;
+      display: block;
+    }
 
     .benefit-item h4 {
-      font-size: 0.9rem;
-      font-weight: 600;
+      font-family: var(--font-display);
+      font-size: 1.05rem;
+      font-weight: 700;
       margin-bottom: 0.4rem;
-      color: var(--text);
+      color: var(--ll-navy);
     }
 
     .benefit-item p {
-      font-size: 0.78rem;
+      font-size: 0.84rem;
       color: var(--text-muted);
       line-height: 1.5;
     }
 
     /* Steps */
+    #join { background: var(--ll-white); }
+
     .steps {
       display: grid;
       grid-template-columns: repeat(3, 1fr);
@@ -451,82 +670,83 @@
     .steps::before {
       content: '';
       position: absolute;
-      top: 2.5rem;
-      left: 16.66%;
-      right: 16.66%;
+      top: 1.6rem;
+      left: 12%;
+      right: 12%;
       height: 2px;
-      background: linear-gradient(90deg, var(--red), var(--gold), var(--red));
-      opacity: 0.3;
+      background: linear-gradient(90deg, var(--ll-yellow), var(--ll-forest), var(--ll-yellow));
+      opacity: 0.45;
     }
 
     .step {
-      text-align: center;
+      text-align: left;
       position: relative;
       opacity: 0;
-      transform: translateY(20px);
+      transform: translateY(16px);
     }
 
     .step.visible {
       opacity: 1;
       transform: translateY(0);
-      transition: opacity 0.6s ease, transform 0.6s ease;
+      transition: opacity 0.55s ease, transform 0.55s ease;
     }
 
     .step-number {
-      width: 5rem;
-      height: 5rem;
-      margin: 0 auto 1.25rem;
+      width: 3.25rem;
+      height: 3.25rem;
+      margin: 0 0 1.1rem;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 1.5rem;
-      font-weight: 800;
+      font-family: var(--font-display);
+      font-size: 1.15rem;
+      font-weight: 700;
       border-radius: 50%;
-      background: linear-gradient(135deg, rgba(230,57,70,0.2), rgba(212,168,83,0.2));
-      border: 2px solid var(--border);
-      color: var(--gold-light);
+      background: var(--ll-navy);
+      border: 2px solid var(--ll-yellow);
+      color: var(--ll-yellow);
       position: relative;
       z-index: 1;
     }
 
     .step h3 {
-      font-size: 1.1rem;
+      font-family: var(--font-display);
+      font-size: 1.2rem;
       margin-bottom: 0.5rem;
+      color: var(--ll-navy);
     }
 
     .step p {
-      font-size: 0.88rem;
+      font-size: 0.92rem;
       color: var(--text-muted);
-      max-width: 260px;
-      margin: 0 auto;
+      max-width: 280px;
     }
 
-    /* Form */
+    /* Form — interaction container OK */
     .form-section {
-      background: linear-gradient(180deg, transparent, rgba(230, 57, 70, 0.03) 50%, transparent);
+      background:
+        linear-gradient(180deg, rgba(19, 38, 45, 0.04), transparent 40%),
+        var(--ll-paper);
     }
 
     .form-wrapper {
       max-width: 600px;
       margin: 0 auto;
-      background: var(--bg-card);
+      background: var(--ll-white);
       border: 1px solid var(--border);
-      border-radius: 20px;
-      padding: 2.5rem;
-      backdrop-filter: blur(12px);
-      box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+      border-radius: var(--radius);
+      padding: 2.25rem;
+      box-shadow: var(--shadow-soft);
     }
 
-    .form-group {
-      margin-bottom: 1.5rem;
-    }
+    .form-group { margin-bottom: 1.35rem; }
 
     .form-group label {
       display: block;
-      font-size: 0.85rem;
-      font-weight: 500;
-      margin-bottom: 0.5rem;
-      color: var(--text);
+      font-size: 0.88rem;
+      font-weight: 650;
+      margin-bottom: 0.45rem;
+      color: var(--ll-navy);
     }
 
     .form-group label .hint {
@@ -539,9 +759,9 @@
     .form-group textarea {
       width: 100%;
       padding: 0.85rem 1rem;
-      background: rgba(5, 5, 8, 0.6);
-      border: 1px solid rgba(255, 255, 255, 0.08);
-      border-radius: 8px;
+      background: var(--ll-paper);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
       color: var(--text);
       font-family: inherit;
       font-size: 0.95rem;
@@ -551,28 +771,28 @@
     .form-group input:focus,
     .form-group textarea:focus {
       outline: none;
-      border-color: var(--gold);
-      box-shadow: 0 0 0 3px rgba(212, 168, 83, 0.15);
+      border-color: var(--ll-yellow-deep);
+      box-shadow: 0 0 0 3px rgba(241, 200, 35, 0.22);
     }
 
     .form-group input.error,
     .form-group textarea.error {
       border-color: var(--red);
-      box-shadow: 0 0 0 3px rgba(230, 57, 70, 0.15);
+      box-shadow: 0 0 0 3px rgba(158, 42, 43, 0.12);
     }
 
     .form-group input[readonly],
     .form-group input.input-readonly {
-      background: rgba(5, 5, 8, 0.75);
-      border-color: rgba(212, 168, 83, 0.2);
-      color: rgba(245, 240, 230, 0.85);
+      background: var(--ll-paper-2);
+      border-color: rgba(241, 200, 35, 0.35);
+      color: var(--ll-navy);
       cursor: default;
       user-select: all;
     }
 
     .form-group input[readonly]:focus,
     .form-group input.input-readonly:focus {
-      border-color: rgba(212, 168, 83, 0.2);
+      border-color: rgba(241, 200, 35, 0.35);
       box-shadow: none;
       outline: none;
     }
@@ -598,7 +818,7 @@
       width: 18px;
       height: 18px;
       margin-top: 3px;
-      accent-color: var(--red);
+      accent-color: var(--ll-yellow-deep);
       flex-shrink: 0;
     }
 
@@ -607,6 +827,7 @@
       color: var(--text-muted);
       margin-bottom: 0;
       cursor: pointer;
+      font-weight: 500;
     }
 
     .form-submit {
@@ -619,16 +840,16 @@
       opacity: 0.7;
       cursor: not-allowed;
       transform: none;
-      box-shadow: 0 4px 25px rgba(230, 57, 70, 0.25);
+      box-shadow: none;
     }
 
     .form-submit-error {
       display: none;
       margin-bottom: 1rem;
       padding: 0.85rem 1rem;
-      background: rgba(230, 57, 70, 0.1);
-      border: 1px solid rgba(230, 57, 70, 0.35);
-      border-radius: 8px;
+      background: rgba(158, 42, 43, 0.08);
+      border: 1px solid rgba(158, 42, 43, 0.3);
+      border-radius: var(--radius);
       color: var(--red);
       font-size: 0.88rem;
       line-height: 1.5;
@@ -644,8 +865,12 @@
     }
 
     .form-success.show { display: block; }
-    .form-success .success-icon { font-size: 3rem; margin-bottom: 1rem; }
-    .form-success h3 { color: var(--gold-light); margin-bottom: 0.5rem; }
+    .form-success .success-icon { font-size: 2.5rem; margin-bottom: 1rem; color: var(--ll-forest); }
+    .form-success h3 {
+      font-family: var(--font-display);
+      color: var(--ll-navy);
+      margin-bottom: 0.5rem;
+    }
     .form-success p { color: var(--text-muted); }
 
     #application-form.hidden,
@@ -657,20 +882,30 @@
     }
 
     .apply-gate-icon {
-      font-size: 3rem;
-      margin-bottom: 1rem;
-      opacity: 0.9;
+      width: 3rem;
+      height: 3rem;
+      margin: 0 auto 1rem;
+      border-radius: 50%;
+      background: var(--ll-forest-soft);
+      border: 1px solid rgba(26, 107, 74, 0.25);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 1.1rem;
+      color: var(--ll-forest);
+      font-weight: 700;
     }
 
     .apply-gate h3 {
-      color: var(--gold-light);
+      font-family: var(--font-display);
+      color: var(--ll-navy);
       margin-bottom: 0.75rem;
-      font-size: 1.25rem;
+      font-size: 1.35rem;
     }
 
     .apply-gate p {
       color: var(--text-muted);
-      font-size: 0.92rem;
+      font-size: 0.95rem;
       line-height: 1.65;
       max-width: 420px;
       margin: 0 auto 1.5rem;
@@ -683,13 +918,15 @@
       margin-top: 0.25rem;
     }
 
-    .char-counter.warn { color: var(--gold); }
+    .char-counter.warn { color: var(--ll-yellow-deep); }
     .char-counter.over { color: var(--red); }
 
     /* Footer */
     footer {
-      border-top: 1px solid var(--border);
-      padding: 2.5rem 0;
+      background: var(--ll-navy);
+      color: var(--text-on-dark-muted);
+      border-top: 3px solid var(--ll-yellow);
+      padding: 2.75rem 0;
       position: relative;
       z-index: 1;
     }
@@ -703,47 +940,52 @@
     }
 
     .footer-brand {
-      font-size: 0.85rem;
-      color: var(--text-muted);
+      font-size: 0.9rem;
+      color: var(--ll-mist);
     }
 
     .footer-brand strong {
-      color: var(--gold);
-      font-weight: 600;
+      font-family: var(--font-display);
+      color: var(--ll-yellow);
+      font-weight: 700;
+      font-size: 1.1rem;
     }
 
     .footer-links {
       display: flex;
-      gap: 2rem;
+      gap: 1.75rem;
       flex-wrap: wrap;
     }
 
     .footer-links a {
-      color: var(--text-muted);
+      color: var(--ll-mist);
       text-decoration: none;
-      font-size: 0.88rem;
+      font-size: 0.9rem;
+      font-weight: 600;
       transition: color 0.2s;
       display: flex;
       align-items: center;
       gap: 0.4rem;
     }
 
-    .footer-links a:hover { color: var(--gold-light); }
+    .footer-links a:hover { color: var(--ll-yellow); }
 
     .constitution-link {
       color: inherit;
       text-decoration: underline;
-      text-decoration-color: rgba(212, 168, 83, 0.4);
+      text-decoration-color: rgba(241, 200, 35, 0.45);
       text-underline-offset: 2px;
       transition: color 0.2s, text-decoration-color 0.2s;
     }
 
     .constitution-link:hover {
-      color: var(--gold-light);
-      text-decoration-color: var(--gold);
+      color: var(--ll-navy);
+      text-decoration-color: var(--ll-yellow);
     }
 
-    /* Constitution modal */
+    footer .constitution-link:hover { color: var(--ll-yellow); }
+
+    /* Modals */
     .constitution-modal {
       position: fixed;
       inset: 0;
@@ -752,7 +994,7 @@
       align-items: center;
       justify-content: center;
       padding: 1rem;
-      background: rgba(5, 5, 8, 0.88);
+      background: rgba(19, 38, 45, 0.72);
       backdrop-filter: blur(10px);
       opacity: 0;
       visibility: hidden;
@@ -770,11 +1012,12 @@
       max-height: min(90vh, 900px);
       display: flex;
       flex-direction: column;
-      background: linear-gradient(180deg, rgba(18, 14, 24, 0.98), rgba(10, 8, 14, 0.98));
+      background: var(--ll-white);
       border: 1px solid var(--border);
-      border-radius: 20px;
-      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.6), 0 0 60px rgba(230, 57, 70, 0.08);
-      transform: translateY(20px) scale(0.98);
+      border-top: 3px solid var(--ll-yellow);
+      border-radius: var(--radius);
+      box-shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      transform: translateY(16px) scale(0.98);
       transition: transform 0.3s ease;
       overflow: hidden;
     }
@@ -788,19 +1031,17 @@
       align-items: center;
       justify-content: space-between;
       gap: 1rem;
-      padding: 1.25rem 1.5rem;
+      padding: 1.15rem 1.5rem;
       border-bottom: 1px solid var(--border);
       flex-shrink: 0;
-      background: rgba(230, 57, 70, 0.04);
+      background: var(--ll-paper);
     }
 
     .constitution-header h2 {
-      font-size: 1.15rem;
+      font-family: var(--font-display);
+      font-size: 1.2rem;
       font-weight: 700;
-      background: linear-gradient(135deg, var(--gold-light), var(--red-glow));
-      -webkit-background-clip: text;
-      -webkit-text-fill-color: transparent;
-      background-clip: text;
+      color: var(--ll-navy);
     }
 
     .constitution-close {
@@ -809,20 +1050,20 @@
       display: flex;
       align-items: center;
       justify-content: center;
-      background: rgba(255, 255, 255, 0.04);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 8px;
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
       color: var(--text-muted);
-      font-size: 1.25rem;
+      font-size: 1.15rem;
       cursor: pointer;
       transition: color 0.2s, border-color 0.2s, background 0.2s;
       flex-shrink: 0;
     }
 
     .constitution-close:hover {
-      color: var(--text);
-      border-color: rgba(230, 57, 70, 0.4);
-      background: rgba(230, 57, 70, 0.1);
+      color: var(--ll-navy);
+      border-color: var(--ll-yellow);
+      background: rgba(241, 200, 35, 0.12);
     }
 
     .constitution-body {
@@ -830,12 +1071,12 @@
       overflow-y: auto;
       padding: 1.75rem 1.5rem;
       scrollbar-width: thin;
-      scrollbar-color: rgba(212, 168, 83, 0.35) transparent;
+      scrollbar-color: rgba(241, 200, 35, 0.5) transparent;
     }
 
     .constitution-body::-webkit-scrollbar { width: 6px; }
     .constitution-body::-webkit-scrollbar-thumb {
-      background: rgba(212, 168, 83, 0.35);
+      background: rgba(241, 200, 35, 0.5);
       border-radius: 3px;
     }
 
@@ -856,7 +1097,8 @@
     .constitution-content h1,
     .constitution-content h2,
     .constitution-content h3 {
-      color: var(--gold-light);
+      font-family: var(--font-display);
+      color: var(--ll-navy);
       line-height: 1.35;
       margin: 1.75rem 0 0.75rem;
     }
@@ -870,12 +1112,12 @@
     .constitution-content h2 {
       font-size: 1.15rem;
       padding-bottom: 0.4rem;
-      border-bottom: 1px solid rgba(212, 168, 83, 0.15);
+      border-bottom: 1px solid var(--border);
     }
 
     .constitution-content h3 {
       font-size: 1rem;
-      color: var(--gold);
+      color: var(--ll-blue);
     }
 
     .constitution-content p {
@@ -891,8 +1133,8 @@
     }
 
     .constitution-content strong {
-      color: var(--gold-light);
-      font-weight: 600;
+      color: var(--ll-navy);
+      font-weight: 700;
     }
 
     .constitution-content ul {
@@ -913,7 +1155,7 @@
       content: '◆';
       position: absolute;
       left: 0;
-      color: var(--red);
+      color: var(--ll-yellow-deep);
       font-size: 0.5rem;
       top: 0.55rem;
     }
@@ -926,20 +1168,20 @@
     }
 
     .constitution-content a {
-      color: var(--gold);
+      color: var(--ll-blue);
       text-decoration: underline;
       text-underline-offset: 2px;
     }
 
-    .constitution-content a:hover { color: var(--gold-light); }
+    .constitution-content a:hover { color: var(--ll-navy); }
 
     .constitution-content code {
       font-family: ui-monospace, monospace;
       font-size: 0.85em;
-      background: rgba(230, 57, 70, 0.1);
+      background: rgba(241, 200, 35, 0.15);
       padding: 0.1em 0.35em;
-      border-radius: 4px;
-      color: var(--gold-light);
+      border-radius: 3px;
+      color: var(--ll-navy);
     }
 
     .constitution-footer {
@@ -949,19 +1191,19 @@
       color: var(--text-muted);
       text-align: center;
       flex-shrink: 0;
-      background: rgba(5, 5, 8, 0.5);
+      background: var(--ll-paper);
     }
 
     .constitution-footer a {
-      color: var(--gold);
+      color: var(--ll-blue);
       text-decoration: none;
+      font-weight: 600;
     }
 
-    .constitution-footer a:hover { color: var(--gold-light); }
+    .constitution-footer a:hover { color: var(--ll-navy); }
 
     body.modal-open { overflow: hidden; }
 
-    /* Registration modal */
     .register-intro {
       color: var(--text-muted);
       font-size: 0.92rem;
@@ -970,10 +1212,11 @@
     }
 
     .register-step-label {
-      font-size: 0.75rem;
+      font-size: 0.72rem;
       text-transform: uppercase;
-      letter-spacing: 0.12em;
-      color: var(--red);
+      letter-spacing: 0.14em;
+      color: var(--ll-forest);
+      font-weight: 700;
       margin-bottom: 0.5rem;
     }
 
@@ -1001,17 +1244,18 @@
       cursor: pointer;
       padding: 0.5rem;
       transition: color 0.2s;
+      font-family: inherit;
     }
 
-    .register-secondary:hover { color: var(--gold-light); }
+    .register-secondary:hover { color: var(--ll-navy); }
 
     .register-error {
       display: none;
       margin-bottom: 1rem;
       padding: 0.85rem 1rem;
-      background: rgba(230, 57, 70, 0.1);
-      border: 1px solid rgba(230, 57, 70, 0.35);
-      border-radius: 8px;
+      background: rgba(158, 42, 43, 0.08);
+      border: 1px solid rgba(158, 42, 43, 0.3);
+      border-radius: var(--radius);
       color: var(--red);
       font-size: 0.88rem;
       line-height: 1.5;
@@ -1024,22 +1268,165 @@
       padding: 1.5rem 0.5rem;
     }
 
-    .register-success-panel .success-icon { font-size: 3rem; margin-bottom: 1rem; }
-    .register-success-panel h3 { color: var(--gold-light); margin-bottom: 0.5rem; }
+    .register-success-panel .success-icon { font-size: 2.5rem; margin-bottom: 1rem; color: var(--ll-forest); }
+    .register-success-panel h3 {
+      font-family: var(--font-display);
+      color: var(--ll-navy);
+      margin-bottom: 0.5rem;
+    }
     .register-success-panel p { color: var(--text-muted); font-size: 0.92rem; line-height: 1.65; }
+
+    /* Chat */
+    #chat {
+      padding-top: 4rem;
+      background: var(--ll-white);
+    }
+
+    .chat-layout {
+      display: grid;
+      grid-template-columns: 280px 1fr;
+      gap: 1.5rem;
+      align-items: start;
+    }
+
+    .chat-auth-panel,
+    .chat-panel {
+      background: var(--ll-paper);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.25rem;
+      box-shadow: var(--shadow-soft);
+    }
+
+    .chat-auth-panel h3,
+    .chat-panel h3 {
+      font-family: var(--font-display);
+      margin-bottom: 0.75rem;
+      font-size: 1.15rem;
+      color: var(--ll-navy);
+    }
+
+    .chat-auth-panel p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+      margin-bottom: 1rem;
+    }
+
+    .chat-auth-panel code {
+      font-size: 0.85em;
+      background: rgba(241, 200, 35, 0.18);
+      padding: 0.1em 0.35em;
+      border-radius: 3px;
+    }
+
+    .chat-status {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.4rem;
+      font-size: 0.85rem;
+      color: var(--text-muted);
+      margin-bottom: 0.75rem;
+      margin-top: 0.85rem;
+    }
+
+    .chat-status .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #9aa;
+    }
+
+    .chat-status.live .dot { background: var(--ll-forest); }
+    .chat-status.error .dot { background: var(--red); }
+
+    .chat-messages {
+      height: 420px;
+      overflow-y: auto;
+      display: flex;
+      flex-direction: column;
+      gap: 0.75rem;
+      padding: 0.5rem;
+      margin-bottom: 1rem;
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      background: var(--ll-white);
+    }
+
+    .chat-message {
+      max-width: 85%;
+      padding: 0.65rem 0.85rem;
+      border-radius: var(--radius);
+      font-size: 0.95rem;
+      line-height: 1.45;
+    }
+
+    .chat-message.mine {
+      align-self: flex-end;
+      background: rgba(241, 200, 35, 0.18);
+      border: 1px solid rgba(241, 200, 35, 0.4);
+    }
+
+    .chat-message.theirs {
+      align-self: flex-start;
+      background: rgba(47, 90, 109, 0.08);
+      border: 1px solid rgba(47, 90, 109, 0.2);
+    }
+
+    .chat-message.bot {
+      align-self: flex-start;
+      background: var(--ll-forest-soft);
+      border: 1px solid rgba(26, 107, 74, 0.25);
+    }
+
+    .chat-message .meta {
+      display: block;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      margin-bottom: 0.25rem;
+    }
+
+    .chat-message .badge {
+      display: inline-block;
+      margin-left: 0.35rem;
+      padding: 0.1rem 0.4rem;
+      border-radius: 2px;
+      font-size: 0.68rem;
+      background: rgba(241, 200, 35, 0.25);
+      color: var(--ll-navy);
+      font-weight: 700;
+    }
+
+    .chat-compose {
+      display: flex;
+      gap: 0.75rem;
+    }
+
+    .chat-compose input {
+      flex: 1;
+      padding: 0.75rem 1rem;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--ll-white);
+      color: var(--text);
+      font-family: inherit;
+    }
+
+    .chat-compose button { white-space: nowrap; }
+
+    .chat-hidden { display: none !important; }
 
     /* Responsive */
     @media (max-width: 1024px) {
       .benefits-list { grid-template-columns: repeat(3, 1fr); }
+      .about-layout { grid-template-columns: 1fr; gap: 2rem; }
     }
 
     @media (max-width: 768px) {
       nav {
         position: fixed;
         top: 60px;
-        left: 0;
-        right: 0;
-        background: rgba(5, 5, 8, 0.95);
+        left: 0; right: 0;
+        background: rgba(255, 255, 255, 0.97);
         backdrop-filter: blur(12px);
         flex-direction: column;
         padding: 1.5rem;
@@ -1063,223 +1450,119 @@
       .benefits-list { grid-template-columns: repeat(2, 1fr); }
       .steps { grid-template-columns: 1fr; gap: 2.5rem; }
       .steps::before { display: none; }
+      .stats-grid { grid-template-columns: 1fr; gap: 1.25rem; }
 
       .footer-inner { flex-direction: column; text-align: center; }
       .footer-links { justify-content: center; }
 
-      .form-wrapper { padding: 1.75rem; }
+      .form-wrapper { padding: 1.5rem; }
+      .chat-layout { grid-template-columns: 1fr; }
+      .chat-auth-panel { order: -1; }
+
+      .hero .container { padding-top: 5.5rem; }
+      .hero-brand { font-size: clamp(3rem, 16vw, 4.5rem); }
     }
 
     @media (max-width: 480px) {
       .benefits-list { grid-template-columns: 1fr; }
       section { padding: 3.5rem 0; }
+      .hero-cta { flex-direction: column; align-items: stretch; }
+      .hero-cta .btn { justify-content: center; }
     }
-    @media (max-width: 768px) {
-      .chat-layout { grid-template-columns: 1fr; }
-      .chat-auth-panel { order: -1; }
-    }
-
-    /* Chat */
-    #chat {
-      padding-top: 4rem;
-    }
-
-    .chat-layout {
-      display: grid;
-      grid-template-columns: 280px 1fr;
-      gap: 1.5rem;
-      align-items: start;
-    }
-
-    .chat-auth-panel,
-    .chat-panel {
-      background: var(--bg-card);
-      border: 1px solid var(--border);
-      border-radius: 16px;
-      padding: 1.25rem;
-      backdrop-filter: blur(8px);
-    }
-
-    .chat-auth-panel h3,
-    .chat-panel h3 {
-      margin-bottom: 0.75rem;
-      font-size: 1.1rem;
-    }
-
-    .chat-auth-panel p {
-      color: var(--text-muted);
-      font-size: 0.9rem;
-      margin-bottom: 1rem;
-    }
-
-    .chat-status {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.4rem;
-      font-size: 0.85rem;
-      color: var(--text-muted);
-      margin-bottom: 0.75rem;
-    }
-
-    .chat-status .dot {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #666;
-    }
-
-    .chat-status.live .dot { background: #3ecf8e; }
-    .chat-status.error .dot { background: var(--red); }
-
-    .chat-messages {
-      height: 420px;
-      overflow-y: auto;
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-      padding: 0.5rem;
-      margin-bottom: 1rem;
-      border: 1px solid rgba(255,255,255,0.06);
-      border-radius: 12px;
-      background: rgba(0,0,0,0.25);
-    }
-
-    .chat-message {
-      max-width: 85%;
-      padding: 0.65rem 0.85rem;
-      border-radius: 12px;
-      font-size: 0.95rem;
-      line-height: 1.45;
-    }
-
-    .chat-message.mine {
-      align-self: flex-end;
-      background: rgba(230, 57, 70, 0.18);
-      border: 1px solid rgba(230, 57, 70, 0.35);
-    }
-
-    .chat-message.theirs {
-      align-self: flex-start;
-      background: rgba(212, 168, 83, 0.12);
-      border: 1px solid rgba(212, 168, 83, 0.25);
-    }
-
-    .chat-message.bot {
-      align-self: flex-start;
-      background: rgba(100, 180, 255, 0.12);
-      border: 1px solid rgba(100, 180, 255, 0.25);
-    }
-
-    .chat-message .meta {
-      display: block;
-      font-size: 0.75rem;
-      color: var(--text-muted);
-      margin-bottom: 0.25rem;
-    }
-
-    .chat-message .badge {
-      display: inline-block;
-      margin-left: 0.35rem;
-      padding: 0.1rem 0.4rem;
-      border-radius: 999px;
-      font-size: 0.68rem;
-      background: rgba(212, 168, 83, 0.2);
-      color: var(--gold-light);
-    }
-
-    .chat-compose {
-      display: flex;
-      gap: 0.75rem;
-    }
-
-    .chat-compose input {
-      flex: 1;
-      padding: 0.75rem 1rem;
-      border-radius: 10px;
-      border: 1px solid var(--border);
-      background: rgba(0,0,0,0.35);
-      color: var(--text);
-    }
-
-    .chat-compose button {
-      white-space: nowrap;
-    }
-
-    .chat-hidden { display: none !important; }
-
   </style>
 </head>
 <body>
 
-  <div class="starfield" aria-hidden="true">
-    <div class="stars"></div>
-    <div class="stars2"></div>
-    <div class="stars3"></div>
-  </div>
+  <div class="atmosphere" aria-hidden="true"></div>
 
   <header id="header">
     <div class="header-inner">
-      <a href="#" class="logo"><span>✦ Квазар</span></a>
+      <a href="#" class="logo"><i class="mark" aria-hidden="true"></i><span>Квазар</span></a>
       <button class="menu-toggle" id="menuToggle" aria-label="Меню">☰</button>
       <nav id="nav">
         <a href="#about">О нас</a>
         <a href="#chat">Чат</a>
         <a href="#constitution" class="constitution-link">Конституция</a>
+        <a href="/applications/">Заявки</a>
         <a href="#register" class="nav-register" id="registerLink">Вход</a>
       </nav>
     </div>
   </header>
 
   <main>
-    <!-- Hero -->
     <section class="hero" id="hero">
       <div class="container">
         <div class="hero-content">
-          <div class="hero-badge">🌌 Основано 22 июня 2026 года</div>
-          <h1>
-            Стань гражданином
-            <span class="highlight">Квазара</span>
-          </h1>
-          <p class="hero-subtitle">Цифровое государство без границ. Вступи в сообщество, которое строит будущее</p>
+          <div class="hero-badge">Основано 22 июня 2026</div>
+          <p class="hero-brand">Кваз<em>ар</em></p>
+          <h1>Стань гражданином <span class="highlight">цифрового государства</span></h1>
+          <p class="hero-subtitle">Суверенная территория без границ — сообщество, которое строит будущее через вклад и консенсус.</p>
           <p class="motto">«Объединяя усилия, создаем будущее»</p>
           <div class="citizen-counter">
             <span class="count" id="citizenCount">—</span>
             <span class="label">граждан<br>Квазара</span>
           </div>
-          <a href="#apply" class="btn btn-primary cta-apply">🚀 Подать заявку</a>
+          <div class="hero-cta">
+            <a href="#apply" class="btn btn-primary cta-apply">Подать заявку</a>
+            <a href="#constitution" class="btn btn-secondary constitution-link">Читать Конституцию</a>
+          </div>
         </div>
       </div>
     </section>
 
-    <!-- About -->
+    <div class="stats-strip" aria-label="Показатели">
+      <div class="container">
+        <div class="stats-grid">
+          <div class="stat-item">
+            <strong id="statCitizens">—</strong>
+            <span>Зарегистрированные граждане</span>
+          </div>
+          <div class="stat-item">
+            <strong>QZ-ID</strong>
+            <span>Цифровой паспорт</span>
+          </div>
+          <div class="stat-item">
+            <strong>22.06.26</strong>
+            <span>Дата основания</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <section id="about">
       <div class="container">
-        <div class="section-header">
-          <span class="tag">О нас</span>
-          <h2>Что такое Квазар</h2>
-          <p>Виртуальное государство нового поколения — децентрализованное, справедливое и ориентированное на реальную пользу</p>
-        </div>
-        <div class="cards-3">
-          <div class="card" data-animate>
-            <span class="card-icon">🔗</span>
-            <h3>Децентрализация</h3>
-            <p>Никакой единой точки власти. Решения принимаются коллективно, а управление распределено между гражданами через прозрачные механизмы голосования.</p>
+        <div class="about-layout">
+          <div class="about-copy">
+            <div class="section-header">
+              <span class="tag">О нас</span>
+              <h2>Что такое Квазар</h2>
+              <p>Виртуальное государство нового поколения — децентрализованное, справедливое и ориентированное на реальную пользу</p>
+            </div>
+            <p>Квазар — цифровое государство без границ: территория — интернет и пространство деятельности граждан. Управление строится на консенсусе, вкладе и открытых правилах.</p>
+            <p>Инфраструктура, знания и ресурсы принадлежат сообществу. Каждый гражданин — совладелец государства и участник его развития.</p>
+            <div class="motto-block">Девиз Квазара: «Объединяя усилия, создаем будущее»</div>
           </div>
-          <div class="card" data-animate>
-            <span class="card-icon">⚖️</span>
-            <h3>Общая собственность</h3>
-            <p>Инфраструктура, знания и ресурсы принадлежат всему сообществу. Каждый гражданин — совладелец цифрового государства.</p>
-          </div>
-          <div class="card" data-animate>
-            <span class="card-icon">📊</span>
-            <h3>Рейтинг полезности</h3>
-            <p>Вклад каждого гражданина оценивается сообществом. Активные участники получают признание, влияние и возможность стать Аей.</p>
+          <div class="feature-list">
+            <div class="feature-row card" data-animate>
+              <span class="card-icon">01 · Принцип</span>
+              <h3>Децентрализация</h3>
+              <p>Никакой единой точки власти. Решения принимаются коллективно, а управление распределено между гражданами через прозрачные механизмы голосования.</p>
+            </div>
+            <div class="feature-row card" data-animate>
+              <span class="card-icon">02 · Собственность</span>
+              <h3>Общая собственность</h3>
+              <p>Инфраструктура, знания и ресурсы принадлежат всему сообществу. Каждый гражданин — совладелец цифрового государства.</p>
+            </div>
+            <div class="feature-row card" data-animate>
+              <span class="card-icon">03 · Вклад</span>
+              <h3>Рейтинг полезности</h3>
+              <p>Вклад каждого гражданина оценивается сообществом. Активные участники получают признание, влияние и возможность стать Аей.</p>
+            </div>
           </div>
         </div>
       </div>
     </section>
 
-    <!-- Benefits -->
     <section id="benefits">
       <div class="container">
         <div class="section-header">
@@ -1289,27 +1572,27 @@
         </div>
         <div class="benefits-list">
           <div class="benefit-item" data-animate>
-            <span class="benefit-icon">🪪</span>
+            <span class="benefit-icon">Паспорт</span>
             <h4>QZ-ID паспорт</h4>
             <p>Уникальный цифровой идентификатор гражданина Квазара</p>
           </div>
           <div class="benefit-item" data-animate>
-            <span class="benefit-icon">✍️</span>
+            <span class="benefit-icon">Имя</span>
             <h4>Уникальное имя</h4>
             <p>Латинское имя до 13 символов — твоя цифровая личность</p>
           </div>
           <div class="benefit-item" data-animate>
-            <span class="benefit-icon">🗳️</span>
+            <span class="benefit-icon">Голос</span>
             <h4>Право голоса</h4>
             <p>Участвуй в принятии решений, влияющих на будущее государства</p>
           </div>
           <div class="benefit-item" data-animate>
-            <span class="benefit-icon">🏗️</span>
+            <span class="benefit-icon">Доступ</span>
             <h4>Доступ к инфраструктуре</h4>
             <p>Пользуйся общими ресурсами, инструментами и сервисами сообщества</p>
           </div>
           <div class="benefit-item" data-animate>
-            <span class="benefit-icon">👑</span>
+            <span class="benefit-icon">Путь</span>
             <h4>Путь к Ае</h4>
             <p>Возможность стать Аей — лидером и хранителем Квазара</p>
           </div>
@@ -1317,7 +1600,6 @@
       </div>
     </section>
 
-    <!-- How to join -->
     <section id="join">
       <div class="container">
         <div class="section-header">
@@ -1345,20 +1627,19 @@
       </div>
     </section>
 
-    <!-- Application Form -->
     <section class="form-section" id="apply">
       <div class="container">
-        <div class="section-header">
+        <div class="section-header center">
           <span class="tag">Заявка</span>
           <h2>Подать заявку на гражданство</h2>
           <p>Заполни форму — мы свяжемся с тобой в ближайшее время</p>
         </div>
         <div class="form-wrapper">
           <div id="applyGate" class="apply-gate">
-            <div class="apply-gate-icon">🔐</div>
+            <div class="apply-gate-icon" aria-hidden="true">✦</div>
             <h3>Войдите для подачи заявки</h3>
             <p>Подтвердите email для входа, чтобы подать заявку на гражданство Квазара. Мы отправим 6-значный код на вашу почту.</p>
-            <button type="button" class="btn btn-primary cta-apply">✦ Войти</button>
+            <button type="button" class="btn btn-primary cta-apply">Войти</button>
           </div>
 
           <form id="application-form" class="hidden" novalidate>
@@ -1393,11 +1674,11 @@
               <div class="error-msg" id="consentError">Необходимо дать согласие</div>
             </div>
 
-            <button type="submit" class="btn btn-primary form-submit" id="submitBtn">✦ Отправить заявку</button>
+            <button type="submit" class="btn btn-primary form-submit" id="submitBtn">Отправить заявку</button>
           </form>
 
           <div class="form-success" id="formSuccess">
-            <div class="success-icon">🎉</div>
+            <div class="success-icon">✓</div>
             <h3>Заявка отправлена!</h3>
             <p>Мы рассмотрим её и свяжемся с вами по email. Добро пожаловать в будущее Квазара.</p>
           </div>
@@ -1405,7 +1686,6 @@
       </div>
     </section>
 
-    <!-- Chat -->
     <section id="chat">
       <div class="container">
         <div class="section-header">
@@ -1445,13 +1725,14 @@
     <div class="container">
       <div class="footer-inner">
         <div class="footer-brand">
-          <strong>✦ Квазар</strong> — цифровое государство<br>
+          <strong>Квазар</strong> — цифровое государство<br>
           Основано 22 июня 2026 · «Объединяя усилия, создаем будущее»
         </div>
         <div class="footer-links">
-          <a href="https://github.com/quazar-vs/quazar-node" target="_blank" rel="noopener">⚡ GitHub</a>
-          <a href="#constitution" class="constitution-link">📜 Конституция</a>
-          <a href="mailto:quazarvs@gmail.com">✉️ quazarvs@gmail.com</a>
+          <a href="https://github.com/quazar-vs/quazar-node" target="_blank" rel="noopener">GitHub</a>
+          <a href="#constitution" class="constitution-link">Конституция</a>
+          <a href="/applications/">Портал заявок</a>
+          <a href="mailto:quazarvs@gmail.com">quazarvs@gmail.com</a>
         </div>
       </div>
     </div>
@@ -1460,7 +1741,7 @@
   <div class="constitution-modal" id="registerModal" role="dialog" aria-modal="true" aria-labelledby="registerTitle" hidden>
     <div class="constitution-dialog">
       <div class="constitution-header">
-        <h2 id="registerTitle">✦ Вход</h2>
+        <h2 id="registerTitle">Вход</h2>
         <button type="button" class="constitution-close" id="registerClose" aria-label="Закрыть">✕</button>
       </div>
       <div class="constitution-body">
@@ -1504,7 +1785,7 @@
         </div>
 
         <div id="registerSuccess" class="register-success-panel" hidden>
-          <div class="success-icon">🎉</div>
+          <div class="success-icon">✓</div>
           <h3>Вы вошли!</h3>
           <p>Email подтверждён. Теперь заполните заявку на гражданство Квазара.</p>
           <button type="button" class="btn btn-primary cta-apply" id="registerGoApply" style="margin-top:1.5rem">Перейти к заявке</button>
@@ -1516,7 +1797,7 @@
   <div class="constitution-modal" id="constitutionModal" role="dialog" aria-modal="true" aria-labelledby="constitutionTitle" hidden>
     <div class="constitution-dialog">
       <div class="constitution-header">
-        <h2 id="constitutionTitle">📜 Конституция Квазара</h2>
+        <h2 id="constitutionTitle">Конституция Квазара</h2>
         <button type="button" class="constitution-close" id="constitutionClose" aria-label="Закрыть">✕</button>
       </div>
       <div class="constitution-body" id="constitutionBody">
@@ -1528,6 +1809,7 @@
       </div>
     </div>
   </div>
+
 
   <script type="text/plain" id="constitutionSource">
 # КОНСТИТУЦИЯ КВАЗАРА  
@@ -2152,6 +2434,8 @@
           var count = data.data.citizens_with_passport;
           if (typeof count === 'number' && count >= 0) {
             el.textContent = String(count);
+            var statEl = document.getElementById('statCitizens');
+            if (statEl) statEl.textContent = String(count);
           }
         }).catch(function () {
           // keep fallback "—"
