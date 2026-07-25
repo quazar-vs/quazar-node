@@ -273,13 +273,10 @@ pub async fn send_credentials_to_internal_mailbox(
         tracing::info!("no internal_email — skip credentials mail");
         return;
     };
-    let base = std::env::var("QUAZAR_NODE_URL")
-        .unwrap_or_else(|_| format!("https://{}", mail_domain()));
-    let passport_url = format!(
-        "{}/passport/download?citizen_id={}",
-        base.trim_end_matches('/'),
-        qz_id
-    );
+    // App download link (GitHub releases / APK), not the node API.
+    let passport_url = std::env::var("PASSPORT_DOWNLOAD_URL").unwrap_or_else(|_| {
+        "https://github.com/quazar-vs/quazar-passport/releases".to_string()
+    });
     let body = quazar_credentials_body(qz_id, name, api_key, public_key, &passport_url);
     if let Err(e) = send_internal_email(to, "Данные для входа в Квазар", &body).await {
         tracing::warn!(to = %to, error = %e, "failed to send credentials to internal mailbox");

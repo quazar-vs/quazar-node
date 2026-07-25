@@ -15,5 +15,6 @@ EXPOSE 8080
 ENV DATABASE_URL=postgres://quazar:quazar@postgres:5432/quazar
 ENV QUAZAR_NODE_ID=QZ-NODE
 ENV QUAZAR_NODE_URL=http://localhost:8080
+ENV PASSPORT_DOWNLOAD_URL=https://github.com/quazar-vs/quazar-passport/releases
 ENV QUAZAR_PORT=8080
 CMD ["/app/quazar_registry"]

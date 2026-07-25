@@ -46,6 +46,7 @@ services:
       QUAZAR_INIT_TEST_KEYS: ${QUAZAR_INIT_TEST_KEYS:-false}
       QUAZAR_NODE_ID: QZ-NODE-1
       QUAZAR_NODE_URL: http://quazar-node:8080
+      PASSPORT_DOWNLOAD_URL: ${PASSPORT_DOWNLOAD_URL:-https://github.com/quazar-vs/quazar-passport/releases}
       QUAZAR_PORT: "8080"
       QUAZAR_SYNC_INTERVAL_SECS: "60"
       QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
@@ -76,6 +77,7 @@ services:
       QUAZAR_INIT_TEST_KEYS: ${QUAZAR_INIT_TEST_KEYS:-false}
       QUAZAR_NODE_ID: QZ-NODE-2
       QUAZAR_NODE_URL: http://quazar-node-2:8080
+      PASSPORT_DOWNLOAD_URL: ${PASSPORT_DOWNLOAD_URL:-https://github.com/quazar-vs/quazar-passport/releases}
       QUAZAR_PORT: "8080"
       QUAZAR_SYNC_INTERVAL_SECS: "60"
       QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
