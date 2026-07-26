@@ -153,10 +153,15 @@ pub fn approval_threshold(citizen_count: i64) -> i32 {
 }
 
 async fn citizen_count(pool: &PgPool) -> Result<i64, CandidacyError> {
-    sqlx::query_scalar("SELECT COUNT(*)::bigint FROM citizens")
-        .fetch_one(pool)
-        .await
-        .map_err(|e| CandidacyError::Database(e.to_string()))
+    sqlx::query_scalar(
+        "SELECT COUNT(*)::bigint FROM citizens \
+         WHERE id <> $1 AND id <> $2",
+    )
+    .bind(crate::chat::ROOM_OWNER_ID)
+    .bind(crate::chat::SYSTEM_BOT_ID)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| CandidacyError::Database(e.to_string()))
 }
 
 async fn load_citizen(pool: &PgPool, citizen_id: &str) -> Result<(String, String, String), CandidacyError> {
@@ -303,6 +308,11 @@ pub async fn nominate_candidate(
     }
 
     let candidate_id = req.candidate_id.trim().to_string();
+    if candidate_id == crate::chat::ROOM_OWNER_ID || candidate_id == crate::chat::SYSTEM_BOT_ID {
+        return Err(CandidacyError::bad_request(
+            "Служебный аккаунт нельзя выдвигать на роль",
+        ));
+    }
     let (cid, candidate_name, candidate_status) = load_citizen(&state.db, &candidate_id).await?;
     ensure_active_status(&candidate_status, "Кандидат")?;
 
@@ -587,10 +597,21 @@ pub async fn appoint_candidate(
     .await
     .map_err(|e| CandidacyError::Database(e.to_string()))?;
 
-    // Clear candidacy metadata on the citizen as part of appointment.
+    // Apply target role immediately (do not wait for block projection — pending can stall login).
     sqlx::query(
-        "UPDATE citizens SET candidate_type = NULL, target_role = NULL WHERE id = $1",
+        "UPDATE citizens SET role = $1, candidate_type = NULL, target_role = NULL WHERE id = $2",
     )
+    .bind(desired.as_str())
+    .bind(&candidacy.citizen_id)
+    .execute(&state.db)
+    .await
+    .map_err(|e| CandidacyError::Database(e.to_string()))?;
+
+    // Restore API access disabled during the Candidate window after role approval.
+    sqlx::query(
+        "UPDATE api_keys SET role = $1, is_active = TRUE WHERE citizen_id = $2",
+    )
+    .bind(desired.as_str())
     .bind(&candidacy.citizen_id)
     .execute(&state.db)
     .await

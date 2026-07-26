@@ -223,6 +223,35 @@ pub fn build_citizen_role_updated_event(
     }
 }
 
+pub fn build_signed_citizen_public_key_event(
+    event_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    public_key: &str,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "CitizenUpdated".to_string(),
+        title: format!("Обновление публичного ключа {}", citizen_name),
+        description: format!(
+            "Гражданин {} зарегистрировал Ed25519 публичный ключ с устройства",
+            citizen_name
+        ),
+        initiator: initiator.to_string(),
+        data: serde_json::json!({
+            "citizen_id": citizen_id,
+            "public_key": public_key,
+        }),
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    })
+}
+
 fn signed_pending_event(mut event: Event) -> Event {
     event.hash = Some(compute_event_hash(&event));
     event.signatures = vec![crate::auth::internal_node_signature(

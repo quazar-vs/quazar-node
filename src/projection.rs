@@ -253,6 +253,27 @@ async fn apply_citizen_updated(
         );
     }
 
+    if event.data.get("public_key").is_some() {
+        let citizen_id = require_str(&event.data, "citizen_id")?;
+        let public_key = require_str(&event.data, "public_key")?;
+        sqlx::query("UPDATE citizens SET public_key = $1 WHERE id = $2")
+            .bind(public_key)
+            .bind(citizen_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| {
+                format!(
+                    "CitizenUpdated public_key projection failed for {}: {}",
+                    citizen_id, e
+                )
+            })?;
+        tracing::info!(
+            citizen_id = %citizen_id,
+            event_id = %event.event_id,
+            "citizen public_key projected to SQL"
+        );
+    }
+
     Ok(())
 }
 
@@ -405,7 +426,7 @@ async fn apply_candidate_appointed(
         .map_err(|e| format!("CandidateAppointed role projection failed: {}", e))?;
 
     sqlx::query(
-        "UPDATE api_keys SET role = $1 WHERE citizen_id = $2",
+        "UPDATE api_keys SET role = $1, is_active = TRUE WHERE citizen_id = $2",
     )
     .bind(role.as_str())
     .bind(citizen_id)

@@ -383,6 +383,7 @@ async fn main() {
             post(citizenship_portal::reject_application),
         )
         .route("/citizen/key", post(generate_api_key))
+        .route("/citizen/public-key", post(set_public_key))
         .route("/citizen/keys", get(list_api_keys))
         .route("/citizen/key/:id", delete(revoke_api_key))
         .route("/citizen/:id", get(get_citizen))

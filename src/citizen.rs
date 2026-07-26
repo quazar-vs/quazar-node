@@ -20,7 +20,8 @@ use crate::auth::{
 use crate::applications::{recaptcha_required, verify_recaptcha};
 use crate::block_producer;
 use crate::blockchain::{
-    build_citizen_added_event, build_signed_citizen_role_event, build_signed_citizen_status_event,
+    build_citizen_added_event, build_signed_citizen_public_key_event,
+    build_signed_citizen_role_event, build_signed_citizen_status_event,
     build_signed_passport_issued_event, build_signed_passport_revoked_event, compute_event_hash,
 };
 use crate::models::Event;
@@ -233,6 +234,11 @@ pub struct ApiKey {
 #[derive(Debug, Deserialize)]
 pub struct GenerateApiKeyRequest {
     pub expires_in_days: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SetPublicKeyRequest {
+    pub public_key: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -858,7 +864,12 @@ pub async fn list_citizens(
         return resp;
     }
 
-    let rows = match sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!("{CITIZEN_SELECT} FROM citizens ORDER BY created_at DESC")))
+    let rows = match sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!(
+        "{CITIZEN_SELECT} FROM citizens \
+         WHERE id <> $1 \
+         ORDER BY created_at DESC"
+    )))
+    .bind(crate::chat::ROOM_OWNER_ID)
     .fetch_all(&state.db)
     .await
     {
@@ -1205,8 +1216,13 @@ pub async fn search_citizens(
     }
 
     let search_pattern = format!("%{}%", query.q);
-    let rows = match sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!("{CITIZEN_SELECT} FROM citizens WHERE name LIKE $1 ORDER BY created_at DESC")))
+    let rows = match sqlx::query_as::<_, CitizenRow>(sqlx::AssertSqlSafe(format!(
+        "{CITIZEN_SELECT} FROM citizens \
+         WHERE name LIKE $1 AND id <> $2 \
+         ORDER BY created_at DESC"
+    )))
     .bind(search_pattern)
+    .bind(crate::chat::ROOM_OWNER_ID)
     .fetch_all(&state.db)
     .await
     {
@@ -1282,6 +1298,81 @@ pub async fn generate_api_key(
             "created_at": record.created_at,
             "expires_at": record.expires_at,
             "is_active": record.is_active,
+        }))),
+    )
+}
+
+/// POST /citizen/public-key — set Ed25519 public key from the device (first login / key rotation).
+/// Private key never leaves the client. Server stores only the public half.
+pub async fn set_public_key(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(req): Json<SetPublicKeyRequest>,
+) -> impl IntoResponse {
+    if let Some(resp) = reject_node(&auth) {
+        return resp;
+    }
+
+    let citizen = match get_citizen_by_name(&state.db, &auth.citizen_name).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return CitizenError::CitizenNotFound.to_response(),
+        Err(e) => return e.to_response(),
+    };
+
+    if citizen.role.is_candidate() || citizen.status == CitizenStatus::Applicant {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::error(
+                "Candidate не может регистрировать ключ до проверки заявки".to_string(),
+            )),
+        );
+    }
+
+    let public_key = match crate::crypto::validate_ed25519_public_key_hex(&req.public_key) {
+        Ok(vk) => hex::encode(vk.to_bytes()),
+        Err(_) => return CitizenError::InvalidPublicKey.to_response(),
+    };
+
+    if citizen.public_key == public_key {
+        return (
+            StatusCode::OK,
+            Json(ApiResponse::success(serde_json::json!({
+                "citizen_id": citizen.id,
+                "public_key": public_key,
+                "unchanged": true,
+            }))),
+        );
+    }
+
+    if let Err(e) = sqlx::query("UPDATE citizens SET public_key = $1 WHERE id = $2")
+        .bind(&public_key)
+        .bind(&citizen.id)
+        .execute(&state.db)
+        .await
+    {
+        return CitizenError::DatabaseError(e.to_string()).to_response();
+    }
+
+    let now = Utc::now().timestamp();
+    let event_id = format!("citizen_pubkey_{}_{}", citizen.id, now);
+    let event = build_signed_citizen_public_key_event(
+        &event_id,
+        &citizen.id,
+        &citizen.name,
+        &public_key,
+        &auth.citizen_name,
+        now,
+    );
+    if let Err(resp) = submit_pending_event(state, event).await {
+        return resp;
+    }
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success(serde_json::json!({
+            "citizen_id": citizen.id,
+            "public_key": public_key,
+            "unchanged": false,
         }))),
     )
 }
@@ -1474,8 +1565,10 @@ pub async fn session_citizens_handler(
     let rows = match sqlx::query_as::<_, PublicCitizenRow>(
         "SELECT id, name, role FROM citizens \
          WHERE passport_issued = TRUE \
+           AND id <> $1 \
          ORDER BY name ASC",
     )
+    .bind(crate::chat::ROOM_OWNER_ID)
     .fetch_all(&state.db)
     .await
     {

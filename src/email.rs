@@ -85,7 +85,6 @@ pub fn registration_credentials_body(
     qz_id: &str,
     name: &str,
     api_key: &str,
-    public_key: &str,
     passport_url: &str,
 ) -> String {
     format!(
@@ -93,14 +92,14 @@ pub fn registration_credentials_body(
          Ваша заявка в Квазаре одобрена. Данные для входа:\n\n\
          QZ-ID: {qz_id}\n\
          Имя: {name}\n\
-         API-ключ: {api_key}\n\
-         Публичный ключ: {public_key}\n\n\
+         API-ключ: {api_key}\n\n\
          Скачать Quazar Passport:\n\
          {passport_url}\n\n\
          Инструкция:\n\
          1. Сохраните API-ключ в безопасном месте.\n\
-         2. Войдите на портал Квазара с вашим логином и API-ключом.\n\
-         3. При необходимости импортируйте паспорт по ссылке выше.\n\n\
+         2. Войдите в приложение Quazar Passport с вашим логином и API-ключом.\n\
+         3. При первом входе приложение само создаст криптоключи на устройстве \
+(приватный ключ останется только на телефоне).\n\n\
          С уважением,\n\
          Квазар\n"
     )
@@ -114,7 +113,7 @@ pub async fn send_registration_credentials(
     qz_id: &str,
     name: &str,
     api_key: &str,
-    public_key: &str,
+    _public_key: &str,
     passport_url: Option<&str>,
 ) -> Result<(), String> {
     let Some(config) = SmtpConfig::from_env() else {
@@ -125,7 +124,7 @@ pub async fn send_registration_credentials(
         .filter(|s| !s.is_empty())
         .map(str::to_string)
         .unwrap_or_else(passport_download_url);
-    let body = registration_credentials_body(qz_id, name, api_key, public_key, &url);
+    let body = registration_credentials_body(qz_id, name, api_key, &url);
     send_plain_email(
         &config,
         to,
@@ -576,12 +575,13 @@ mod tests {
             "qz-1",
             "alice",
             "key-xyz",
-            "pubkey",
             "https://example.com/passport",
         );
         assert!(body.contains("QZ-ID: qz-1"));
         assert!(body.contains("Имя: alice"));
         assert!(body.contains("API-ключ: key-xyz"));
+        assert!(!body.contains("Публичный ключ"));
+        assert!(!body.contains("приватн"));
         assert!(body.contains("https://example.com/passport"));
     }
 
