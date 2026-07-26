@@ -24,6 +24,9 @@ use crate::AppState;
 pub const MAX_MESSAGE_LEN: usize = 2000;
 pub const SYSTEM_BOT_ID: &str = "system_bot";
 pub const SYSTEM_BOT_NAME: &str = "Квазар";
+/// Sentinel citizen that owns the single shared (room) chat session.
+pub const ROOM_OWNER_ID: &str = "quazar_chat";
+pub const ROOM_OWNER_NAME: &str = "Общий чат";
 pub const SESSION_INACTIVITY: Duration = Duration::from_secs(30 * 60);
 pub const ARCHIVE_CHECK_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_LIMIT: i64 = 50;
@@ -194,46 +197,83 @@ fn decompress_zstd(data: &[u8]) -> Result<Vec<u8>, ChatError> {
     zstd::decode_all(data).map_err(|e| ChatError::Database(format!("zstd decompress: {e}")))
 }
 
-/// Ensures a remote session row exists for gossiped messages (activates after closing conflicts).
-async fn ensure_session_for_gossip(
-    pool: &PgPool,
-    session_id: &str,
-    user_id: &str,
-    activity: DateTime<Utc>,
-) -> Result<(), sqlx::Error> {
+async fn ensure_room_owner(pool: &PgPool) -> Result<(), ChatError> {
+    let now = Utc::now().timestamp();
     sqlx::query(
-        "UPDATE chat_sessions SET is_active = FALSE
-         WHERE user_id = $1 AND is_active = TRUE AND id <> $2",
+        "INSERT INTO citizens (id, name, public_key, status, role, created_at, passport_issued)
+         VALUES ($1, $2, $3, 'active', 'Citizen', $4, false)
+         ON CONFLICT (id) DO NOTHING",
     )
-    .bind(user_id)
-    .bind(session_id)
+    .bind(ROOM_OWNER_ID)
+    .bind(ROOM_OWNER_NAME)
+    .bind("0000000000000000000000000000000000000000000000000000000000000001")
+    .bind(now)
+    .execute(pool)
+    .await
+    .map_err(|e| ChatError::Database(e.to_string()))?;
+    Ok(())
+}
+
+/// Resolve the local shared room session for gossip (no archive side-effects).
+async fn resolve_local_room_session(
+    pool: &PgPool,
+    activity: DateTime<Utc>,
+) -> Result<String, sqlx::Error> {
+    let now = Utc::now().timestamp();
+    sqlx::query(
+        "INSERT INTO citizens (id, name, public_key, status, role, created_at, passport_issued)
+         VALUES ($1, $2, $3, 'active', 'Citizen', $4, false)
+         ON CONFLICT (id) DO NOTHING",
+    )
+    .bind(ROOM_OWNER_ID)
+    .bind(ROOM_OWNER_NAME)
+    .bind("0000000000000000000000000000000000000000000000000000000000000001")
+    .bind(now)
     .execute(pool)
     .await?;
 
-    sqlx::query(
-        r#"
-        INSERT INTO chat_sessions (id, user_id, started_at, last_activity, is_active)
-        VALUES ($1, $2, $3, $3, TRUE)
-        ON CONFLICT (id) DO UPDATE SET
-            last_activity = GREATEST(chat_sessions.last_activity, EXCLUDED.last_activity),
-            is_active = TRUE
-        "#,
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM chat_sessions
+         WHERE user_id = $1 AND is_active = TRUE
+         LIMIT 1",
     )
-    .bind(session_id)
-    .bind(user_id)
+    .bind(ROOM_OWNER_ID)
+    .fetch_optional(pool)
+    .await?;
+
+    if let Some(session_id) = existing {
+        sqlx::query(
+            "UPDATE chat_sessions
+             SET last_activity = GREATEST(last_activity, $1)
+             WHERE id = $2",
+        )
+        .bind(activity)
+        .bind(&session_id)
+        .execute(pool)
+        .await?;
+        return Ok(session_id);
+    }
+
+    let session_id = Uuid::new_v4().to_string();
+    sqlx::query(
+        "INSERT INTO chat_sessions (id, user_id, started_at, last_activity, is_active)
+         VALUES ($1, $2, $3, $3, TRUE)",
+    )
+    .bind(&session_id)
+    .bind(ROOM_OWNER_ID)
     .bind(activity)
     .execute(pool)
     .await?;
 
-    Ok(())
+    Ok(session_id)
 }
 
 pub async fn insert_gossip_message(
     pool: &PgPool,
     message: &ChatMessageRow,
 ) -> Result<GossipInsertResult, sqlx::Error> {
-    ensure_session_for_gossip(pool, &message.session_id, &message.citizen_id, message.created_at)
-        .await?;
+    // Remap into the local shared room session so all live messages stay together.
+    let session_id = resolve_local_room_session(pool, message.created_at).await?;
 
     let result = sqlx::query(
         "INSERT INTO chat_messages (id, citizen_id, citizen_name, content, created_at, session_id)
@@ -245,7 +285,7 @@ pub async fn insert_gossip_message(
     .bind(&message.citizen_name)
     .bind(&message.content)
     .bind(message.created_at)
-    .bind(&message.session_id)
+    .bind(&session_id)
     .execute(pool)
     .await?;
 
@@ -328,18 +368,20 @@ fn reject_chat_send(auth: &AuthContext) -> Option<axum::response::Response> {
     None
 }
 
-/// One active session per user. Archives stale sessions before opening a new one.
+/// One active shared room session for the global chat.
+/// `user_id` is kept for call-site compatibility and ignored — all participants share the room.
 pub async fn get_or_create_session(
     state: &Arc<AppState>,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<String, ChatError> {
+    ensure_room_owner(&state.db).await?;
     let pool = &state.db;
     let existing: Option<(String, DateTime<Utc>)> = sqlx::query_as(
         "SELECT id, last_activity FROM chat_sessions
          WHERE user_id = $1 AND is_active = TRUE
          LIMIT 1",
     )
-    .bind(user_id)
+    .bind(ROOM_OWNER_ID)
     .fetch_optional(pool)
     .await
     .map_err(|e| ChatError::Database(e.to_string()))?;
@@ -362,7 +404,7 @@ pub async fn get_or_create_session(
          VALUES ($1, $2, $3, $3, TRUE)",
     )
     .bind(&session_id)
-    .bind(user_id)
+    .bind(ROOM_OWNER_ID)
     .bind(now)
     .execute(pool)
     .await
@@ -373,7 +415,7 @@ pub async fn get_or_create_session(
 
 pub async fn get_active_session(
     pool: &PgPool,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<Option<ChatSessionRow>, ChatError> {
     sqlx::query_as::<_, ChatSessionRow>(
         "SELECT id, user_id, started_at, last_activity, is_active
@@ -381,7 +423,7 @@ pub async fn get_active_session(
          WHERE user_id = $1 AND is_active = TRUE
          LIMIT 1",
     )
-    .bind(user_id)
+    .bind(ROOM_OWNER_ID)
     .fetch_optional(pool)
     .await
     .map_err(|e| ChatError::Database(e.to_string()))
@@ -403,12 +445,36 @@ pub async fn get_messages(
         .map_err(|e| ChatError::Database(e.to_string()))
 }
 
+/// All live (not-yet-archived) messages in the shared chat feed.
+pub async fn get_all_live_messages(pool: &PgPool) -> Result<Vec<ChatMessageRow>, ChatError> {
+    let sql = format!(
+        "SELECT {MSG_COLS} FROM chat_messages
+         ORDER BY created_at ASC, id ASC"
+    );
+    sqlx::query_as::<_, ChatMessageRow>(sqlx::AssertSqlSafe(sql))
+        .fetch_all(pool)
+        .await
+        .map_err(|e| ChatError::Database(e.to_string()))
+}
+
 pub async fn check_inactive_sessions(pool: &PgPool) -> Result<Vec<String>, ChatError> {
     let cutoff = Utc::now() - chrono::Duration::from_std(SESSION_INACTIVITY).unwrap();
+    // Only the shared room session is archived (one ChatHistoryAdded per idle period).
+    // Close any leftover per-user active sessions without emitting events.
+    sqlx::query(
+        "UPDATE chat_sessions SET is_active = FALSE
+         WHERE is_active = TRUE AND user_id <> $1",
+    )
+    .bind(ROOM_OWNER_ID)
+    .execute(pool)
+    .await
+    .map_err(|e| ChatError::Database(e.to_string()))?;
+
     sqlx::query_scalar(
         "SELECT id FROM chat_sessions
-         WHERE is_active = TRUE AND last_activity < $1",
+         WHERE is_active = TRUE AND user_id = $1 AND last_activity < $2",
     )
+    .bind(ROOM_OWNER_ID)
     .bind(cutoff)
     .fetch_all(pool)
     .await
@@ -492,7 +558,13 @@ pub async fn close_and_archive_session(
         return Ok(None);
     }
 
-    let messages = get_messages(pool, session_id).await?;
+    // Room archive: full shared transcript (all live messages), one ChatHistoryAdded.
+    let is_room = user_id == ROOM_OWNER_ID;
+    let messages = if is_room {
+        get_all_live_messages(pool).await?
+    } else {
+        get_messages(pool, session_id).await?
+    };
 
     if messages.is_empty() {
         sqlx::query("UPDATE chat_sessions SET is_active = FALSE WHERE id = $1")
@@ -507,6 +579,7 @@ pub async fn close_and_archive_session(
     let payload = serde_json::json!({
         "session_id": session_id,
         "user_id": user_id,
+        "room": is_room,
         "messages": messages,
     });
     let original = serde_json::to_vec(&payload)
@@ -535,11 +608,27 @@ pub async fn close_and_archive_session(
     .await
     .map_err(|e| ChatError::Database(e.to_string()))?;
 
-    sqlx::query("DELETE FROM chat_messages WHERE session_id = $1")
+    if is_room {
+        sqlx::query("DELETE FROM chat_messages")
+            .execute(pool)
+            .await
+            .map_err(|e| ChatError::Database(e.to_string()))?;
+        // Close any leftover non-room sessions that still pointed at live messages.
+        sqlx::query(
+            "UPDATE chat_sessions SET is_active = FALSE
+             WHERE is_active = TRUE AND id <> $1",
+        )
         .bind(session_id)
         .execute(pool)
         .await
         .map_err(|e| ChatError::Database(e.to_string()))?;
+    } else {
+        sqlx::query("DELETE FROM chat_messages WHERE session_id = $1")
+            .bind(session_id)
+            .execute(pool)
+            .await
+            .map_err(|e| ChatError::Database(e.to_string()))?;
+    }
 
     sqlx::query("UPDATE chat_sessions SET is_active = FALSE WHERE id = $1")
         .bind(session_id)
@@ -622,8 +711,9 @@ pub async fn background_chat_archive(state: Arc<AppState>) {
 
 pub async fn list_history(
     pool: &PgPool,
-    user_id: &str,
+    _user_id: &str,
 ) -> Result<Vec<ChatArchiveRow>, ChatError> {
+    // Shared room archives (full transcript per inactivity period).
     sqlx::query_as::<_, ChatArchiveRow>(
         r#"
         SELECT a.id, a.session_id, a.original_size, a.compressed_size,
@@ -634,7 +724,7 @@ pub async fn list_history(
         ORDER BY a.created_at DESC
         "#,
     )
-    .bind(user_id)
+    .bind(ROOM_OWNER_ID)
     .fetch_all(pool)
     .await
     .map_err(|e| ChatError::Database(e.to_string()))

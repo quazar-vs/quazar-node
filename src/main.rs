@@ -262,6 +262,7 @@ async fn main() {
         )
         .route("/api/public-config", get(applications::public_config_handler))
         .route("/api/public/stats", get(public_stats_handler))
+        .route("/api/citizens", post(session_citizens_handler))
         .route("/api/tunnel/status", get(tunnel_status_handler))
         .route("/api/tunnel/stats", get(tunnel_stats_handler))
         .route("/api/tunnel/config", get(tunnel_config_handler))

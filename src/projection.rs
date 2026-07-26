@@ -1291,11 +1291,27 @@ async fn apply_chat_history_added(
     .await
     .map_err(|e| format!("ChatHistoryAdded archive insert failed: {}", e))?;
 
-    sqlx::query("DELETE FROM chat_messages WHERE session_id = $1")
-        .bind(session_id)
+    // Shared room archive: clear the entire live feed (not only event.session_id).
+    if user_id == crate::chat::ROOM_OWNER_ID {
+        sqlx::query("DELETE FROM chat_messages")
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("ChatHistoryAdded room message cleanup failed: {}", e))?;
+        sqlx::query(
+            "UPDATE chat_sessions SET is_active = FALSE
+             WHERE is_active = TRUE AND user_id = $1",
+        )
+        .bind(crate::chat::ROOM_OWNER_ID)
         .execute(&mut **tx)
         .await
-        .map_err(|e| format!("ChatHistoryAdded message cleanup failed: {}", e))?;
+        .map_err(|e| format!("ChatHistoryAdded room session close failed: {}", e))?;
+    } else {
+        sqlx::query("DELETE FROM chat_messages WHERE session_id = $1")
+            .bind(session_id)
+            .execute(&mut **tx)
+            .await
+            .map_err(|e| format!("ChatHistoryAdded message cleanup failed: {}", e))?;
+    }
 
     tracing::info!(
         archive_id = %archive_id,

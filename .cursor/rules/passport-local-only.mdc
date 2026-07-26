@@ -1,0 +1,24 @@
+---
+description: Passport app is developed only on local PC; VPS agent must hand off prompts
+alwaysApply: true
+---
+
+# Passport: local-only development
+
+## Scope
+
+- **Flutter Passport app** is developed and built **only on the local PC**: `/home/ser/projects/quazar_passport/lib/`
+- On this VPS (`/opt/quazar`, `/opt/quazar-passport`): **do not** edit Passport app source, **do not** build APKs
+
+## When app changes are needed
+
+If a task requires Passport app changes, **do not implement them here**. Instead, produce a ready-to-use **prompt handoff** for the local agent that works on the app:
+
+1. What to do (goal / behavior)
+2. Relevant APIs / contracts
+3. Files / screens if known
+4. Acceptance criteria
+
+## Allowed on VPS
+
+Backend, site, and infra only: quazar-node, nginx, `site/`, and related server config — not the Flutter app.

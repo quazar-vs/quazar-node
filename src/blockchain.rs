@@ -1153,9 +1153,9 @@ pub fn build_chat_history_added_event(
         event_id: event_id.to_string(),
         timestamp,
         event_type: "ChatHistoryAdded".to_string(),
-        title: format!("Архив чата сеанса {}", session_id),
+        title: format!("Архив общего чата {}", session_id),
         description: format!(
-            "Сеанс {} пользователя {} заархивирован ({} сообщ.)",
+            "Общий чат (сеанс {}, room={}) заархивирован ({} сообщ.)",
             session_id, user_id, message_count
         ),
         initiator: initiator.to_string(),

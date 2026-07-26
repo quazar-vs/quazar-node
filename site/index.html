@@ -194,6 +194,21 @@
       filter: brightness(1.02);
     }
 
+    nav a.nav-register.is-auth {
+      background: var(--ll-forest);
+      color: #f4f1e8;
+      opacity: 0.72;
+      cursor: default;
+      pointer-events: none;
+      filter: none;
+    }
+
+    nav a.nav-register.is-auth:hover {
+      background: var(--ll-forest);
+      color: #f4f1e8;
+      filter: none;
+    }
+
     .menu-toggle {
       display: none;
       background: none;
@@ -655,6 +670,79 @@
       font-size: 0.84rem;
       color: var(--text-muted);
       line-height: 1.5;
+    }
+
+    /* Citizens directory */
+    #citizens { background: var(--ll-white); }
+
+    .citizens-gate {
+      max-width: 36rem;
+      padding: 1.5rem 0;
+      color: var(--text-muted);
+    }
+
+    .citizens-gate p { margin-bottom: 1.1rem; font-size: 1.05rem; }
+
+    .citizens-meta {
+      font-size: 0.9rem;
+      color: var(--text-muted);
+      margin-bottom: 1.25rem;
+    }
+
+    .citizens-list {
+      list-style: none;
+      border-top: 1px solid var(--border);
+    }
+
+    .citizens-list li {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(0, 1.4fr) auto;
+      gap: 0.75rem 1.25rem;
+      align-items: baseline;
+      padding: 0.85rem 0;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .citizens-list .c-name {
+      font-family: var(--font-display);
+      font-size: 1.15rem;
+      font-weight: 700;
+      color: var(--ll-navy);
+    }
+
+    .citizens-list .c-id {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+      color: var(--text-muted);
+      overflow-wrap: anywhere;
+    }
+
+    .citizens-list .c-role {
+      font-size: 0.85rem;
+      font-weight: 600;
+      color: var(--ll-forest);
+      text-align: right;
+      white-space: nowrap;
+    }
+
+    .citizens-empty,
+    .citizens-error {
+      color: var(--text-muted);
+      padding: 0.5rem 0 1rem;
+    }
+
+    .citizens-error { color: var(--red); }
+
+    @media (max-width: 640px) {
+      .citizens-list li {
+        grid-template-columns: 1fr auto;
+        grid-template-areas:
+          "name role"
+          "id id";
+      }
+      .citizens-list .c-name { grid-area: name; }
+      .citizens-list .c-id { grid-area: id; }
+      .citizens-list .c-role { grid-area: role; }
     }
 
     /* Steps */
@@ -1656,10 +1744,11 @@
       <button class="menu-toggle" id="menuToggle" aria-label="Меню">☰</button>
       <nav id="nav">
         <a href="#about">О нас</a>
+        <a href="#citizens" id="citizensNavLink">Граждане</a>
         <a href="#chat">Чат</a>
         <a href="#constitution" class="constitution-link">Конституция</a>
         <a href="#apply">Заявки</a>
-        <a href="#register" class="nav-register" id="registerLink">Вход</a>
+        <a href="#register" class="nav-register" id="registerLink">Авторизоваться</a>
       </nav>
     </div>
   </header>
@@ -1802,6 +1891,25 @@
       </div>
     </section>
 
+    <section id="citizens">
+      <div class="container">
+        <div class="section-header">
+          <span class="tag">Граждане</span>
+          <h2>С паспортом Квазара</h2>
+          <p>Простой список граждан с выданным паспортом — имя, идентификатор и роль</p>
+        </div>
+        <div id="citizensGate" class="citizens-gate">
+          <p>Список доступен после авторизации по email. Граждане входят через приложение Passport.</p>
+          <button type="button" class="btn btn-primary" id="citizensAuthBtn">Авторизоваться</button>
+        </div>
+        <div id="citizensPanel" hidden>
+          <p class="citizens-meta" id="citizensMeta"></p>
+          <div id="citizensStatus" class="citizens-empty" role="status" aria-live="polite">Загрузка…</div>
+          <ul class="citizens-list" id="citizensList" hidden></ul>
+        </div>
+      </div>
+    </section>
+
     <section class="form-section" id="apply">
       <div class="container">
         <div class="section-header center">
@@ -1884,7 +1992,7 @@
   <div class="constitution-modal" id="registerModal" role="dialog" aria-modal="true" aria-labelledby="registerTitle" hidden>
     <div class="constitution-dialog">
       <div class="constitution-header">
-        <h2 id="registerTitle">Вход</h2>
+        <h2 id="registerTitle">Авторизоваться</h2>
         <button type="button" class="constitution-close" id="registerClose" aria-label="Закрыть">✕</button>
       </div>
       <div class="constitution-body">
@@ -2473,7 +2581,9 @@
       var supportsHistoryState = (function () {
         if (location.protocol === 'file:') return false;
         try {
-          history.replaceState(null, '', location.href.split('#')[0]);
+          // Probe only — do not strip hash (that broke deep links and
+          // made empty-hash apply portal treat every load as #apply).
+          history.replaceState(history.state, '', location.href);
           return true;
         } catch (e) {
           return false;
@@ -2519,6 +2629,8 @@
           sessionStorage.removeItem(VERIFIED_EMAIL_KEY);
           sessionStorage.removeItem(VERIFIED_EMAIL_EXPIRES_KEY);
         } catch (e) { /* ignore */ }
+        updateRegisterLinkLabel();
+        refreshCitizensSection();
       }
 
       function getVerifiedEmail() {
@@ -2528,7 +2640,10 @@
           var exp = Number(sessionStorage.getItem(VERIFIED_EMAIL_EXPIRES_KEY) || 0);
           // No expiry (legacy) or past TTL → session inactive, clear storage.
           if (!exp || Date.now() > exp) {
-            clearVerifiedEmail();
+            try {
+              sessionStorage.removeItem(VERIFIED_EMAIL_KEY);
+              sessionStorage.removeItem(VERIFIED_EMAIL_EXPIRES_KEY);
+            } catch (e2) { /* ignore */ }
             return '';
           }
           return email;
@@ -2548,6 +2663,165 @@
           sessionStorage.setItem(VERIFIED_EMAIL_KEY, email);
           sessionStorage.setItem(VERIFIED_EMAIL_EXPIRES_KEY, String(Date.now() + ttlMs));
         } catch (e) { /* ignore */ }
+        updateRegisterLinkLabel();
+        refreshCitizensSection();
+      }
+
+      function updateRegisterLinkLabel() {
+        if (!registerLink) return;
+        var registerTitle = document.getElementById('registerTitle');
+        if (isEmailVerified()) {
+          registerLink.textContent = 'Авторизован';
+          registerLink.classList.add('is-auth');
+          registerLink.setAttribute('aria-disabled', 'true');
+          registerLink.setAttribute('tabindex', '-1');
+          if (registerTitle) registerTitle.textContent = 'Авторизован';
+        } else {
+          registerLink.textContent = 'Авторизоваться';
+          registerLink.classList.remove('is-auth');
+          registerLink.removeAttribute('aria-disabled');
+          registerLink.removeAttribute('tabindex');
+          if (registerTitle) registerTitle.textContent = 'Авторизоваться';
+        }
+      }
+
+      function scrollToCitizens() {
+        nav.classList.remove('open');
+        menuToggle.textContent = '☰';
+        var el = document.getElementById('citizens');
+        if (el) el.scrollIntoView({ behavior: 'smooth' });
+      }
+
+      function setCitizensLocked() {
+        var gate = document.getElementById('citizensGate');
+        var panel = document.getElementById('citizensPanel');
+        if (gate) gate.hidden = false;
+        if (panel) panel.hidden = true;
+      }
+
+      function setCitizensUnlocked() {
+        var gate = document.getElementById('citizensGate');
+        var panel = document.getElementById('citizensPanel');
+        if (gate) gate.hidden = true;
+        if (panel) panel.hidden = false;
+      }
+
+      function renderCitizensList(citizens) {
+        var list = document.getElementById('citizensList');
+        var status = document.getElementById('citizensStatus');
+        var meta = document.getElementById('citizensMeta');
+        if (!list || !status) return;
+
+        list.innerHTML = '';
+        if (!citizens || !citizens.length) {
+          list.hidden = true;
+          status.hidden = false;
+          status.className = 'citizens-empty';
+          status.textContent = 'Пока нет граждан с выданным паспортом.';
+          if (meta) meta.textContent = '';
+          return;
+        }
+
+        citizens.forEach(function (c) {
+          var li = document.createElement('li');
+          var name = document.createElement('span');
+          name.className = 'c-name';
+          name.textContent = c.name || '—';
+          var id = document.createElement('span');
+          id.className = 'c-id';
+          id.textContent = c.id || '—';
+          var role = document.createElement('span');
+          role.className = 'c-role';
+          role.textContent = c.role || '—';
+          li.appendChild(name);
+          li.appendChild(id);
+          li.appendChild(role);
+          list.appendChild(li);
+        });
+
+        status.hidden = true;
+        list.hidden = false;
+        if (meta) {
+          meta.textContent = 'Всего: ' + citizens.length;
+        }
+      }
+
+      var citizensLoadSeq = 0;
+      function loadCitizensList() {
+        var email = getVerifiedEmail();
+        var status = document.getElementById('citizensStatus');
+        var list = document.getElementById('citizensList');
+        var meta = document.getElementById('citizensMeta');
+        if (!email) {
+          setCitizensLocked();
+          return;
+        }
+
+        setCitizensUnlocked();
+        var seq = ++citizensLoadSeq;
+        if (status) {
+          status.hidden = false;
+          status.className = 'citizens-empty';
+          status.textContent = 'Загрузка…';
+        }
+        if (list) {
+          list.hidden = true;
+          list.innerHTML = '';
+        }
+        if (meta) meta.textContent = '';
+
+        quazarApiPost('/api/citizens', {
+          email: email,
+          email_already_verified: true
+        }).then(function (data) {
+          if (seq !== citizensLoadSeq) return;
+          renderCitizensList((data && data.citizens) || []);
+        }).catch(function (err) {
+          if (seq !== citizensLoadSeq) return;
+          if (isCitizenUseAppError(err)) {
+            clearVerifiedEmail();
+            setCitizensLocked();
+            if (status) {
+              status.hidden = false;
+              status.className = 'citizens-error';
+              status.textContent = CITIZEN_USE_APP_MSG;
+            }
+            return;
+          }
+          if (list) list.hidden = true;
+          if (status) {
+            status.hidden = false;
+            status.className = 'citizens-error';
+            status.textContent = (err && err.message) || 'Не удалось загрузить список';
+          }
+        });
+      }
+
+      function refreshCitizensSection() {
+        if (isEmailVerified()) {
+          loadCitizensList();
+        } else {
+          setCitizensLocked();
+        }
+      }
+
+      function openCitizensSection(e) {
+        if (e) {
+          e.preventDefault();
+          e.stopPropagation();
+        }
+        if (!isEmailVerified()) {
+          if (window.location.hash !== '#citizens') {
+            setPageHash('#citizens');
+          }
+          openRegister();
+          return;
+        }
+        if (window.location.hash !== '#citizens') {
+          setPageHash('#citizens');
+        }
+        scrollToCitizens();
+        loadCitizensList();
       }
 
       function isApplyHash(hash) {
@@ -2748,16 +3022,21 @@
           e.preventDefault();
           e.stopPropagation();
         }
+        if (isEmailVerified()) {
+          updateRegisterLinkLabel();
+          return;
+        }
         nav.classList.remove('open');
         menuToggle.textContent = '☰';
         if (modal.classList.contains('open')) closeConstitution();
-        if (window.location.hash !== '#register') {
+        if (window.location.hash !== '#register' && window.location.hash !== '#citizens') {
           setPageHash('#register');
         }
-        resetRegisterModal();
         registerModal.hidden = false;
         registerModal.classList.add('open');
         document.body.classList.add('modal-open');
+        resetRegisterModal();
+        updateRegisterLinkLabel();
         regEmailInput.focus();
       }
 
@@ -2822,6 +3101,18 @@
 
       registerLink.addEventListener('click', openRegister);
       registerClose.addEventListener('click', closeRegister);
+
+      var citizensNavLink = document.getElementById('citizensNavLink');
+      var citizensAuthBtn = document.getElementById('citizensAuthBtn');
+      if (citizensNavLink) {
+        citizensNavLink.addEventListener('click', openCitizensSection);
+      }
+      if (citizensAuthBtn) {
+        citizensAuthBtn.addEventListener('click', function (e) {
+          e.preventDefault();
+          openRegister();
+        });
+      }
 
       registerModal.addEventListener('click', function (e) {
         if (e.target === registerModal) closeRegister();
@@ -2973,6 +3264,8 @@
 
       if (window.location.hash === '#register') {
         openRegister();
+      } else if (window.location.hash === '#citizens') {
+        openCitizensSection();
       } else if (window.location.hash === '#constitution') {
         openConstitution();
       } else if (isApplyHash(window.location.hash)) {
@@ -2981,6 +3274,7 @@
 
       window.addEventListener('hashchange', function () {
         if (window.location.hash === '#register') openRegister();
+        else if (window.location.hash === '#citizens') openCitizensSection();
         else if (isApplyHash(window.location.hash)) {
           if (registerModal.classList.contains('open')) closeRegister();
           handleApplyHash();
@@ -2992,6 +3286,7 @@
 
       window.addEventListener('popstate', function () {
         if (window.location.hash === '#register') openRegister();
+        else if (window.location.hash === '#citizens') openCitizensSection();
         else if (isApplyHash(window.location.hash)) {
           if (registerModal.classList.contains('open')) closeRegister();
           handleApplyHash();
@@ -3002,6 +3297,18 @@
           modal.classList.remove('open');
           document.body.classList.remove('modal-open');
           modal.hidden = true;
+        }
+      });
+
+      updateRegisterLinkLabel();
+      refreshCitizensSection();
+
+      window.addEventListener('quazar:email-verified', function () {
+        updateRegisterLinkLabel();
+        refreshCitizensSection();
+        if (window.location.hash === '#citizens') {
+          closeRegister();
+          scrollToCitizens();
         }
       });
 
@@ -3867,9 +4174,12 @@
       }
 
       function parseHash() {
-        var path = normalizeApplyPath(location.hash || '#apply');
+        // Empty hash = landing page, not the apply portal.
+        var raw = location.hash || '';
+        if (!raw || raw === '#') return null;
+        var path = normalizeApplyPath(raw);
         var parts = path.split('/').filter(Boolean);
-        if (!parts.length) return { route: 'apply' };
+        if (!parts.length) return null;
         if (parts[0] !== 'apply') return null;
         if (parts.length === 1) return { route: 'apply' };
         // Old #apply/verify/:id links → status (verify step removed)
@@ -3927,7 +4237,6 @@
           });
         }
         showMessage('Сначала войдите с email — поле нельзя заполнить вручную.', 'info');
-        openLoginForApply();
       }
 
       function renderKindSwitcher(kind) {

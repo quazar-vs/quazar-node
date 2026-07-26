@@ -26,7 +26,9 @@ use crate::blockchain::{
 use crate::models::Event;
 use crate::pending;
 use crate::register_verify::{
-    consume_verification_code, issue_verification_code, is_valid_email, normalize_email,
+    clear_recent_email_verification, consume_verification_code, email_belongs_to_citizen,
+    issue_verification_code, is_valid_email, normalize_email, peek_recent_email_verification,
+    citizen_use_app_forbidden,
 };
 use crate::response::ApiResponse;
 use crate::types::{is_role_candidacy_target, CandidateType};
@@ -1390,6 +1392,118 @@ pub async fn public_stats_handler(
         StatusCode::OK,
         Json(ApiResponse::success(PublicStatsResponse {
             citizens_with_passport: count,
+        })),
+    )
+        .into_response()
+}
+
+/// Read-only citizen directory for verified-email web sessions (candidates).
+/// Safe fields only: id, name, role — no email, keys, or secrets.
+#[derive(Debug, Deserialize)]
+pub struct ListCitizensSessionRequest {
+    pub email: String,
+    /// Must be true; server still requires a live register-verify mark (peek).
+    #[serde(default)]
+    pub email_already_verified: Option<bool>,
+}
+
+#[derive(Debug, Serialize, sqlx::FromRow)]
+struct PublicCitizenRow {
+    id: String,
+    name: String,
+    role: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicCitizenItem {
+    pub id: String,
+    pub name: String,
+    pub role: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PublicCitizensResponse {
+    pub total: usize,
+    pub citizens: Vec<PublicCitizenItem>,
+}
+
+/// POST /api/citizens — list passport holders for a verified email session.
+///
+/// Auth mirrors `/api/my-applications`: `email` + `email_already_verified: true` and a live
+/// in-memory register-verify mark. Citizens are refused (`citizen_use_app`).
+pub async fn session_citizens_handler(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<ListCitizensSessionRequest>,
+) -> impl IntoResponse {
+    let email = normalize_email(&req.email);
+    if !is_valid_email(&email) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error("Введите корректный email-адрес")),
+        )
+            .into_response();
+    }
+
+    match email_belongs_to_citizen(&state.db, &email).await {
+        Ok(true) => {
+            clear_recent_email_verification(&email);
+            return citizen_use_app_forbidden();
+        }
+        Ok(false) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "failed to check citizen email for /api/citizens");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Database error")),
+            )
+                .into_response();
+        }
+    }
+
+    let client_claims_verified = req.email_already_verified.unwrap_or(false);
+    if !client_claims_verified || !peek_recent_email_verification(&email) {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ApiResponse::error(
+                "Сначала подтвердите email через вход на сайте, затем повторите запрос",
+            )),
+        )
+            .into_response();
+    }
+
+    let rows = match sqlx::query_as::<_, PublicCitizenRow>(
+        "SELECT id, name, role FROM citizens \
+         WHERE passport_issued = TRUE \
+         ORDER BY name ASC",
+    )
+    .fetch_all(&state.db)
+    .await
+    {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to list session citizens");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(ApiResponse::error("Database error")),
+            )
+                .into_response();
+        }
+    };
+
+    let citizens: Vec<PublicCitizenItem> = rows
+        .into_iter()
+        .map(|r| PublicCitizenItem {
+            id: r.id,
+            name: r.name,
+            role: r.role,
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success(PublicCitizensResponse {
+            total: citizens.len(),
+            citizens,
         })),
     )
         .into_response()

@@ -105,6 +105,7 @@ fn is_public_application_path(path: &str) -> bool {
     path == "/api/application"
         || path.starts_with("/api/application/")
         || path == "/api/my-applications"
+        || path == "/api/citizens"
         || path == "/api/chat/candidate/messages"
         || path == "/api/chat/candidate/send"
         || path == "/api/mayor/application"
@@ -119,6 +120,7 @@ fn is_public_abuse_path(path: &str) -> bool {
     path.starts_with("/api/channel/")
         || path == "/chat/admin/send"
         || path == "/api/search"
+        || path == "/api/public/stats"
 }
 
 fn rate_limit_exceeded(path: &str, ip: &str) -> Response {
