@@ -2,6 +2,37 @@
 
 Блокчейн-реестр на Rust (Axum + PostgreSQL) с P2P-синхронизацией блоков и распределённым block producer.
 
+
+## Рекомендуемый запуск (без Docker Compose plugin) — QUA-11
+
+На VPS и локально предпочтителен plain `docker run` (Compose plugin может отсутствовать):
+
+```bash
+cp .env.example .env   # задайте секреты
+./scripts/run-stack-docker.sh up
+./scripts/run-stack-docker.sh smoke
+```
+
+| ресурс | имя по умолчанию | порт хоста |
+|--------|------------------|------------|
+| Docker network | `quazar-net` | — |
+| PostgreSQL | `quazar-postgres` | `127.0.0.1:5432` |
+| quazar-node | `quazar-node` | `127.0.0.1:8080` |
+
+Имена/порты переопределяются через `.env`. Согласовано с [QUA-10](/QUA/issues/QUA-10).
+
+### Deprecated: installers + Compose
+
+Не используйте на VPS без Compose plugin:
+
+| файл | чем заменить |
+|------|--------------|
+| `quazar_install.sh` | `scripts/run-stack-docker.sh` |
+| `quazar_install_complete.sh` | `scripts/run-stack-docker.sh` |
+| сгенерированный `docker-compose.yml` | тот же скрипт |
+
+Legacy имя контейнера в installers — `quazar_registry`. Контракт — **`quazar-node`** / **`quazar-postgres`**.
+
 ## Быстрый старт
 
 ```bash
