@@ -4,6 +4,14 @@ version = "0.7.0"
 edition = "2021"
 publish = false
 
+[[bin]]
+name = "quazar_registry"
+path = "src/main.rs"
+
+[[bin]]
+name = "quazar_crypto_agent"
+path = "src/bin/crypto_agent.rs"
+
 [dependencies]
 axum = { version = "0.7", features = ["ws"] }
 tokio = { version = "1", features = ["full"] }
@@ -16,7 +24,7 @@ sha2 = "0.10"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tower = { version = "0.4", features = ["limit"] }
 tower-http = { version = "0.7", features = ["auth", "limit", "trace", "cors", "compression-gzip"] }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 dotenvy = "0.15"
 governor = "0.6"
 tracing = "0.1"

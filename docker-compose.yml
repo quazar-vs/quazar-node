@@ -1,6 +1,3 @@
-version: '3.8'
-
-# Secrets must come from .env (see .env.example). No weak inlined defaults.
 services:
   postgres:
     image: postgres:16-alpine
@@ -23,7 +20,6 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
-      # VPN SSH pubkeys written by node into host authorized_keys
       - /var/lib/quazar/tunnel:/var/lib/quazar/tunnel
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
@@ -44,7 +40,6 @@ services:
       QUAZAR_NETWORK_URL: ${QUAZAR_NETWORK_URL:-}
       QUAZAR_BOOTSTRAP_PEERS: ${QUAZAR_BOOTSTRAP_PEERS:-}
       RUST_LOG: ${RUST_LOG:-info}
-      # External SMTP (outbound only; no internal mailserver)
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}
       SMTP_USER: ${SMTP_USER:-}
@@ -54,7 +49,6 @@ services:
       SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Квазар}
       SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-false}
       NOTIFY_EMAIL: ${NOTIFY_EMAIL:-}
-      # Legacy Gmail SMTP aliases (used only if SMTP_* unset)
       GMAIL_USER: ${GMAIL_USER:-}
       GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
       GMAIL_FROM_NAME: ${GMAIL_FROM_NAME:-}
@@ -70,6 +64,8 @@ services:
       SSH_TUNNEL_REMOTE_API_HOST: ${SSH_TUNNEL_REMOTE_API_HOST:-127.0.0.1}
       SSH_TUNNEL_REMOTE_API_PORT: ${SSH_TUNNEL_REMOTE_API_PORT:-8080}
       VPN_AUTHORIZED_KEYS_PATH: ${VPN_AUTHORIZED_KEYS_PATH:-}
+      SVOD_VIDEO_CREATE_REWARD: ${SVOD_VIDEO_CREATE_REWARD:-50}
+      SVOD_VIDEO_VIEW_REWARD: ${SVOD_VIDEO_VIEW_REWARD:-10}
     depends_on:
       postgres:
         condition: service_healthy
@@ -79,6 +75,18 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+
+  crypto-agent:
+    build: .
+    profiles: ["crypto-agent"]
+    restart: unless-stopped
+    command: ["/app/quazar_crypto_agent"]
+    environment:
+      CRYPTO_AGENT_EXCHANGE: ${CRYPTO_AGENT_EXCHANGE:-binance}
+      CRYPTO_AGENT_SYMBOLS: ${CRYPTO_AGENT_SYMBOLS:-BTCUSDT,ETHUSDT}
+      CRYPTO_AGENT_INTERVAL_SECS: ${CRYPTO_AGENT_INTERVAL_SECS:-30}
+      CRYPTO_AGENT_ALERT_PCT: ${CRYPTO_AGENT_ALERT_PCT:-2.0}
+      RUST_LOG: ${CRYPTO_AGENT_RUST_LOG:-info}
 
   hermes:
     image: nousresearch/hermes-agent:latest
@@ -94,12 +102,13 @@ services:
       HERMES_LOG_LEVEL: info
     volumes:
       - /root/.hermes:/opt/data
+      - /opt/quazar:/opt/quazar:ro
+      - /var/www/quazar:/var/www/quazar:ro
     deploy:
       resources:
         limits:
           memory: 4G
           cpus: "2.0"
-
 
 volumes:
   quazar_pg_data:

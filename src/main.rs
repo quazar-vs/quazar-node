@@ -47,6 +47,7 @@ mod projection;
 mod referendum;
 mod register_verify;
 mod response;
+mod reward_svod;
 mod tunnel;
 mod vpn;
 mod svod;
@@ -157,6 +158,11 @@ async fn main() {
     sync_test_passwords(&pool)
         .await
         .expect("Failed to sync test citizen passwords");
+    if let Err(e) = reward_svod::ensure_rewards_seeded(&pool).await {
+        tracing::warn!(error = %e, "failed to seed svod reward defaults");
+    } else {
+        tracing::info!("svod rewards seeded / verified");
+    }
     let pending_count = pending::count(&pool).await.unwrap_or(0);
     tracing::info!(pending_events = pending_count, "PostgreSQL connected");
 
@@ -341,12 +347,19 @@ async fn main() {
         .route("/exchange/orders", get(exchange::get_orders))
         .route("/exchange/balance", get(exchange::get_balance_handler))
         .route("/exchange/balance/add", post(exchange::add_balance))
+        .route("/api/channel/videos", post(reward_svod::create_video_handler))
+        .route(
+            "/api/channel/videos/:id/view",
+            post(reward_svod::view_video_handler),
+        )
         .route("/svod", get(svod::get_catalog_handler))
+        .route("/svod/rewards", get(svod::get_rewards_handler))
         .route("/svod/categories", get(svod::get_categories_handler))
         .route("/svod/service/:code", get(svod::get_service_handler))
         .route("/svod/admin/service", post(svod::create_service_handler))
         .route("/svod/admin/service/:code", put(svod::update_service_handler))
         .route("/svod/admin/service/:code", delete(svod::disable_service_handler))
+        .route("/svod/admin/reward", post(reward_svod::update_reward_handler))
         .route("/auth/set-password", post(set_password_handler))
         .route("/keys", post(keys::create_api_key))
         .route("/keys", get(keys::list_api_keys))
