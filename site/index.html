@@ -1746,7 +1746,7 @@
         <a href="#about">О нас</a>
         <a href="#citizens" id="citizensNavLink">Граждане</a>
         <a href="#chat">Чат</a>
-        <a href="#constitution" class="constitution-link">Конституция</a>
+        <a href="/constitution.html" class="constitution-link">Конституция</a>
         <a href="#apply">Заявки</a>
         <a href="#register" class="nav-register" id="registerLink">Авторизоваться</a>
       </nav>
@@ -1768,7 +1768,7 @@
           </div>
           <div class="hero-cta">
             <a href="#apply" class="btn btn-primary cta-apply">Подать заявку</a>
-            <a href="#constitution" class="btn btn-secondary constitution-link">Читать Конституцию</a>
+            <a href="/constitution.html" class="btn btn-secondary constitution-link">Читать Конституцию</a>
           </div>
         </div>
       </div>
@@ -1981,7 +1981,7 @@
         </div>
         <div class="footer-links">
           <a href="https://github.com/quazar-vs/quazar-node" target="_blank" rel="noopener">GitHub</a>
-          <a href="#constitution" class="constitution-link">Конституция</a>
+          <a href="/constitution.html" class="constitution-link">Конституция</a>
           <a href="#apply">Портал заявок</a>
           <a href="mailto:quazarvs@gmail.com">quazarvs@gmail.com</a>
         </div>
@@ -2008,7 +2008,7 @@
             <div class="form-group">
               <div class="checkbox-group">
                 <input type="checkbox" id="regConsent" name="consent" value="yes" required>
-                <label for="regConsent">Я согласен(на) с <a href="#constitution" class="constitution-link">Конституцией Квазара</a> и обработкой данных</label>
+                <label for="regConsent">Я согласен(на) с <a href="/constitution.html" class="constitution-link" target="_blank" rel="noopener noreferrer">Конституцией Квазара</a> и обработкой данных</label>
               </div>
               <div class="error-msg" id="regConsentError">Необходимо дать согласие</div>
             </div>
@@ -2056,7 +2056,7 @@
         <div class="constitution-content" id="constitutionContent" hidden></div>
       </div>
       <div class="constitution-footer">
-        Текст встроен · обновлено из GitHub · <a href="https://github.com/successful707440/constitution" target="_blank" rel="noopener noreferrer">репозиторий</a>
+        <a href="/constitution.html">На сайте</a> · <a href="/CONSTITUTION_QUAZAR.md">CONSTITUTION_QUAZAR.md</a> · <a href="https://github.com/successful707440/constitution" target="_blank" rel="noopener noreferrer">репозиторий</a>
       </div>
     </div>
   </div>
@@ -2488,8 +2488,22 @@
         }, 300);
       }
 
+      function goToConstitutionFile() {
+        nav.classList.remove('open');
+        menuToggle.textContent = '☰';
+        window.location.href = '/constitution.html';
+      }
+
       document.querySelectorAll('.constitution-link').forEach(function (link) {
-        link.addEventListener('click', openConstitution);
+        link.addEventListener('click', function (e) {
+          var href = link.getAttribute('href') || '';
+          if (href.indexOf('constitution.html') !== -1 || href.indexOf('CONSTITUTION_QUAZAR.md') !== -1) {
+            nav.classList.remove('open');
+            menuToggle.textContent = '☰';
+            return;
+          }
+          openConstitution(e);
+        });
       });
 
       closeBtn.addEventListener('click', closeConstitution);
@@ -3267,7 +3281,7 @@
       } else if (window.location.hash === '#citizens') {
         openCitizensSection();
       } else if (window.location.hash === '#constitution') {
-        openConstitution();
+        goToConstitutionFile();
       } else if (isApplyHash(window.location.hash)) {
         handleApplyHash();
       }
@@ -3280,7 +3294,7 @@
           handleApplyHash();
         }
         else if (registerModal.classList.contains('open')) closeRegister();
-        else if (window.location.hash === '#constitution') openConstitution();
+        else if (window.location.hash === '#constitution') goToConstitutionFile();
         else if (modal.classList.contains('open')) closeConstitution();
       });
 
@@ -3292,7 +3306,7 @@
           handleApplyHash();
         }
         else if (registerModal.classList.contains('open')) closeRegister();
-        else if (window.location.hash === '#constitution') openConstitution();
+        else if (window.location.hash === '#constitution') goToConstitutionFile();
         else if (modal.classList.contains('open')) {
           modal.classList.remove('open');
           document.body.classList.remove('modal-open');
