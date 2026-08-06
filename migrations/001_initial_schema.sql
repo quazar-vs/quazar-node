@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS offers (
     id TEXT PRIMARY KEY,
     seller TEXT NOT NULL,
     service TEXT NOT NULL,
+    svod_code TEXT,
     price BIGINT NOT NULL,
     quantity BIGINT NOT NULL,
     status TEXT NOT NULL,
