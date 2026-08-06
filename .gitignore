@@ -3,6 +3,7 @@
 *.pid
 *.log
 .env
+coinex-bot.env
 agent/.env
 agent/state.json
 *.backup

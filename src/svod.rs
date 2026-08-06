@@ -338,8 +338,28 @@ fn require_aiya(auth: &AuthContext) -> SvodResult<()> {
 pub async fn get_catalog_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse>, SvodError> {
-    let items = get_catalog(&state.db, true).await?;
-    Ok(Json(ApiResponse::success(items)))
+    let services = get_catalog(&state.db, true).await?;
+    let rewards = crate::reward_svod::list_rewards_public(&state.db)
+        .await
+        .map_err(|e| SvodError::Database(e.to_string()))?;
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "currency": "КВАЗИ",
+        "services": services,
+        "rewards": rewards,
+    }))))
+}
+
+/// GET /svod/rewards — reward section of the same Svod (services stay under /svod).
+pub async fn get_rewards_handler(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<ApiResponse>, SvodError> {
+    let rewards = crate::reward_svod::list_rewards_public(&state.db)
+        .await
+        .map_err(|e| SvodError::Database(e.to_string()))?;
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "currency": "КВАЗИ",
+        "rewards": rewards,
+    }))))
 }
 
 pub async fn get_categories_handler(

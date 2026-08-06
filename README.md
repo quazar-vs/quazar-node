@@ -125,7 +125,7 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 - `/initiative/*` — гражданские инициативы (законопроекты): предложение, голосование, автоматическое принятие при 5% «За»
 - `/referendum/*` — референдумы: объявление Айей, голосование граждан за/против отмены решения
 - `/chat/*` — чат граждан (per-node SQL, без блокчейна)
-- `/svod/*` — **Свод Оснований для Созидания** (реестр услуг/товов для биржи, валюта КВАЗИ / QZ)
+- `/svod/*` — **Свод Оснований для Созидания** (услуги/товары для биржи + вознаграждения граждан, валюта КВАЗИ / QZ)
 - `/exchange/*` — биржа услуг (предложения только по услугам из Свода)
 - `POST /keys`, `GET /keys`, `POST /keys/revoke` — управление API-ключами (Aiya / Founder), хранятся в PostgreSQL
 - `POST /keys/sync` — выровнять `api_keys.role` по реестру `citizens` (Aiya / Founder); возвращает `{ "updated": N }`
@@ -313,21 +313,29 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 
 ### Свод Оснований для Созидания (`/svod`)
 
-Государство (роль **Aiya**) управляет реестром услуг; граждане просматривают каталог. Биржа принимает предложения только по кодам из Свода; `base_price` — минимальная цена в **КВАЗИ (QZ)**.
+Государство (роль **Aiya**) управляет реестром услуг и ставками вознаграждений граждан; граждане просматривают каталог. Биржа принимает предложения только по кодам из Свода; `base_price` — минимальная цена в **КВАЗИ (QZ)**. Вознаграждения за действия (видео и т.п.) — раздел того же Свода (`rewards` в ответе `/svod`, таблица `svod_rewards`).
 
 | Эндпоинт | Метод | Права |
 |----------|-------|-------|
-| `/svod` | GET | API key (любая роль) |
+| `/svod` | GET | API key (любая роль) — `services` + `rewards` |
+| `/svod/rewards` | GET | API key — только раздел вознаграждений |
 | `/svod/categories` | GET | API key |
 | `/svod/service/:code` | GET | API key |
 | `/svod/admin/service` | POST | Aiya / Founder |
 | `/svod/admin/service/:code` | PUT | Aiya / Founder |
 | `/svod/admin/service/:code` | DELETE | Aiya / Founder (отключить услугу) |
+| `/svod/admin/reward` | POST | Aiya / Founder — обновить ставку (`action`, `reward`) |
 
 ```bash
-# Каталог услуг
+# Каталог Свода (услуги + вознаграждения)
 curl -s http://localhost:8080/svod \
   -H "Authorization: Bearer $QUAZAR_API_KEY" | jq .
+
+# Обновить вознаграждение (Aiya): video_create / video_view
+curl -s -X POST http://localhost:8080/svod/admin/reward \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"action":"video_create","reward":50}' | jq .
 
 # Добавить услугу (Aiya)
 curl -s -X POST http://localhost:8080/svod/admin/service \
@@ -350,6 +358,7 @@ curl -s -X POST http://localhost:8080/exchange/offer \
 ```
 
 После миграции `004_service_catalog.sql` доступны seed-данные: категория `IT`, услуга `WEB_DEV` (base_price **100 QZ**).
+После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
 
 После миграции `005_candidacies.sql` доступны таблицы `candidacies` и `candidacy_votes`.
 
