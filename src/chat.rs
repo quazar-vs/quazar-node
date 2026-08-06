@@ -315,8 +315,13 @@ fn clamp_limit(limit: Option<i64>) -> i64 {
 }
 
 async fn load_citizen(pool: &PgPool, citizen_id: &str) -> Result<(String, String, String), ChatError> {
+    // Prefer display_name for chat authorship when set (e.g. "Секретарь Квазар").
     let row: Option<(String, String, String)> = sqlx::query_as(
-        "SELECT id, name, status FROM citizens WHERE id = $1",
+        r#"SELECT id,
+                  COALESCE(NULLIF(BTRIM(display_name), ''), name) AS name,
+                  status
+           FROM citizens
+           WHERE id = $1"#,
     )
     .bind(citizen_id)
     .fetch_optional(pool)
