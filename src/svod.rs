@@ -384,6 +384,22 @@ pub async fn create_service_handler(
 ) -> Result<Json<ApiResponse>, SvodError> {
     require_aiya(&auth)?;
     let item = create_service(&state.db, req).await?;
+    let _ = crate::chain_events::emit_signed_event(
+        &state,
+        "SvodServiceCreated",
+        &auth.citizen_name,
+        "Svod service created",
+        &format!("created {}", item.code),
+        Some(&format!("svod_create_{}", item.code)),
+        serde_json::json!({
+            "code": item.code,
+            "name": item.name,
+            "base_price": item.base_price,
+            "min_quantity": item.min_quantity,
+            "max_quantity": item.max_quantity,
+        }),
+    )
+    .await;
     Ok(Json(ApiResponse::success(item)))
 }
 
@@ -395,6 +411,25 @@ pub async fn update_service_handler(
 ) -> Result<Json<ApiResponse>, SvodError> {
     require_aiya(&auth)?;
     let item = update_service(&state.db, &code, req).await?;
+    let _ = crate::chain_events::emit_signed_event(
+        &state,
+        "SvodServiceUpdated",
+        &auth.citizen_name,
+        "Svod service updated",
+        &format!("updated {}", item.code),
+        Some(&format!(
+            "svod_update_{}_{}",
+            item.code,
+            chrono::Utc::now().timestamp()
+        )),
+        serde_json::json!({
+            "code": item.code,
+            "name": item.name,
+            "base_price": item.base_price,
+            "is_active": item.is_active,
+        }),
+    )
+    .await;
     Ok(Json(ApiResponse::success(item)))
 }
 
@@ -405,6 +440,23 @@ pub async fn disable_service_handler(
 ) -> Result<Json<ApiResponse>, SvodError> {
     require_aiya(&auth)?;
     let item = toggle_service(&state.db, &code, false).await?;
+    let _ = crate::chain_events::emit_signed_event(
+        &state,
+        "SvodServiceDeactivated",
+        &auth.citizen_name,
+        "Svod service deactivated",
+        &format!("deactivated {}", item.code),
+        Some(&format!(
+            "svod_disable_{}_{}",
+            item.code,
+            chrono::Utc::now().timestamp()
+        )),
+        serde_json::json!({
+            "code": item.code,
+            "is_active": item.is_active,
+        }),
+    )
+    .await;
     Ok(Json(ApiResponse::success(serde_json::json!({
         "message": format!("Service {} disabled", code),
         "service": item

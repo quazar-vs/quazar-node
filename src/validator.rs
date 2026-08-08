@@ -460,6 +460,39 @@ impl EventValidator {
                 Self::require_str(data, "restored_status")?;
                 Ok(())
             }
+            QuazarEventType::ExchangeRequestCreated
+            | QuazarEventType::ExchangeRequestVerified
+            | QuazarEventType::ExchangeRequestRejected => {
+                Self::require_str(data, "request_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
+            QuazarEventType::ExchangeListingOpened => {
+                Self::require_str(data, "listing_id")?;
+                Self::require_str(data, "request_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
+            QuazarEventType::ExchangeDealOpened
+            | QuazarEventType::ExchangeDealCancelled
+            | QuazarEventType::ExchangeDeliveryConfirmed
+            | QuazarEventType::ExchangeSettled => {
+                Self::require_str(data, "deal_id")?;
+                Self::require_str(data, "listing_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
+            QuazarEventType::ExchangeInventoryAdjusted => {
+                Self::require_str(data, "citizen_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
+            QuazarEventType::SvodServiceCreated
+            | QuazarEventType::SvodServiceUpdated
+            | QuazarEventType::SvodServiceDeactivated => {
+                Self::require_str(data, "code")?;
+                Ok(())
+            }
         }
     }
 

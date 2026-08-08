@@ -23,6 +23,7 @@ mod blockchain;
 mod candidacy;
 mod candidates;
 mod channel;
+mod chain_events;
 mod chat;
 mod candidate_chat;
 mod client_ip;
@@ -340,12 +341,25 @@ async fn main() {
         .route("/votes", post(votes::create_vote))
         .route("/votes", get(votes::list_votes))
         .route("/votes/finalize", post(votes::finalize_vote))
-        .route("/exchange/offer", post(exchange::create_offer))
-        .route("/exchange/offers", get(exchange::get_offers))
-        .route("/exchange/offer/:id", get(exchange::get_offer_by_id))
-        .route("/exchange/offer/:id", delete(exchange::cancel_offer))
-        .route("/exchange/order", post(exchange::create_order))
-        .route("/exchange/orders", get(exchange::get_orders))
+        .route("/exchange/requests", post(exchange::create_request))
+        .route("/exchange/requests", get(exchange::list_requests))
+        .route(
+            "/exchange/requests/:id/sb-verify",
+            post(exchange::sb_verify_request),
+        )
+        .route("/exchange/listings", get(exchange::list_listings))
+        .route("/exchange/listings/:id/buy", post(exchange::buy_listing))
+        .route("/exchange/deals/:id/cancel", post(exchange::cancel_deal))
+        .route(
+            "/exchange/security/tasks",
+            get(exchange::list_security_tasks),
+        )
+        .route(
+            "/exchange/security/tasks/:id/confirm",
+            post(exchange::confirm_delivery),
+        )
+        .route("/exchange/inventory", get(exchange::get_inventory_handler))
+        .route("/exchange/inventory", post(exchange::adjust_inventory))
         .route("/exchange/balance", get(exchange::get_balance_handler))
         .route("/exchange/balance/add", post(exchange::add_balance))
         .route("/api/channel/videos", post(reward_svod::create_video_handler))

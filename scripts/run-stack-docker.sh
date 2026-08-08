@@ -183,7 +183,7 @@ Smoke (after node is healthy):
 Notes:
   - Do not hit Hermes https://quazar.website/health from this script.
   - Current quazar_registry uses SQLite; Postgres is a sidecar for [QUA-10] alignment.
-  - /exchange/offers and /svod are not in this binary yet — expect 404 until exchange routes land.
+  - Exchange: /exchange/requests, /exchange/listings, /exchange/security/tasks, /svod
 EOF
 }
 

@@ -594,6 +594,13 @@ impl AuthContext {
             && matches!(self.role, Role::Founder | Role::Aiya)
     }
 
+    /// Exchange Security (СБ): verify sell requests and confirm delivery. Not Aiya deal-flow.
+    pub fn can_exchange_security(&self) -> bool {
+        self.has_system_access()
+            && !self.role.is_agent()
+            && matches!(self.role, Role::Guardian | Role::Founder)
+    }
+
     /// Update citizen status — Founder and Aiya only.
     pub fn can_update_citizen_status(&self) -> bool {
         self.has_system_access()

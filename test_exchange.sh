@@ -1,7 +1,6 @@
 #!/bin/bash
-
-echo "=== Тестирование модуля биржи Quazar ==="
-echo
+# Smoke: state-mediated exchange (sell → SB verify → buy → SB confirm)
+set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 if [ -f "$SCRIPT_DIR/.env" ]; then
@@ -11,60 +10,55 @@ if [ -f "$SCRIPT_DIR/.env" ]; then
   set +a
 fi
 
-BASE_URL="http://localhost:8080"
-API_KEY="${QUAZAR_API_KEY:?QUAZAR_API_KEY not set — add it to .env}"
+BASE_URL="${BASE_URL:-http://localhost:8080}"
+# Prefer separate keys if set; else same key for all steps (must be Guardian/Aiya capable).
+SELLER_KEY="${QUAZAR_SELLER_API_KEY:-${QUAZAR_API_KEY:?QUAZAR_API_KEY not set}}"
+BUYER_KEY="${QUAZAR_BUYER_API_KEY:-$SELLER_KEY}"
+SB_KEY="${QUAZAR_SB_API_KEY:-$SELLER_KEY}"
+AIYA_KEY="${QUAZAR_AIYA_API_KEY:-$SELLER_KEY}"
 
-echo "1. Добавляем баланс для пользователя testcitizen (Aiya)"
-curl -s -X POST "$BASE_URL/exchange/balance/add" \
-  -H "X-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"citizen_id": "testcitizen", "amount": 1000}' | jq '.'
-echo
+auth() { echo "Authorization: Bearer $1"; }
 
-echo "1b. Просмотр Сводa (каталог услуг)"
-curl -s -H "X-API-Key: $API_KEY" \
-  "$BASE_URL/svod" | jq '.'
-echo
+echo "=== Quazar exchange (state-mediated) ==="
 
-echo "2. Создаем предложение от testcitizen (услуга из Свода WEB_DEV, мин. цена 100 QZ)"
-curl -s -X POST "$BASE_URL/exchange/offer" \
-  -H "X-API-Key: $API_KEY" \
-  -H "Content-Type: application/json" \
-  -d '{"svod_code": "WEB_DEV", "price": 100, "quantity": 5}' | jq '.'
-echo
+echo "1. Seed inventory for seller (requires SB/Aiya)"
+curl -sS -X POST "$BASE_URL/exchange/inventory" \
+  -H "$(auth "$AIYA_KEY")" -H "Content-Type: application/json" \
+  -d "{\"citizen_id\": \"${SELLER_CITIZEN_ID:-testcitizen}\", \"svod_code\": \"WEB_DEV\", \"quantity\": 100}" | jq .
 
-echo "3. Получаем все активные предложения"
-curl -s -H "X-API-Key: $API_KEY" \
-  "$BASE_URL/exchange/offers" | jq '.'
-echo
+echo "2. Fund buyer"
+curl -sS -X POST "$BASE_URL/exchange/balance/add" \
+  -H "$(auth "$AIYA_KEY")" -H "Content-Type: application/json" \
+  -d "{\"citizen_id\": \"${BUYER_CITIZEN_ID:-buyercitizen}\", \"amount\": 20000}" | jq .
 
-echo "4. Проверяем баланс testcitizen"
-curl -s -H "X-API-Key: $API_KEY" \
-  "$BASE_URL/exchange/balance" | jq '.'
-echo
+echo "3. Seller creates sell request qty=100"
+REQ=$(curl -sS -X POST "$BASE_URL/exchange/requests" \
+  -H "$(auth "$SELLER_KEY")" -H "Content-Type: application/json" \
+  -d '{"side":"sell","svod_code":"WEB_DEV","quantity":100}')
+echo "$REQ" | jq .
+REQ_ID=$(echo "$REQ" | jq -r '.data.id')
 
-echo "5. Создаем заказ (покупаем)"
-# Получаем ID предложения
-OFFER_ID=$(curl -s -H "X-API-Key: $API_KEY" "$BASE_URL/exchange/offers" | jq -r '.data[0].id')
-if [ "$OFFER_ID" != "null" ] && [ -n "$OFFER_ID" ]; then
-  echo "Найден offer_id: $OFFER_ID"
-  curl -s -X POST "$BASE_URL/exchange/order" \
-    -H "X-API-Key: $API_KEY" \
-    -H "Content-Type: application/json" \
-    -d "{\"offer_id\": \"$OFFER_ID\", \"quantity\": 1}" | jq '.'
-else
-  echo "Нет активных предложений для покупки"
-fi
-echo
+echo "4. SB verifies request"
+VER=$(curl -sS -X POST "$BASE_URL/exchange/requests/$REQ_ID/sb-verify" \
+  -H "$(auth "$SB_KEY")" -H "Content-Type: application/json" \
+  -d '{"approve":true}')
+echo "$VER" | jq .
+LISTING_ID=$(echo "$VER" | jq -r '.data.listing_id')
 
-echo "6. Проверяем баланс после покупки"
-curl -s -H "X-API-Key: $API_KEY" \
-  "$BASE_URL/exchange/balance" | jq '.'
-echo
+echo "5. Buyer takes 15 units"
+DEAL=$(curl -sS -X POST "$BASE_URL/exchange/listings/$LISTING_ID/buy" \
+  -H "$(auth "$BUYER_KEY")" -H "Content-Type: application/json" \
+  -d '{"quantity":15}')
+echo "$DEAL" | jq .
+TASK_ID=$(echo "$DEAL" | jq -r '.data.security_task_id')
 
-echo "7. Получаем заказы пользователя"
-curl -s -H "X-API-Key: $API_KEY" \
-  "$BASE_URL/exchange/orders" | jq '.'
-echo
+echo "6. SB confirms delivery"
+curl -sS -X POST "$BASE_URL/exchange/security/tasks/$TASK_ID/confirm" \
+  -H "$(auth "$SB_KEY")" -H "Content-Type: application/json" \
+  -d '{}' | jq .
 
-echo "=== Тестирование завершено ==="
+echo "7. Balances"
+curl -sS "$BASE_URL/exchange/balance" -H "$(auth "$BUYER_KEY")" | jq .
+curl -sS "$BASE_URL/exchange/balance" -H "$(auth "$SELLER_KEY")" | jq .
+
+echo "=== done ==="

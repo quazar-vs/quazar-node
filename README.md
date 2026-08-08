@@ -350,18 +350,17 @@ curl -s -X POST http://localhost:8080/svod/admin/service \
     "max_quantity": 20
   }' | jq .
 
-# Предложение на бирже (svod_code обязателен, price >= base_price)
-curl -s -X POST http://localhost:8080/exchange/offer \
-  -H "Authorization: Bearer test_citizen_key_2026" \
+# Биржа: заявка на продажу → СБ verify → публичный лот
+curl -s -X POST http://localhost:8080/exchange/requests \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{"svod_code": "WEB_DEV", "price": 100, "quantity": 2}' | jq .
+  -d '{"side":"sell","svod_code":"WEB_DEV","quantity":2}' | jq .
 ```
 
 После миграции `004_service_catalog.sql` доступны seed-данные: категория `IT`, услуга `WEB_DEV` (base_price **100 QZ**).
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
-
+После миграции `044_exchange_state_mediated.sql` — биржа через государство/СБ (P2P offers/orders удалены).
 После миграции `005_candidacies.sql` доступны таблицы `candidacies` и `candidacy_votes`.
-
 После миграции `008_initiatives_referendums.sql` доступны таблицы `initiatives`, `initiative_votes`, `referendums`, `referendum_votes`.
 
 ### Чат (`/chat`)

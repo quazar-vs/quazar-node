@@ -189,6 +189,18 @@ pub enum QuazarEventType {
     NodeStarted,
     MayorConfirmed,
     MayorApplicationTimedOut,
+    ExchangeRequestCreated,
+    ExchangeRequestVerified,
+    ExchangeRequestRejected,
+    ExchangeListingOpened,
+    ExchangeDealOpened,
+    ExchangeDealCancelled,
+    ExchangeDeliveryConfirmed,
+    ExchangeSettled,
+    ExchangeInventoryAdjusted,
+    SvodServiceCreated,
+    SvodServiceUpdated,
+    SvodServiceDeactivated,
 }
 
 impl std::fmt::Display for QuazarEventType {
@@ -254,6 +266,18 @@ impl QuazarEventType {
             "NodeStarted" => Ok(QuazarEventType::NodeStarted),
             "MayorConfirmed" => Ok(QuazarEventType::MayorConfirmed),
             "MayorApplicationTimedOut" => Ok(QuazarEventType::MayorApplicationTimedOut),
+            "ExchangeRequestCreated" => Ok(QuazarEventType::ExchangeRequestCreated),
+            "ExchangeRequestVerified" => Ok(QuazarEventType::ExchangeRequestVerified),
+            "ExchangeRequestRejected" => Ok(QuazarEventType::ExchangeRequestRejected),
+            "ExchangeListingOpened" => Ok(QuazarEventType::ExchangeListingOpened),
+            "ExchangeDealOpened" => Ok(QuazarEventType::ExchangeDealOpened),
+            "ExchangeDealCancelled" => Ok(QuazarEventType::ExchangeDealCancelled),
+            "ExchangeDeliveryConfirmed" => Ok(QuazarEventType::ExchangeDeliveryConfirmed),
+            "ExchangeSettled" => Ok(QuazarEventType::ExchangeSettled),
+            "ExchangeInventoryAdjusted" => Ok(QuazarEventType::ExchangeInventoryAdjusted),
+            "SvodServiceCreated" => Ok(QuazarEventType::SvodServiceCreated),
+            "SvodServiceUpdated" => Ok(QuazarEventType::SvodServiceUpdated),
+            "SvodServiceDeactivated" => Ok(QuazarEventType::SvodServiceDeactivated),
             _ => Err(format!("Unknown event type: {}", s)),
         }
     }
@@ -273,6 +297,10 @@ impl QuazarEventType {
             "CandidateNominated","CandidateVoted","CandidateApproved","CandidateAppointed",
             "CityRegistered",
             "YoutubeIntroPosted","YoutubeCommentPosted","YoutubeCommentReplied","HermesExternalAction",
+            "ExchangeRequestCreated","ExchangeRequestVerified","ExchangeRequestRejected",
+            "ExchangeListingOpened","ExchangeDealOpened","ExchangeDealCancelled",
+            "ExchangeDeliveryConfirmed","ExchangeSettled","ExchangeInventoryAdjusted",
+            "SvodServiceCreated","SvodServiceUpdated","SvodServiceDeactivated",
         ]
     }
 }
