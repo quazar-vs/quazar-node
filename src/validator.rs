@@ -265,9 +265,46 @@ impl EventValidator {
                 Ok(())
             }
             QuazarEventType::CitizenRequested => {
-                let name = Self::require_str(data, "citizen_name")?;
-                Self::validate_citizen_name(name, citizens)?;
-                Self::require_str(data, "public_key")?;
+                let email = data
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let name = data
+                    .get("desired_name")
+                    .or_else(|| data.get("citizen_name"))
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if email.is_none() && name.is_none() {
+                    return Err(ValidationError::MissingRequiredField(
+                        "email or desired_name/citizen_name".to_string(),
+                    ));
+                }
+                if let Some(n) = name {
+                    // Format only — uniqueness is enforced at application API / CitizenAdded.
+                    Self::validate_citizen_name(n, &[])?;
+                }
+                let _ = citizens;
+                Ok(())
+            }
+            QuazarEventType::CitizenApplicationRejected => {
+                let email = data
+                    .get("email")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                let application_id = data
+                    .get("application_id")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty());
+                if email.is_none() && application_id.is_none() {
+                    return Err(ValidationError::MissingRequiredField(
+                        "email or application_id".to_string(),
+                    ));
+                }
+                Self::require_str(data, "reason")?;
                 Ok(())
             }
             QuazarEventType::CitizenSuspended | QuazarEventType::CitizenRestored => {

@@ -21,9 +21,14 @@ use crate::applications::{recaptcha_required, verify_recaptcha_with_ip};
 use crate::auth::{AuthContext, Role};
 use crate::block_producer;
 use crate::blockchain::{
-    build_signed_citizen_added_event, build_signed_citizen_role_event, build_signed_passport_issued_event,
+    build_citizen_added_event, build_signed_citizen_role_event, build_signed_passport_issued_event,
+    signed_pending_event_public,
 };
 use crate::citizen::hash_key;
+use crate::citizenship_application::{
+    emit_citizen_application_rejected, emit_citizen_requested, lookup_citizenship_app_status,
+    reject_message_for_status, CitizenshipAppChainStatus,
+};
 use crate::client_ip;
 use crate::email::{
     notify_email, send_citizenship_application, send_citizenship_confirmation,
@@ -332,6 +337,17 @@ pub async fn submit_application(
         return response::bad_request("Введите корректный email-адрес");
     }
 
+    match lookup_citizenship_app_status(&state.db, Some(&email), Some(&login)).await {
+        Ok(Some(status @ (CitizenshipAppChainStatus::Pending | CitizenshipAppChainStatus::Approved))) => {
+            return response::forbidden(reject_message_for_status(status));
+        }
+        Ok(Some(CitizenshipAppChainStatus::Rejected) | None) => {}
+        Err(e) => {
+            tracing::error!(error = %e, "failed to lookup citizenship chain status");
+            return response::internal_error("Не удалось проверить статус заявки в цепочке");
+        }
+    }
+
     // 1) Check email: no more than one application per calendar month.
     let email_month_exists: bool = sqlx::query_scalar(
         r#"
@@ -432,7 +448,28 @@ pub async fn submit_application(
 
     let id = Uuid::new_v4();
 
-    // Source of truth: candidates only (legacy /api/applications is a read facade).
+    if let Err(e) = emit_citizen_requested(
+        &state,
+        &id.to_string(),
+        &email,
+        &login,
+        &reason,
+        "portal",
+    )
+    .await
+    {
+        tracing::error!(
+            application_id = %id,
+            email = %email,
+            error = %e,
+            "failed to emit CitizenRequested"
+        );
+        return response::internal_error(
+            "Не удалось зафиксировать заявку в цепочке. Попробуйте позже.",
+        );
+    }
+
+    // Source of truth for portal UI: candidates; chain holds auditable status.
     if let Err(e) = crate::candidates::upsert_citizenship(
         &state.db,
         id,
@@ -790,7 +827,7 @@ async fn update_application_review_status(
             return response::internal_error(format!("Failed to commit application approval: {e}"));
         }
 
-        let citizen_added_event = build_signed_citizen_added_event(
+        let mut citizen_added = build_citizen_added_event(
             &format!("citizen_add_{}", citizen_id),
             &citizen_id,
             &login,
@@ -800,6 +837,14 @@ async fn update_application_review_status(
             &auth.citizen_name,
             now_ts,
         );
+        if let Some(obj) = citizen_added.data.as_object_mut() {
+            obj.insert(
+                "application_id".to_string(),
+                serde_json::json!(id.to_string()),
+            );
+            obj.insert("email".to_string(), serde_json::json!(email));
+        }
+        let citizen_added_event = signed_pending_event_public(citizen_added);
         let _ = submit_pending_event(state.clone(), citizen_added_event).await;
 
         let passport_event = build_signed_passport_issued_event(
@@ -867,6 +912,31 @@ async fn update_application_review_status(
     {
         Ok(_) => {
             if next_status == "rejected" {
+                let login = candidate
+                    .payload
+                    .get("login")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                let reject_email = target_email.clone().unwrap_or_default();
+                let reject_reason = note_for_email.clone().unwrap_or_default();
+                if !reject_email.is_empty() && !reject_reason.is_empty() {
+                    if let Err(e) = emit_citizen_application_rejected(
+                        &state,
+                        &id.to_string(),
+                        &reject_email,
+                        if login.is_empty() { None } else { Some(login) },
+                        &reject_reason,
+                        &auth.citizen_name,
+                    )
+                    .await
+                    {
+                        tracing::warn!(
+                            application_id = %id,
+                            error = %e,
+                            "failed to emit CitizenApplicationRejected"
+                        );
+                    }
+                }
                 if let (Some(email), Some(reason), Some(smtp)) =
                     (target_email, note_for_email, SmtpConfig::from_env())
                 {

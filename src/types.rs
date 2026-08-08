@@ -139,6 +139,7 @@ pub enum QuazarEventType {
     SystemUpgrade,
     SystemConfig,
     CitizenRequested,
+    CitizenApplicationRejected,
     CitizenAdded,
     CitizenRemoved,
     CitizenUpdated,
@@ -216,6 +217,7 @@ impl QuazarEventType {
             "SystemUpgrade" => Ok(QuazarEventType::SystemUpgrade),
             "SystemConfig" => Ok(QuazarEventType::SystemConfig),
             "CitizenRequested" => Ok(QuazarEventType::CitizenRequested),
+            "CitizenApplicationRejected" => Ok(QuazarEventType::CitizenApplicationRejected),
             "CitizenAdded" => Ok(QuazarEventType::CitizenAdded),
             "CitizenRemoved" => Ok(QuazarEventType::CitizenRemoved),
             "CitizenUpdated" => Ok(QuazarEventType::CitizenUpdated),
@@ -285,7 +287,7 @@ impl QuazarEventType {
     pub fn all_type_names() -> Vec<&'static str> {
         vec![
             "SystemInit","SystemUpgrade","SystemConfig",
-            "CitizenRequested","CitizenAdded","CitizenRemoved","CitizenUpdated","CitizenSuspended","CitizenRestored",
+            "CitizenRequested","CitizenApplicationRejected","CitizenAdded","CitizenRemoved","CitizenUpdated","CitizenSuspended","CitizenRestored",
             "PassportIssued","PassportSuspended","PassportRevoked",
             "LawProposed","LawAmended","LawRepealed","LawAdded","LawVoteStarted","LawVoteResult",
             "ElectionAnnounced","ElectionCandidate","ElectionVoteStarted","ElectionVoteResult",
