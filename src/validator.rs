@@ -410,6 +410,19 @@ impl EventValidator {
                     ))?;
                 Ok(())
             }
+            QuazarEventType::YoutubeIntroPosted
+            | QuazarEventType::YoutubeCommentPosted
+            | QuazarEventType::YoutubeCommentReplied => {
+                Self::require_str(data, "video_id")?;
+                Self::require_str(data, "comment_id")?;
+                Self::require_str(data, "channel_id")?;
+                Ok(())
+            }
+            QuazarEventType::HermesExternalAction => {
+                Self::require_str(data, "action")?;
+                Self::require_str(data, "source")?;
+                Ok(())
+            }
             QuazarEventType::ChatHistoryAdded => {
                 Self::require_str(data, "archive_id")?;
                 Self::require_str(data, "session_id")?;

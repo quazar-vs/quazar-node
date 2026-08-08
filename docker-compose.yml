@@ -91,6 +91,8 @@ services:
   hermes:
     image: nousresearch/hermes-agent:latest
     container_name: hermes-gateway
+    env_file:
+      - /root/.hermes/secrets/quazar-secretary.env
     restart: unless-stopped
     command: gateway run
     ports:
@@ -100,6 +102,8 @@ services:
       API_SERVER_HOST: "0.0.0.0"
       API_SERVER_KEY: ${HERMES_API_KEY:?HERMES_API_KEY must be set}
       HERMES_LOG_LEVEL: info
+      HERMES_YOLO_MODE: "1"
+      # Auto-approve dangerous tools for Secretary automation (hardline deny still applies)
     volumes:
       - /root/.hermes:/opt/data
       - /opt/quazar:/opt/quazar:ro

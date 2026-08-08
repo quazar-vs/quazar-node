@@ -261,6 +261,11 @@ fn signed_pending_event(mut event: Event) -> Event {
     event
 }
 
+pub fn signed_pending_event_public(event: Event) -> Event {
+    signed_pending_event(event)
+}
+
+
 pub fn build_signed_citizen_added_event(
     event_id: &str,
     citizen_id: &str,

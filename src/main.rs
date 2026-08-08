@@ -35,6 +35,7 @@ mod exchange;
 mod crypto;
 mod gossip;
 mod handlers;
+mod hermes_log;
 mod http;
 mod initiative;
 mod keys;
@@ -439,6 +440,8 @@ async fn main() {
         .route("/chat/messages", get(list_messages_handler))
         .route("/chat/search", get(search_messages_handler))
         .route("/chat/send", post(send_message_handler))
+        .route("/hermes/event-types", get(hermes_log::list_event_types_handler))
+        .route("/hermes/event", post(hermes_log::log_event_handler))
         .route("/chat/session", get(get_session_handler))
         .route("/chat/history", get(list_history_handler))
         .route(

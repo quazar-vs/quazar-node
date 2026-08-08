@@ -181,6 +181,10 @@ pub enum QuazarEventType {
     CandidateApproved,
     CandidateAppointed,
     CityRegistered,
+    YoutubeIntroPosted,
+    YoutubeCommentPosted,
+    YoutubeCommentReplied,
+    HermesExternalAction,
     ChatHistoryAdded,
     NodeStarted,
     MayorConfirmed,
@@ -242,12 +246,34 @@ impl QuazarEventType {
             "CandidateApproved" => Ok(QuazarEventType::CandidateApproved),
             "CandidateAppointed" => Ok(QuazarEventType::CandidateAppointed),
             "CityRegistered" => Ok(QuazarEventType::CityRegistered),
+            "YoutubeIntroPosted" => Ok(QuazarEventType::YoutubeIntroPosted),
+            "YoutubeCommentPosted" => Ok(QuazarEventType::YoutubeCommentPosted),
+            "YoutubeCommentReplied" => Ok(QuazarEventType::YoutubeCommentReplied),
+            "HermesExternalAction" => Ok(QuazarEventType::HermesExternalAction),
             "ChatHistoryAdded" => Ok(QuazarEventType::ChatHistoryAdded),
             "NodeStarted" => Ok(QuazarEventType::NodeStarted),
             "MayorConfirmed" => Ok(QuazarEventType::MayorConfirmed),
             "MayorApplicationTimedOut" => Ok(QuazarEventType::MayorApplicationTimedOut),
             _ => Err(format!("Unknown event type: {}", s)),
         }
+    }
+
+    pub fn all_type_names() -> Vec<&'static str> {
+        vec![
+            "SystemInit","SystemUpgrade","SystemConfig",
+            "CitizenRequested","CitizenAdded","CitizenRemoved","CitizenUpdated","CitizenSuspended","CitizenRestored",
+            "PassportIssued","PassportSuspended","PassportRevoked",
+            "LawProposed","LawAmended","LawRepealed","LawAdded","LawVoteStarted","LawVoteResult",
+            "ElectionAnnounced","ElectionCandidate","ElectionVoteStarted","ElectionVoteResult",
+            "AiyaElected","AppointmentGuardian","AppointmentJudge","AppointmentRevoked",
+            "CourtCaseOpened","CourtRuling","CourtAppeal","CourtAppealRuling",
+            "DomainRegistered","DomainTransferred","DomainExpired",
+            "NodeAdded","NodeRemoved","InfraMigration","ConstitutionFullText",
+            "VoteStarted","VoteCast","VoteFinalized","PeerListUpdate",
+            "CandidateNominated","CandidateVoted","CandidateApproved","CandidateAppointed",
+            "CityRegistered",
+            "YoutubeIntroPosted","YoutubeCommentPosted","YoutubeCommentReplied","HermesExternalAction",
+        ]
     }
 }
 

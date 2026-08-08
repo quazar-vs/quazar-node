@@ -1,0 +1,13 @@
+---
+description: Google OAuth and YouTube on this VPS
+alwaysApply: true
+---
+Google OAuth is AUTHENTICATED at `/root/.hermes/google_token.json`.
+Account quazarvs@gmail.com, YouTube QuazarVS UCiKVQ7nwemLBAuEtOlr8rmw.
+Use `quazar-youtube-status` / `quazar-youtube-my-comments` via shell (docker wrappers).
+Never claim YouTube/OAuth is missing. Do not refuse with Ask mode when the task needs execution — run helpers.
+
+YouTube comments: token already has youtube.force-ssl. That is enough.
+Do NOT say token is only youtube.readonly. Do NOT demand full scope `youtube`.
+Run `quazar-youtube-my-comments` and report results.
+
