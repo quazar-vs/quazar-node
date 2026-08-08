@@ -493,15 +493,24 @@ pub async fn get_catalog_handler(
         // Flat lists for backward-compatible clients (same filter applied).
         "services": services_json,
         "rewards": rewards,
-        // Passport UX: executor ↔ listings; customer ↔ catalog services.
+        // Passport UX modes (replaces Исполнитель/Заказчик):
+        // offers = Предложения; needs = Потребность. Filter both by work_kind.
         "role_view": {
-            "executor": {
-                "source": "GET /exchange/listings?work_kind=",
-                "hint": "Витрина заказов государства к исполнению; фильтр совпадает с частями Свода",
+            "offers": {
+                "label": "Предложения",
+                "mode": "offers",
+                "showcase": "GET /exchange/listings?work_kind=",
+                "submit_catalog": "GET /svod?work_kind= → parts.*.services (или services)",
+                "submit_side": "sell",
+                "hint": "Витрина: публичные лоты — что нужно государству. Подать заявку: позиция из Свода → side=sell",
             },
-            "customer": {
-                "source": "GET /svod → parts.*.services (или services)",
-                "hint": "Каталог услуг государства по частям Разработка / Реализация",
+            "needs": {
+                "label": "Потребность",
+                "mode": "needs",
+                "showcase": "GET /svod?work_kind= → parts.*.services (или services)",
+                "submit_catalog": "GET /svod?work_kind= → parts.*.services (или services)",
+                "submit_side": "buy",
+                "hint": "Витрина: услуги/ставки государства из Свода. Подать заявку: позиция из Свода → side=buy",
             },
         },
     }))))

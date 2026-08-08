@@ -353,17 +353,58 @@ pub async fn create_request(
     )
     .await?;
 
+    let mode = if side == "sell" { "offers" } else { "needs" };
     Ok(Json(ApiResponse::success(json!({
         "id": id,
         "side": side,
+        "mode": mode,
         "svod_code": service.code,
         "quantity": qty,
         "unit_svod": unit_svod,
+        "work_kind": service.work_kind,
+        "work_kind_label": svod::work_kind_label(&service.work_kind),
         "status": status,
     }))))
 }
 
-/// GET /exchange/requests — own requests; SB sees pending_sb.
+fn request_mode(side: &str) -> &'static str {
+    if side == "sell" {
+        "offers"
+    } else {
+        "needs"
+    }
+}
+
+fn request_json(
+    id: String,
+    citizen_id: String,
+    side: String,
+    svod_code: String,
+    qty_total: i64,
+    qty_remaining: i64,
+    unit_svod: i64,
+    status: String,
+    created_at: i64,
+    work_kind: String,
+) -> serde_json::Value {
+    json!({
+        "id": id,
+        "citizen_id": citizen_id,
+        "side": side,
+        "mode": request_mode(&side),
+        "svod_code": svod_code,
+        "qty_total": qty_total,
+        "qty_remaining": qty_remaining,
+        "unit_svod": unit_svod,
+        "status": status,
+        "created_at": created_at,
+        "work_kind": work_kind,
+        "work_kind_label": svod::work_kind_label(&work_kind),
+    })
+}
+
+/// GET /exchange/requests — citizen: only own requests; SB: pending_sb (or ?status=).
+/// Optional `?work_kind=development|implementation` filters via service_catalog.
 pub async fn list_requests(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -373,43 +414,98 @@ pub async fn list_requests(
         return Err(ExchangeError::Unauthorized("Node cannot list requests".into()));
     }
     let citizen_id = auth.resolve_account_id(&state.db).await;
+    let work_kind = match q.work_kind.as_deref() {
+        Some(raw) => Some(
+            svod::normalize_work_kind(raw).map_err(|e| ExchangeError::BadRequest(e.to_string()))?,
+        ),
+        None => None,
+    };
+
+    type ReqRow = (
+        String,
+        String,
+        String,
+        String,
+        i64,
+        i64,
+        i64,
+        String,
+        i64,
+        String,
+    );
+
     let rows: Vec<serde_json::Value> = if auth.can_exchange_security() {
         let status = q.status.unwrap_or_else(|| "pending_sb".into());
-        sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, String, i64)>(
-            "SELECT id, citizen_id, side, svod_code, qty_total, qty_remaining, unit_svod, status, created_at
-             FROM exchange_requests WHERE status = $1 ORDER BY created_at DESC LIMIT 200",
-        )
-        .bind(&status)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-        .into_iter()
-        .map(|r| {
-            json!({
-                "id": r.0, "citizen_id": r.1, "side": r.2, "svod_code": r.3,
-                "qty_total": r.4, "qty_remaining": r.5, "unit_svod": r.6,
-                "status": r.7, "created_at": r.8,
-            })
-        })
-        .collect()
+        let fetched: Vec<ReqRow> = if let Some(ref kind) = work_kind {
+            sqlx::query_as(
+                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
+                        r.unit_svod, r.status, r.created_at,
+                        COALESCE(s.work_kind, 'implementation') AS work_kind
+                 FROM exchange_requests r
+                 LEFT JOIN service_catalog s ON s.code = r.svod_code
+                 WHERE r.status = $1 AND COALESCE(s.work_kind, 'implementation') = $2
+                 ORDER BY r.created_at DESC LIMIT 200",
+            )
+            .bind(&status)
+            .bind(kind)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query_as(
+                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
+                        r.unit_svod, r.status, r.created_at,
+                        COALESCE(s.work_kind, 'implementation') AS work_kind
+                 FROM exchange_requests r
+                 LEFT JOIN service_catalog s ON s.code = r.svod_code
+                 WHERE r.status = $1
+                 ORDER BY r.created_at DESC LIMIT 200",
+            )
+            .bind(&status)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+        };
+        fetched
+            .into_iter()
+            .map(|r| request_json(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9))
+            .collect()
     } else {
-        sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, String, i64)>(
-            "SELECT id, citizen_id, side, svod_code, qty_total, qty_remaining, unit_svod, status, created_at
-             FROM exchange_requests WHERE citizen_id = $1 ORDER BY created_at DESC LIMIT 200",
-        )
-        .bind(&citizen_id)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-        .into_iter()
-        .map(|r| {
-            json!({
-                "id": r.0, "citizen_id": r.1, "side": r.2, "svod_code": r.3,
-                "qty_total": r.4, "qty_remaining": r.5, "unit_svod": r.6,
-                "status": r.7, "created_at": r.8,
-            })
-        })
-        .collect()
+        // Citizen: always only own requests (auth-scoped).
+        let fetched: Vec<ReqRow> = if let Some(ref kind) = work_kind {
+            sqlx::query_as(
+                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
+                        r.unit_svod, r.status, r.created_at,
+                        COALESCE(s.work_kind, 'implementation') AS work_kind
+                 FROM exchange_requests r
+                 LEFT JOIN service_catalog s ON s.code = r.svod_code
+                 WHERE r.citizen_id = $1 AND COALESCE(s.work_kind, 'implementation') = $2
+                 ORDER BY r.created_at DESC LIMIT 200",
+            )
+            .bind(&citizen_id)
+            .bind(kind)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+        } else {
+            sqlx::query_as(
+                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
+                        r.unit_svod, r.status, r.created_at,
+                        COALESCE(s.work_kind, 'implementation') AS work_kind
+                 FROM exchange_requests r
+                 LEFT JOIN service_catalog s ON s.code = r.svod_code
+                 WHERE r.citizen_id = $1
+                 ORDER BY r.created_at DESC LIMIT 200",
+            )
+            .bind(&citizen_id)
+            .fetch_all(&state.db)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+        };
+        fetched
+            .into_iter()
+            .map(|r| request_json(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9))
+            .collect()
     };
     Ok(Json(ApiResponse::success(rows)))
 }
@@ -608,7 +704,7 @@ pub async fn sb_verify_request(
     }))))
 }
 
-/// GET /exchange/listings — public active listings (executor витрина).
+/// GET /exchange/listings — public active listings (mode=offers витрина «Предложения»).
 /// Optional `?work_kind=development|implementation` filters via service_catalog join.
 pub async fn list_listings(
     State(state): State<Arc<AppState>>,
@@ -675,7 +771,8 @@ pub async fn list_listings(
                 // Listings open from verified sell requests (citizen → treasury supply).
                 "side": "sell",
                 "side_semantics": "state_mediated_listing",
-                "role_hint": "executor",
+                "mode": "offers",
+                "role_hint": "offers",
             })
         })
         .collect::<Vec<_>>();

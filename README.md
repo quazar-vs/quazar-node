@@ -319,11 +319,16 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 1. **Разработка** (`work_kind=development`) — идеи, темы, креатив (`CREATIVE_CONCEPT`, ставка `idea_submit`, …)
 2. **Реализация** (`work_kind=implementation`) — код, правки, поставка, ролики, просмотры (`WEB_DEV`, `video_create`, `video_view`, …)
 
-Ответы `GET /svod` и `GET /svod/rewards` отдают `parts` / `sections` с этими двумя частями; у каждой позиции есть `work_kind` (+ `work_kind_label`). Плоские `services` / `rewards` сохранены для совместимости. Фильтр `?work_kind=` сужает обе части. Биржа: `GET /exchange/listings?work_kind=` согласована с той же моделью.
+Ответы `GET /svod` и `GET /svod/rewards` отдают `parts` / `sections` с этими двумя частями; у каждой позиции есть `work_kind` (+ `work_kind_label`). Плоские `services` / `rewards` сохранены для совместимости. Фильтр `?work_kind=` сужает обе части. Биржа: `GET /exchange/listings?work_kind=` и `GET /exchange/requests?work_kind=` согласованы с той же моделью.
 
-Подсказки UX Passport (`role_view` в `/svod`):
-- **Исполнитель** → `GET /exchange/listings` (витрина лотов)
-- **Заказчик** → `GET /svod` → `parts.*.services`
+**Passport UX** (режимы вместо Исполнитель/Заказчик; `role_view` в `/svod`):
+
+| mode | UI | Витрина внизу | Подать заявку (каталог Свода) | `POST /exchange/requests` |
+|------|-----|---------------|-------------------------------|---------------------------|
+| `offers` | **Предложения** | `GET /exchange/listings?work_kind=` — лоты, что нужно государству | `GET /svod?work_kind=` → `parts.*.services` | `side=sell` |
+| `needs` | **Потребность** | `GET /svod?work_kind=` → `parts.*.services` — что государство предлагает | тот же Свод (выбранная часть) | `side=buy` |
+
+Переключатель **Разработка \| Реализация** (`work_kind=development|implementation`) фильтрует и витрину, и список при подаче. Секция **Заявки**: «Мои» = `GET /exchange/requests` (гражданин — только свои); «Подать» = выбор позиции Свода → количество → `POST /exchange/requests`.
 
 | Эндпоинт | Метод | Права |
 |----------|-------|-------|
@@ -335,7 +340,9 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 | `/svod/admin/service/:code` | PUT | Aiya / Founder |
 | `/svod/admin/service/:code` | DELETE | Aiya / Founder (отключить услугу) |
 | `/svod/admin/reward` | POST | Aiya / Founder — обновить ставку (`action`, `reward`, опц. `work_kind`) |
-| `/exchange/listings` | GET | API key — лоты; `?status=` + `?work_kind=` |
+| `/exchange/listings` | GET | API key — лоты mode=`offers`; `?status=` + `?work_kind=` |
+| `/exchange/requests` | GET | Citizen — свои заявки; SB — очередь; `?work_kind=` |
+| `/exchange/requests` | POST | Citizen — `{side, svod_code, quantity}` |
 
 ```bash
 # Каталог Свода (услуги + Государственный Свод Вознаграждений)
@@ -380,7 +387,7 @@ curl -s -X POST http://localhost:8080/exchange/requests \
 После миграции `004_service_catalog.sql` доступны seed-данные: категория `IT`, услуга `WEB_DEV` (base_price **100 QZ**).
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
 После миграции `044_exchange_state_mediated.sql` — биржа через государство/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
-После миграции `045_service_work_kind.sql` — `work_kind` на `service_catalog` и `svod_rewards`; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с `parts`/`sections`; фильтр `?work_kind=` на `/svod`, `/svod/rewards`, `/exchange/listings`.
+После миграции `045_service_work_kind.sql` — `work_kind` на `service_catalog` и `svod_rewards`; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с `parts`/`sections`; фильтр `?work_kind=` на `/svod`, `/svod/rewards`, `/exchange/listings`, `/exchange/requests`. UX: `role_view.offers` / `role_view.needs` (не executor/customer).
 После миграции `005_candidacies.sql` доступны таблицы `candidacies` и `candidacy_votes`.
 После миграции `008_initiatives_referendums.sql` доступны таблицы `initiatives`, `initiative_votes`, `referendums`, `referendum_votes`.
 
