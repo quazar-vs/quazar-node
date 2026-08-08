@@ -501,7 +501,7 @@ pub fn build_svod_sections(
 
 fn role_view_payload() -> serde_json::Value {
     // Passport: filter button near balance (offers/needs + work_kind + optional position);
-    // one «Заявки» entry (active + submit). No separate «catalog» registry.
+    // one «Заявки» entry (active + submit). Positions come only from the Свод (`parts.*.items`).
     serde_json::json!({
         "filter": {
             "ui": "button_near_balance",
@@ -515,7 +515,6 @@ fn role_view_payload() -> serde_json::Value {
             "mode": "offers",
             "showcase": "GET /exchange/listings?work_kind=&svod_code=",
             "submit_svod": "GET /svod?work_kind= → parts.*.items",
-            "submit_catalog": "GET /svod?work_kind= → parts.*.items",
             "submit_side": "sell",
             "hint": "Витрина: публичные лоты. Подать заявку: позиция из Государственного Свода Вознаграждений → side=sell",
         },
@@ -524,7 +523,6 @@ fn role_view_payload() -> serde_json::Value {
             "mode": "needs",
             "showcase": "GET /svod?work_kind= → parts.*.items",
             "submit_svod": "GET /svod?work_kind= → parts.*.items",
-            "submit_catalog": "GET /svod?work_kind= → parts.*.items",
             "submit_side": "buy",
             "hint": "Витрина: позиции государства из того же Свода. Подать заявку: позиция Свода → side=buy",
         },
@@ -552,7 +550,7 @@ pub async fn get_catalog_handler(
         "title": SVOD_TITLE,
         "name": SVOD_TITLE,
         "rewards_title": SVOD_TITLE,
-        "canon": "Единый Государственный Свод Вознаграждений = parts.development + parts.implementation; биржа берёт позиции из parts.*.items (не отдельный каталог).",
+        "canon": "Единый Государственный Свод Вознаграждений = parts.development + parts.implementation; биржа берёт позиции только из parts.*.items (не отдельный реестр).",
         "parts": parts,
         "sections": sections,
         "work_kind_labels": {
