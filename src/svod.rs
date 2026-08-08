@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use axum::{
-    extract::{Extension, Path, State},
+    extract::{Extension, Path, Query, State},
     response::IntoResponse,
     Json,
 };
@@ -20,6 +20,10 @@ pub struct ServiceCategory {
     pub description: Option<String>,
 }
 
+/// Catalog work kind: `development` (Разработка) | `implementation` (Реализация).
+pub const WORK_KIND_DEVELOPMENT: &str = "development";
+pub const WORK_KIND_IMPLEMENTATION: &str = "implementation";
+
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ServiceItem {
     pub id: i32,
@@ -33,6 +37,14 @@ pub struct ServiceItem {
     pub min_quantity: i64,
     pub max_quantity: i64,
     pub is_active: bool,
+    /// `development` | `implementation`
+    pub work_kind: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct CatalogQuery {
+    /// Filter: `development` | `implementation`
+    pub work_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -45,6 +57,8 @@ pub struct CreateServiceRequest {
     pub base_price: i64,
     pub min_quantity: Option<i64>,
     pub max_quantity: Option<i64>,
+    /// `development` | `implementation` (default: implementation)
+    pub work_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -57,6 +71,7 @@ pub struct UpdateServiceRequest {
     pub min_quantity: Option<i64>,
     pub max_quantity: Option<i64>,
     pub is_active: Option<bool>,
+    pub work_kind: Option<String>,
 }
 
 #[derive(Debug)]
@@ -103,9 +118,31 @@ type SvodResult<T> = Result<T, SvodError>;
 
 const SERVICE_SELECT: &str = "SELECT s.id, s.code, s.name, s.description, s.category_id,
     c.code AS category_code, c.name AS category_name,
-    s.base_price, s.min_quantity, s.max_quantity, s.is_active
+    s.base_price, s.min_quantity, s.max_quantity, s.is_active, s.work_kind
     FROM service_catalog s
     LEFT JOIN service_categories c ON s.category_id = c.id";
+
+/// Normalize and validate work_kind query/body values.
+pub fn normalize_work_kind(raw: &str) -> Result<String, SvodError> {
+    match raw.trim().to_lowercase().as_str() {
+        WORK_KIND_DEVELOPMENT | "разработка" => Ok(WORK_KIND_DEVELOPMENT.to_string()),
+        WORK_KIND_IMPLEMENTATION | "реализация" => Ok(WORK_KIND_IMPLEMENTATION.to_string()),
+        other if other.is_empty() => Err(SvodError::BadRequest(
+            "work_kind is required when provided".to_string(),
+        )),
+        other => Err(SvodError::BadRequest(format!(
+            "work_kind must be '{WORK_KIND_DEVELOPMENT}' or '{WORK_KIND_IMPLEMENTATION}', got {other}"
+        ))),
+    }
+}
+
+pub fn work_kind_label(kind: &str) -> &'static str {
+    match kind {
+        WORK_KIND_DEVELOPMENT => "Разработка",
+        WORK_KIND_IMPLEMENTATION => "Реализация",
+        _ => "?",
+    }
+}
 
 fn normalize_code(code: &str) -> Result<String, SvodError> {
     let code = code.trim();
@@ -167,14 +204,28 @@ pub async fn get_categories(pool: &PgPool) -> SvodResult<Vec<ServiceCategory>> {
     .map_err(|e| SvodError::Database(e.to_string()))
 }
 
-pub async fn get_catalog(pool: &PgPool, active_only: bool) -> SvodResult<Vec<ServiceItem>> {
-    let sql = if active_only {
-        format!("{SERVICE_SELECT} WHERE s.is_active = TRUE ORDER BY s.code")
-    } else {
-        format!("{SERVICE_SELECT} ORDER BY s.code")
+pub async fn get_catalog(
+    pool: &PgPool,
+    active_only: bool,
+    work_kind: Option<&str>,
+) -> SvodResult<Vec<ServiceItem>> {
+    let kind = match work_kind {
+        Some(raw) => Some(normalize_work_kind(raw)?),
+        None => None,
     };
-    sqlx::query_as::<_, ServiceItem>(sqlx::AssertSqlSafe(sql))
-        .fetch_all(pool)
+    let sql = match (active_only, kind.is_some()) {
+        (true, true) => format!(
+            "{SERVICE_SELECT} WHERE s.is_active = TRUE AND s.work_kind = $1 ORDER BY s.code"
+        ),
+        (true, false) => format!("{SERVICE_SELECT} WHERE s.is_active = TRUE ORDER BY s.code"),
+        (false, true) => format!("{SERVICE_SELECT} WHERE s.work_kind = $1 ORDER BY s.code"),
+        (false, false) => format!("{SERVICE_SELECT} ORDER BY s.code"),
+    };
+    let mut q = sqlx::query_as::<_, ServiceItem>(sqlx::AssertSqlSafe(sql));
+    if let Some(ref k) = kind {
+        q = q.bind(k);
+    }
+    q.fetch_all(pool)
         .await
         .map_err(|e| SvodError::Database(e.to_string()))
 }
@@ -218,10 +269,14 @@ pub async fn create_service(pool: &PgPool, req: CreateServiceRequest) -> SvodRes
 
     let category_id =
         resolve_category_id(pool, req.category_id, req.category_code.as_deref()).await?;
+    let work_kind = match req.work_kind.as_deref() {
+        Some(raw) => normalize_work_kind(raw)?,
+        None => WORK_KIND_IMPLEMENTATION.to_string(),
+    };
 
     sqlx::query(
-        "INSERT INTO service_catalog (code, name, description, category_id, base_price, min_quantity, max_quantity, is_active, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, TRUE, NOW())",
+        "INSERT INTO service_catalog (code, name, description, category_id, base_price, min_quantity, max_quantity, work_kind, is_active, updated_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, TRUE, NOW())",
     )
     .bind(&code)
     .bind(req.name.trim())
@@ -230,6 +285,7 @@ pub async fn create_service(pool: &PgPool, req: CreateServiceRequest) -> SvodRes
     .bind(req.base_price)
     .bind(min_quantity)
     .bind(max_quantity)
+    .bind(&work_kind)
     .execute(pool)
     .await
     .map_err(|e| {
@@ -240,7 +296,7 @@ pub async fn create_service(pool: &PgPool, req: CreateServiceRequest) -> SvodRes
         }
     })?;
 
-    tracing::info!(code = %code, base_price = req.base_price, "svod service created");
+    tracing::info!(code = %code, base_price = req.base_price, work_kind = %work_kind, "svod service created");
     get_service_by_code(pool, &code, false).await
 }
 
@@ -263,6 +319,10 @@ pub async fn update_service(
     let min_quantity = req.min_quantity.unwrap_or(existing.min_quantity);
     let max_quantity = req.max_quantity.unwrap_or(existing.max_quantity);
     let is_active = req.is_active.unwrap_or(existing.is_active);
+    let work_kind = match req.work_kind.as_deref() {
+        Some(raw) => normalize_work_kind(raw)?,
+        None => existing.work_kind.clone(),
+    };
 
     if base_price <= 0 {
         return Err(SvodError::BadRequest(
@@ -283,8 +343,9 @@ pub async fn update_service(
 
     sqlx::query(
         "UPDATE service_catalog SET name = $1, description = $2, category_id = $3,
-         base_price = $4, min_quantity = $5, max_quantity = $6, is_active = $7, updated_at = NOW()
-         WHERE code = $8",
+         base_price = $4, min_quantity = $5, max_quantity = $6, is_active = $7,
+         work_kind = $8, updated_at = NOW()
+         WHERE code = $9",
     )
     .bind(name)
     .bind(description)
@@ -293,12 +354,13 @@ pub async fn update_service(
     .bind(min_quantity)
     .bind(max_quantity)
     .bind(is_active)
+    .bind(&work_kind)
     .bind(&code)
     .execute(pool)
     .await
     .map_err(|e| SvodError::Database(e.to_string()))?;
 
-    tracing::info!(code = %code, "svod service updated");
+    tracing::info!(code = %code, work_kind = %work_kind, "svod service updated");
     get_service_by_code(pool, &code, false).await
 }
 
@@ -335,33 +397,159 @@ fn require_aiya(auth: &AuthContext) -> SvodResult<()> {
     }
 }
 
-pub async fn get_catalog_handler(
-    State(state): State<Arc<AppState>>,
-) -> Result<Json<ApiResponse>, SvodError> {
-    let services = get_catalog(&state.db, true).await?;
-    let rewards = crate::reward_svod::list_rewards_public(&state.db)
-        .await
-        .map_err(|e| SvodError::Database(e.to_string()))?;
-    Ok(Json(ApiResponse::success(serde_json::json!({
-        "currency": "КВАЗИ",
-        "services": services,
-        // Official name of the citizen reward rates section (array kept for clients).
-        "rewards_title": crate::reward_svod::REWARDS_TITLE,
-        "rewards": rewards,
-    }))))
+fn service_with_label(s: &ServiceItem) -> serde_json::Value {
+    serde_json::json!({
+        "id": s.id,
+        "code": s.code,
+        "name": s.name,
+        "description": s.description,
+        "category_id": s.category_id,
+        "category_code": s.category_code,
+        "category_name": s.category_name,
+        "base_price": s.base_price,
+        "min_quantity": s.min_quantity,
+        "max_quantity": s.max_quantity,
+        "is_active": s.is_active,
+        "work_kind": s.work_kind,
+        "work_kind_label": work_kind_label(&s.work_kind),
+    })
 }
 
-/// GET /svod/rewards — **Государственный Свод Вознаграждений** (services stay under `/svod`).
-pub async fn get_rewards_handler(
+/// Двучастная структура Государственного Свода: Разработка + Реализация.
+pub fn build_svod_parts(
+    services: &[ServiceItem],
+    rewards: &[crate::reward_svod::RewardPublic],
+) -> serde_json::Value {
+    let filter_svc = |kind: &str| {
+        services
+            .iter()
+            .filter(|s| s.work_kind == kind)
+            .map(service_with_label)
+            .collect::<Vec<_>>()
+    };
+    let filter_rew = |kind: &str| {
+        rewards
+            .iter()
+            .filter(|r| r.work_kind == kind)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
+    let development = serde_json::json!({
+        "work_kind": WORK_KIND_DEVELOPMENT,
+        "title": "Разработка",
+        "hint": "Идеи, темы, креативный вклад",
+        "services": filter_svc(WORK_KIND_DEVELOPMENT),
+        "rewards": filter_rew(WORK_KIND_DEVELOPMENT),
+    });
+    let implementation = serde_json::json!({
+        "work_kind": WORK_KIND_IMPLEMENTATION,
+        "title": "Реализация",
+        "hint": "Код, правки, ролики, просмотры, поставка",
+        "services": filter_svc(WORK_KIND_IMPLEMENTATION),
+        "rewards": filter_rew(WORK_KIND_IMPLEMENTATION),
+    });
+    serde_json::json!({
+        "development": development,
+        "implementation": implementation,
+    })
+}
+
+pub fn build_svod_sections(
+    services: &[ServiceItem],
+    rewards: &[crate::reward_svod::RewardPublic],
+) -> Vec<serde_json::Value> {
+    let parts = build_svod_parts(services, rewards);
+    vec![
+        parts["development"].clone(),
+        parts["implementation"].clone(),
+    ]
+}
+
+pub async fn get_catalog_handler(
     State(state): State<Arc<AppState>>,
+    Query(q): Query<CatalogQuery>,
 ) -> Result<Json<ApiResponse>, SvodError> {
-    let rewards = crate::reward_svod::list_rewards_public(&state.db)
-        .await
-        .map_err(|e| SvodError::Database(e.to_string()))?;
+    let services = get_catalog(&state.db, true, q.work_kind.as_deref()).await?;
+    let rewards = crate::reward_svod::list_rewards_public_filtered(
+        &state.db,
+        q.work_kind.as_deref(),
+    )
+    .await
+    .map_err(SvodError::Database)?;
+    let parts = build_svod_parts(&services, &rewards);
+    let sections = build_svod_sections(&services, &rewards);
+    let services_json: Vec<_> = services.iter().map(service_with_label).collect();
     Ok(Json(ApiResponse::success(serde_json::json!({
         "currency": "КВАЗИ",
         "title": crate::reward_svod::REWARDS_TITLE,
         "rewards_title": crate::reward_svod::REWARDS_TITLE,
+        // Canonical two-part structure of the Свод.
+        "parts": parts,
+        "sections": sections,
+        "work_kind_labels": {
+            "development": "Разработка",
+            "implementation": "Реализация",
+        },
+        // Flat lists for backward-compatible clients (same filter applied).
+        "services": services_json,
+        "rewards": rewards,
+        // Passport UX: executor ↔ listings; customer ↔ catalog services.
+        "role_view": {
+            "executor": {
+                "source": "GET /exchange/listings?work_kind=",
+                "hint": "Витрина заказов государства к исполнению; фильтр совпадает с частями Свода",
+            },
+            "customer": {
+                "source": "GET /svod → parts.*.services (или services)",
+                "hint": "Каталог услуг государства по частям Разработка / Реализация",
+            },
+        },
+    }))))
+}
+
+/// GET /svod/rewards — **Государственный Свод Вознаграждений** в двух частях.
+pub async fn get_rewards_handler(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<crate::reward_svod::RewardsQuery>,
+) -> Result<Json<ApiResponse>, SvodError> {
+    let rewards = crate::reward_svod::list_rewards_public_filtered(
+        &state.db,
+        q.work_kind.as_deref(),
+    )
+    .await
+    .map_err(SvodError::Database)?;
+    // Empty service slice: rewards endpoint focuses on rates, still two-part.
+    let empty_services: Vec<ServiceItem> = Vec::new();
+    let parts = build_svod_parts(&empty_services, &rewards);
+    // Drop empty services keys noise — rebuild rewards-only parts.
+    let parts = serde_json::json!({
+        "development": {
+            "work_kind": WORK_KIND_DEVELOPMENT,
+            "title": "Разработка",
+            "hint": "Идеи, темы, креативный вклад",
+            "rewards": parts["development"]["rewards"],
+        },
+        "implementation": {
+            "work_kind": WORK_KIND_IMPLEMENTATION,
+            "title": "Реализация",
+            "hint": "Код, правки, ролики, просмотры, поставка",
+            "rewards": parts["implementation"]["rewards"],
+        },
+    });
+    let sections = vec![
+        parts["development"].clone(),
+        parts["implementation"].clone(),
+    ];
+    Ok(Json(ApiResponse::success(serde_json::json!({
+        "currency": "КВАЗИ",
+        "title": crate::reward_svod::REWARDS_TITLE,
+        "rewards_title": crate::reward_svod::REWARDS_TITLE,
+        "parts": parts,
+        "sections": sections,
+        "work_kind_labels": {
+            "development": "Разработка",
+            "implementation": "Реализация",
+        },
         "rewards": rewards,
     }))))
 }
@@ -479,5 +667,12 @@ mod tests {
     #[test]
     fn normalize_code_rejects_empty() {
         assert!(normalize_code("  ").is_err());
+    }
+
+    #[test]
+    fn normalize_work_kind_accepts_aliases() {
+        assert_eq!(normalize_work_kind("development").unwrap(), "development");
+        assert_eq!(normalize_work_kind("Реализация").unwrap(), "implementation");
+        assert!(normalize_work_kind("other").is_err());
     }
 }

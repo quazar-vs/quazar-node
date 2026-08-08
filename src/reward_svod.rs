@@ -1,7 +1,8 @@
 //! **Государственный Свод Вознаграждений** — ставки КВАЗИ за действия граждан.
 //! Часть Свода Оснований (`/svod`); таблица `svod_rewards` (не отдельный продукт «Свод»).
 //!
-//! Официальное отображаемое имя раздела: [`REWARDS_TITLE`].
+//! Структура двучастная: **Разработка** (`development`) и **Реализация** (`implementation`).
+//! Официальное отображаемое имя: [`REWARDS_TITLE`].
 
 use std::sync::Arc;
 
@@ -18,6 +19,7 @@ use uuid::Uuid;
 
 use crate::auth::AuthContext;
 use crate::response::{self, ApiResponse};
+use crate::svod::{self, WORK_KIND_DEVELOPMENT, WORK_KIND_IMPLEMENTATION};
 use crate::AppState;
 
 /// Official display name of the citizen reward rates section.
@@ -25,6 +27,7 @@ pub const REWARDS_TITLE: &str = "Государственный Свод Воз�
 
 pub const ACTION_VIDEO_CREATE: &str = "video_create";
 pub const ACTION_VIDEO_VIEW: &str = "video_view";
+pub const ACTION_IDEA_SUBMIT: &str = "idea_submit";
 
 pub const UNIT_VIDEO_CREATE: &str = "1 ролик (15–30 секунд)";
 pub const UNIT_VIDEO_VIEW: &str = "10 просмотров";
@@ -38,6 +41,8 @@ pub struct Reward {
     pub action: String,
     pub unit: String,
     pub reward: i64,
+    /// `development` | `implementation`
+    pub work_kind: String,
     pub created_at: chrono::DateTime<Utc>,
     pub updated_at: chrono::DateTime<Utc>,
 }
@@ -47,16 +52,27 @@ pub struct RewardPublic {
     pub action: String,
     pub unit: String,
     pub reward: i64,
+    pub work_kind: String,
+    pub work_kind_label: String,
 }
 
 impl From<Reward> for RewardPublic {
     fn from(r: Reward) -> Self {
+        let label = svod::work_kind_label(&r.work_kind).to_string();
         Self {
             action: r.action,
             unit: r.unit,
             reward: r.reward,
+            work_kind: r.work_kind,
+            work_kind_label: label,
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RewardsQuery {
+    /// Filter: `development` | `implementation`
+    pub work_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -64,6 +80,7 @@ pub struct UpdateRewardRequest {
     pub action: String,
     pub reward: i64,
     pub unit: Option<String>,
+    pub work_kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -147,9 +164,19 @@ pub async fn ensure_rewards_seeded(pool: &PgPool) -> Result<(), sqlx::Error> {
     Ok(())
 }
 
+/// Infer work_kind for known actions when DB column is missing/legacy.
+pub fn default_work_kind_for_action(action: &str) -> &'static str {
+    match action {
+        ACTION_IDEA_SUBMIT => WORK_KIND_DEVELOPMENT,
+        ACTION_VIDEO_CREATE | ACTION_VIDEO_VIEW => WORK_KIND_IMPLEMENTATION,
+        _ => WORK_KIND_IMPLEMENTATION,
+    }
+}
+
 pub async fn list_rewards(pool: &PgPool) -> Result<Vec<Reward>, sqlx::Error> {
     sqlx::query_as::<_, Reward>(
-        "SELECT id, action, unit, reward, created_at, updated_at FROM svod_rewards ORDER BY action ASC",
+        "SELECT id, action, unit, reward, work_kind, created_at, updated_at
+         FROM svod_rewards ORDER BY work_kind ASC, action ASC",
     )
     .fetch_all(pool)
     .await
@@ -163,9 +190,25 @@ pub async fn list_rewards_public(pool: &PgPool) -> Result<Vec<RewardPublic>, sql
         .collect())
 }
 
+pub async fn list_rewards_public_filtered(
+    pool: &PgPool,
+    work_kind: Option<&str>,
+) -> Result<Vec<RewardPublic>, String> {
+    let kind = match work_kind {
+        Some(raw) => Some(svod::normalize_work_kind(raw).map_err(|e| e.to_string())?),
+        None => None,
+    };
+    let all = list_rewards_public(pool).await.map_err(|e| e.to_string())?;
+    Ok(match kind {
+        Some(k) => all.into_iter().filter(|r| r.work_kind == k).collect(),
+        None => all,
+    })
+}
+
 pub async fn get_reward_row(pool: &PgPool, action: &str) -> Result<Option<Reward>, sqlx::Error> {
     sqlx::query_as::<_, Reward>(
-        "SELECT id, action, unit, reward, created_at, updated_at FROM svod_rewards WHERE action = $1",
+        "SELECT id, action, unit, reward, work_kind, created_at, updated_at
+         FROM svod_rewards WHERE action = $1",
     )
     .bind(action)
     .fetch_optional(pool)
@@ -282,42 +325,53 @@ pub async fn update_reward_handler(
         );
     }
     let action = req.action.trim();
-    if action != ACTION_VIDEO_CREATE && action != ACTION_VIDEO_VIEW {
+    if action != ACTION_VIDEO_CREATE
+        && action != ACTION_VIDEO_VIEW
+        && action != ACTION_IDEA_SUBMIT
+    {
         return response::bad_request(format!(
-            "Unknown action '{action}'. Allowed: {ACTION_VIDEO_CREATE}, {ACTION_VIDEO_VIEW}"
+            "Unknown action '{action}'. Allowed: {ACTION_VIDEO_CREATE}, {ACTION_VIDEO_VIEW}, {ACTION_IDEA_SUBMIT}"
         ));
     }
     if req.reward < 0 {
         return response::bad_request("reward must be >= 0");
     }
+    let work_kind = match req.work_kind.as_deref() {
+        Some(raw) => match svod::normalize_work_kind(raw) {
+            Ok(k) => k,
+            Err(e) => return response::bad_request(e.to_string()),
+        },
+        None => default_work_kind_for_action(action).to_string(),
+    };
     let unit = req
         .unit
         .as_deref()
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| s.to_string())
-        .unwrap_or_else(|| {
-            if action == ACTION_VIDEO_CREATE {
-                UNIT_VIDEO_CREATE.to_string()
-            } else {
-                UNIT_VIDEO_VIEW.to_string()
-            }
+        .unwrap_or_else(|| match action {
+            ACTION_VIDEO_CREATE => UNIT_VIDEO_CREATE.to_string(),
+            ACTION_VIDEO_VIEW => UNIT_VIDEO_VIEW.to_string(),
+            ACTION_IDEA_SUBMIT => "1 идея / тема".to_string(),
+            _ => "unit".to_string(),
         });
 
     let updated = sqlx::query_as::<_, Reward>(
         r#"
-        INSERT INTO svod_rewards (action, unit, reward, created_at, updated_at)
-        VALUES ($1, $2, $3, NOW(), NOW())
+        INSERT INTO svod_rewards (action, unit, reward, work_kind, created_at, updated_at)
+        VALUES ($1, $2, $3, $4, NOW(), NOW())
         ON CONFLICT (action) DO UPDATE SET
             unit = EXCLUDED.unit,
             reward = EXCLUDED.reward,
+            work_kind = EXCLUDED.work_kind,
             updated_at = NOW()
-        RETURNING id, action, unit, reward, created_at, updated_at
+        RETURNING id, action, unit, reward, work_kind, created_at, updated_at
         "#,
     )
     .bind(action)
     .bind(&unit)
     .bind(req.reward)
+    .bind(&work_kind)
     .fetch_one(&state.db)
     .await;
 
@@ -326,6 +380,7 @@ pub async fn update_reward_handler(
             tracing::info!(
                 action = %row.action,
                 reward = row.reward,
+                work_kind = %row.work_kind,
                 by = %auth.citizen_name,
                 "svod: reward rate updated"
             );

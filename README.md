@@ -313,22 +313,41 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 
 ### Свод Оснований для Созидания (`/svod`)
 
-Государство (роль **Aiya**) управляет реестром услуг и ставками **Государственного Свода Вознаграждений**; граждане просматривают каталог. Биржа принимает предложения только по кодам из Свода; `base_price` — минимальная цена в **КВАЗИ (QZ)**. Ставки за действия граждан (видео и т.п.) — **Государственный Свод Вознаграждений** (`rewards` + `rewards_title` в ответе `/svod`, таблица `svod_rewards`).
+Государство (роль **Aiya**) управляет реестром услуг и ставками **Государственного Свода Вознаграждений**; граждане просматривают каталог. Биржа принимает предложения только по кодам из Свода; `base_price` — минимальная цена в **КВАЗИ (QZ)**.
+
+**Государственный Свод Вознаграждений** всегда двучастный:
+1. **Разработка** (`work_kind=development`) — идеи, темы, креатив (`CREATIVE_CONCEPT`, ставка `idea_submit`, …)
+2. **Реализация** (`work_kind=implementation`) — код, правки, поставка, ролики, просмотры (`WEB_DEV`, `video_create`, `video_view`, …)
+
+Ответы `GET /svod` и `GET /svod/rewards` отдают `parts` / `sections` с этими двумя частями; у каждой позиции есть `work_kind` (+ `work_kind_label`). Плоские `services` / `rewards` сохранены для совместимости. Фильтр `?work_kind=` сужает обе части. Биржа: `GET /exchange/listings?work_kind=` согласована с той же моделью.
+
+Подсказки UX Passport (`role_view` в `/svod`):
+- **Исполнитель** → `GET /exchange/listings` (витрина лотов)
+- **Заказчик** → `GET /svod` → `parts.*.services`
 
 | Эндпоинт | Метод | Права |
 |----------|-------|-------|
-| `/svod` | GET | API key (любая роль) — `services` + `rewards` / `rewards_title` |
-| `/svod/rewards` | GET | API key — **Государственный Свод Вознаграждений** (`title` / `rewards_title` + `rewards`) |
+| `/svod` | GET | API key — `parts`/`sections` + `services`/`rewards` (+ `?work_kind=`) |
+| `/svod/rewards` | GET | API key — **Государственный Свод Вознаграждений** двучастный (`parts`/`sections`) |
 | `/svod/categories` | GET | API key |
 | `/svod/service/:code` | GET | API key |
-| `/svod/admin/service` | POST | Aiya / Founder |
+| `/svod/admin/service` | POST | Aiya / Founder (`work_kind` опционально) |
 | `/svod/admin/service/:code` | PUT | Aiya / Founder |
 | `/svod/admin/service/:code` | DELETE | Aiya / Founder (отключить услугу) |
-| `/svod/admin/reward` | POST | Aiya / Founder — обновить ставку (`action`, `reward`) |
+| `/svod/admin/reward` | POST | Aiya / Founder — обновить ставку (`action`, `reward`, опц. `work_kind`) |
+| `/exchange/listings` | GET | API key — лоты; `?status=` + `?work_kind=` |
 
 ```bash
 # Каталог Свода (услуги + Государственный Свод Вознаграждений)
 curl -s http://localhost:8080/svod \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq .
+
+# Только «Реализация»
+curl -s "http://localhost:8080/svod?work_kind=implementation" \
+  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq .
+
+# Лоты биржи с фильтром work_kind
+curl -s "http://localhost:8080/exchange/listings?work_kind=development" \
   -H "Authorization: Bearer $QUAZAR_API_KEY" | jq .
 
 # Обновить ставку в Государственном Своде Вознаграждений (Aiya): video_create / video_view
@@ -347,7 +366,8 @@ curl -s -X POST http://localhost:8080/svod/admin/service \
     "category_code": "IT",
     "base_price": 150,
     "min_quantity": 1,
-    "max_quantity": 20
+    "max_quantity": 20,
+    "work_kind": "development"
   }' | jq .
 
 # Биржа: заявка на продажу → СБ verify → публичный лот
@@ -359,7 +379,8 @@ curl -s -X POST http://localhost:8080/exchange/requests \
 
 После миграции `004_service_catalog.sql` доступны seed-данные: категория `IT`, услуга `WEB_DEV` (base_price **100 QZ**).
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
-После миграции `044_exchange_state_mediated.sql` — биржа через государство/СБ (P2P offers/orders удалены).
+После миграции `044_exchange_state_mediated.sql` — биржа через государство/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
+После миграции `045_service_work_kind.sql` — `work_kind` на `service_catalog` и `svod_rewards`; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с `parts`/`sections`; фильтр `?work_kind=` на `/svod`, `/svod/rewards`, `/exchange/listings`.
 После миграции `005_candidacies.sql` доступны таблицы `candidacies` и `candidacy_votes`.
 После миграции `008_initiatives_referendums.sql` доступны таблицы `initiatives`, `initiative_votes`, `referendums`, `referendum_votes`.
 

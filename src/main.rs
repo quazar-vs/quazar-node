@@ -362,6 +362,13 @@ async fn main() {
         .route("/exchange/inventory", post(exchange::adjust_inventory))
         .route("/exchange/balance", get(exchange::get_balance_handler))
         .route("/exchange/balance/add", post(exchange::add_balance))
+        // Temporary Passport compatibility (old P2P paths → listings/requests/deals)
+        .route("/exchange/offers", get(exchange::legacy_get_offers))
+        .route("/exchange/offer", post(exchange::legacy_create_offer))
+        .route("/exchange/offer/:id", get(exchange::legacy_get_offer_by_id))
+        .route("/exchange/offer/:id", delete(exchange::legacy_cancel_offer))
+        .route("/exchange/order", post(exchange::legacy_create_order))
+        .route("/exchange/orders", get(exchange::legacy_get_orders))
         .route("/api/channel/videos", post(reward_svod::create_video_handler))
         .route(
             "/api/channel/videos/:id/view",

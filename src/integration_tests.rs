@@ -391,7 +391,7 @@ async fn svod_catalog_and_exchange_integration() {
         .expect("seed WEB_DEV service");
     assert_eq!(web_dev.base_price, 100);
 
-    let catalog = crate::svod::get_catalog(&pool, true)
+    let catalog = crate::svod::get_catalog(&pool, true, None)
         .await
         .expect("catalog");
     assert!(catalog.iter().any(|s| s.code == "WEB_DEV"));
@@ -409,12 +409,14 @@ async fn svod_catalog_and_exchange_integration() {
             base_price: 50,
             min_quantity: Some(1),
             max_quantity: Some(10),
+            work_kind: None,
         },
     )
     .await
     .expect("create service");
 
     assert_eq!(custom.code, svc_code);
+    assert_eq!(custom.work_kind, "implementation");
 
     let err = crate::svod::create_service(
         &pool,
@@ -427,6 +429,7 @@ async fn svod_catalog_and_exchange_integration() {
             base_price: 10,
             min_quantity: None,
             max_quantity: None,
+            work_kind: None,
         },
     )
     .await;
