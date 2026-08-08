@@ -262,8 +262,10 @@ pub struct InventoryAdjustBody {
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
     pub status: Option<String>,
-    /// Filter by catalog work_kind: `development` | `implementation`
+    /// Filter by Свод work_kind: `development` | `implementation`
     pub work_kind: Option<String>,
+    /// Optional position code from Государственный Свод (`parts.*.items`)
+    pub svod_code: Option<String>,
 }
 
 /// POST /exchange/requests — citizen creates private sell/buy request.
@@ -404,7 +406,7 @@ fn request_json(
 }
 
 /// GET /exchange/requests — citizen: only own requests; SB: pending_sb (or ?status=).
-/// Optional `?work_kind=development|implementation` filters via service_catalog.
+/// Optional `?work_kind=` and `?svod_code=` filter via Свод positions.
 pub async fn list_requests(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -420,6 +422,12 @@ pub async fn list_requests(
         ),
         None => None,
     };
+    let svod_code = q
+        .svod_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
     type ReqRow = (
         String,
@@ -436,72 +444,46 @@ pub async fn list_requests(
 
     let rows: Vec<serde_json::Value> = if auth.can_exchange_security() {
         let status = q.status.unwrap_or_else(|| "pending_sb".into());
-        let fetched: Vec<ReqRow> = if let Some(ref kind) = work_kind {
-            sqlx::query_as(
-                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
-                        r.unit_svod, r.status, r.created_at,
-                        COALESCE(s.work_kind, 'implementation') AS work_kind
-                 FROM exchange_requests r
-                 LEFT JOIN service_catalog s ON s.code = r.svod_code
-                 WHERE r.status = $1 AND COALESCE(s.work_kind, 'implementation') = $2
-                 ORDER BY r.created_at DESC LIMIT 200",
-            )
-            .bind(&status)
-            .bind(kind)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-        } else {
-            sqlx::query_as(
-                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
-                        r.unit_svod, r.status, r.created_at,
-                        COALESCE(s.work_kind, 'implementation') AS work_kind
-                 FROM exchange_requests r
-                 LEFT JOIN service_catalog s ON s.code = r.svod_code
-                 WHERE r.status = $1
-                 ORDER BY r.created_at DESC LIMIT 200",
-            )
-            .bind(&status)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-        };
+        let fetched: Vec<ReqRow> = sqlx::query_as(
+            "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
+                    r.unit_svod, r.status, r.created_at,
+                    COALESCE(s.work_kind, 'implementation') AS work_kind
+             FROM exchange_requests r
+             LEFT JOIN service_catalog s ON s.code = r.svod_code
+             WHERE r.status = $1
+               AND ($2::text IS NULL OR COALESCE(s.work_kind, 'implementation') = $2)
+               AND ($3::text IS NULL OR r.svod_code = $3)
+             ORDER BY r.created_at DESC LIMIT 200",
+        )
+        .bind(&status)
+        .bind(work_kind.as_deref())
+        .bind(svod_code.as_deref())
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
         fetched
             .into_iter()
             .map(|r| request_json(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9))
             .collect()
     } else {
         // Citizen: always only own requests (auth-scoped).
-        let fetched: Vec<ReqRow> = if let Some(ref kind) = work_kind {
-            sqlx::query_as(
-                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
-                        r.unit_svod, r.status, r.created_at,
-                        COALESCE(s.work_kind, 'implementation') AS work_kind
-                 FROM exchange_requests r
-                 LEFT JOIN service_catalog s ON s.code = r.svod_code
-                 WHERE r.citizen_id = $1 AND COALESCE(s.work_kind, 'implementation') = $2
-                 ORDER BY r.created_at DESC LIMIT 200",
-            )
-            .bind(&citizen_id)
-            .bind(kind)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-        } else {
-            sqlx::query_as(
-                "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
-                        r.unit_svod, r.status, r.created_at,
-                        COALESCE(s.work_kind, 'implementation') AS work_kind
-                 FROM exchange_requests r
-                 LEFT JOIN service_catalog s ON s.code = r.svod_code
-                 WHERE r.citizen_id = $1
-                 ORDER BY r.created_at DESC LIMIT 200",
-            )
-            .bind(&citizen_id)
-            .fetch_all(&state.db)
-            .await
-            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-        };
+        let fetched: Vec<ReqRow> = sqlx::query_as(
+            "SELECT r.id, r.citizen_id, r.side, r.svod_code, r.qty_total, r.qty_remaining,
+                    r.unit_svod, r.status, r.created_at,
+                    COALESCE(s.work_kind, 'implementation') AS work_kind
+             FROM exchange_requests r
+             LEFT JOIN service_catalog s ON s.code = r.svod_code
+             WHERE r.citizen_id = $1
+               AND ($2::text IS NULL OR COALESCE(s.work_kind, 'implementation') = $2)
+               AND ($3::text IS NULL OR r.svod_code = $3)
+             ORDER BY r.created_at DESC LIMIT 200",
+        )
+        .bind(&citizen_id)
+        .bind(work_kind.as_deref())
+        .bind(svod_code.as_deref())
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
         fetched
             .into_iter()
             .map(|r| request_json(r.0, r.1, r.2, r.3, r.4, r.5, r.6, r.7, r.8, r.9))
@@ -705,7 +687,7 @@ pub async fn sb_verify_request(
 }
 
 /// GET /exchange/listings — public active listings (mode=offers витрина «Предложения»).
-/// Optional `?work_kind=development|implementation` filters via service_catalog join.
+/// Optional `?work_kind=` and `?svod_code=` filter via Свод positions (`service_catalog`).
 pub async fn list_listings(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
@@ -717,38 +699,47 @@ pub async fn list_listings(
         ),
         None => None,
     };
+    let svod_code = q
+        .svod_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
 
-    // Join catalog for work_kind; listings are sell-side supply after SB verify.
-    let rows = if let Some(ref kind) = work_kind {
-        sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, String, i64, String)>(
-            "SELECT l.id, l.request_id, l.seller_id, l.svod_code, l.qty_total, l.qty_remaining,
-                    l.unit_svod, l.unit_buyer_price, l.unit_seller_price, l.status, l.created_at,
-                    COALESCE(s.work_kind, 'implementation') AS work_kind
-             FROM exchange_listings l
-             LEFT JOIN service_catalog s ON s.code = l.svod_code
-             WHERE l.status = $1 AND COALESCE(s.work_kind, 'implementation') = $2
-             ORDER BY l.created_at DESC LIMIT 200",
-        )
-        .bind(&status)
-        .bind(kind)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-    } else {
-        sqlx::query_as::<_, (String, String, String, String, i64, i64, i64, i64, i64, String, i64, String)>(
-            "SELECT l.id, l.request_id, l.seller_id, l.svod_code, l.qty_total, l.qty_remaining,
-                    l.unit_svod, l.unit_buyer_price, l.unit_seller_price, l.status, l.created_at,
-                    COALESCE(s.work_kind, 'implementation') AS work_kind
-             FROM exchange_listings l
-             LEFT JOIN service_catalog s ON s.code = l.svod_code
-             WHERE l.status = $1
-             ORDER BY l.created_at DESC LIMIT 200",
-        )
-        .bind(&status)
-        .fetch_all(&state.db)
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
-    };
+    // Join Свод positions for work_kind; listings are sell-side supply after SB verify.
+    let rows = sqlx::query_as::<
+        _,
+        (
+            String,
+            String,
+            String,
+            String,
+            i64,
+            i64,
+            i64,
+            i64,
+            i64,
+            String,
+            i64,
+            String,
+        ),
+    >(
+        "SELECT l.id, l.request_id, l.seller_id, l.svod_code, l.qty_total, l.qty_remaining,
+                l.unit_svod, l.unit_buyer_price, l.unit_seller_price, l.status, l.created_at,
+                COALESCE(s.work_kind, 'implementation') AS work_kind
+         FROM exchange_listings l
+         LEFT JOIN service_catalog s ON s.code = l.svod_code
+         WHERE l.status = $1
+           AND ($2::text IS NULL OR COALESCE(s.work_kind, 'implementation') = $2)
+           AND ($3::text IS NULL OR l.svod_code = $3)
+         ORDER BY l.created_at DESC LIMIT 200",
+    )
+    .bind(&status)
+    .bind(work_kind.as_deref())
+    .bind(svod_code.as_deref())
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
 
     let listings = rows
         .into_iter()

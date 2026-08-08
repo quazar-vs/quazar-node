@@ -1,8 +1,11 @@
-//! **Государственный Свод Вознаграждений** — ставки КВАЗИ за действия граждан.
-//! Часть Свода Оснований (`/svod`); таблица `svod_rewards` (не отдельный продукт «Свод»).
+//! **Государственный Свод Вознаграждений** — единый двучастный реестр.
 //!
-//! Структура двучастная: **Разработка** (`development`) и **Реализация** (`implementation`).
-//! Официальное отображаемое имя: [`REWARDS_TITLE`].
+//! Таблица `svod_rewards` хранит **ставки за действия** граждан (rates) внутри того же
+//! Свода, что и биржевые позиции (`service_catalog` → `parts.*.items`). Это не отдельный
+//! «каталог товаров и услуг» и не отдельный продукт «Свод».
+//!
+//! Части: **Разработка** (`development`) и **Реализация** (`implementation`).
+//! Официальное имя: [`REWARDS_TITLE`] / [`crate::svod::SVOD_TITLE`].
 
 use std::sync::Arc;
 
@@ -19,11 +22,11 @@ use uuid::Uuid;
 
 use crate::auth::AuthContext;
 use crate::response::{self, ApiResponse};
-use crate::svod::{self, WORK_KIND_DEVELOPMENT, WORK_KIND_IMPLEMENTATION};
+use crate::svod::{self, SVOD_TITLE, WORK_KIND_DEVELOPMENT, WORK_KIND_IMPLEMENTATION};
 use crate::AppState;
 
-/// Official display name of the citizen reward rates section.
-pub const REWARDS_TITLE: &str = "Государственный Свод Вознаграждений";
+/// Official display name (alias of [`SVOD_TITLE`]).
+pub const REWARDS_TITLE: &str = SVOD_TITLE;
 
 pub const ACTION_VIDEO_CREATE: &str = "video_create";
 pub const ACTION_VIDEO_VIEW: &str = "video_view";

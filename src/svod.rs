@@ -20,9 +20,12 @@ pub struct ServiceCategory {
     pub description: Option<String>,
 }
 
-/// Catalog work kind: `development` (Разработка) | `implementation` (Реализация).
+/// Part of the unified Свод: `development` (Разработка) | `implementation` (Реализация).
 pub const WORK_KIND_DEVELOPMENT: &str = "development";
 pub const WORK_KIND_IMPLEMENTATION: &str = "implementation";
+
+/// Official display name — one registry for exchange positions and action rates.
+pub const SVOD_TITLE: &str = "Государственный Свод Вознаграждений";
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ServiceItem {
@@ -397,8 +400,9 @@ fn require_aiya(auth: &AuthContext) -> SvodResult<()> {
     }
 }
 
-fn service_with_label(s: &ServiceItem) -> serde_json::Value {
+fn position_with_label(s: &ServiceItem) -> serde_json::Value {
     serde_json::json!({
+        "kind": "position",
         "id": s.id,
         "code": s.code,
         "name": s.name,
@@ -415,151 +419,189 @@ fn service_with_label(s: &ServiceItem) -> serde_json::Value {
     })
 }
 
-/// Двучастная структура Государственного Свода: Разработка + Реализация.
-pub fn build_svod_parts(
-    services: &[ServiceItem],
-    rewards: &[crate::reward_svod::RewardPublic],
+fn rate_with_kind(r: &crate::reward_svod::RewardPublic) -> serde_json::Value {
+    serde_json::json!({
+        "kind": "rate",
+        "action": r.action,
+        "code": r.action,
+        "unit": r.unit,
+        "reward": r.reward,
+        "work_kind": r.work_kind,
+        "work_kind_label": r.work_kind_label,
+    })
+}
+
+fn build_part(
+    kind: &str,
+    title: &str,
+    hint: &str,
+    items: Vec<serde_json::Value>,
+    rates: Vec<serde_json::Value>,
 ) -> serde_json::Value {
-    let filter_svc = |kind: &str| {
-        services
+    // Canonical fields: items (биржевые позиции), rates (ставки за действия).
+    // Legacy aliases services/rewards kept for older Passport builds.
+    serde_json::json!({
+        "work_kind": kind,
+        "title": title,
+        "hint": hint,
+        "items": items.clone(),
+        "rates": rates.clone(),
+        "services": items,
+        "rewards": rates,
+    })
+}
+
+/// Двучастная структура единого Государственного Свода: Разработка + Реализация.
+pub fn build_svod_parts(
+    positions: &[ServiceItem],
+    rates: &[crate::reward_svod::RewardPublic],
+) -> serde_json::Value {
+    let filter_pos = |kind: &str| {
+        positions
             .iter()
             .filter(|s| s.work_kind == kind)
-            .map(service_with_label)
+            .map(position_with_label)
             .collect::<Vec<_>>()
     };
-    let filter_rew = |kind: &str| {
-        rewards
+    let filter_rates = |kind: &str| {
+        rates
             .iter()
             .filter(|r| r.work_kind == kind)
-            .cloned()
+            .map(rate_with_kind)
             .collect::<Vec<_>>()
     };
-    let development = serde_json::json!({
-        "work_kind": WORK_KIND_DEVELOPMENT,
-        "title": "Разработка",
-        "hint": "Идеи, темы, креативный вклад",
-        "services": filter_svc(WORK_KIND_DEVELOPMENT),
-        "rewards": filter_rew(WORK_KIND_DEVELOPMENT),
-    });
-    let implementation = serde_json::json!({
-        "work_kind": WORK_KIND_IMPLEMENTATION,
-        "title": "Реализация",
-        "hint": "Код, правки, ролики, просмотры, поставка",
-        "services": filter_svc(WORK_KIND_IMPLEMENTATION),
-        "rewards": filter_rew(WORK_KIND_IMPLEMENTATION),
-    });
     serde_json::json!({
-        "development": development,
-        "implementation": implementation,
+        "development": build_part(
+            WORK_KIND_DEVELOPMENT,
+            "Разработка",
+            "Идеи, темы, креативный вклад",
+            filter_pos(WORK_KIND_DEVELOPMENT),
+            filter_rates(WORK_KIND_DEVELOPMENT),
+        ),
+        "implementation": build_part(
+            WORK_KIND_IMPLEMENTATION,
+            "Реализация",
+            "Код, правки, ролики, просмотры, поставка",
+            filter_pos(WORK_KIND_IMPLEMENTATION),
+            filter_rates(WORK_KIND_IMPLEMENTATION),
+        ),
     })
 }
 
 pub fn build_svod_sections(
-    services: &[ServiceItem],
-    rewards: &[crate::reward_svod::RewardPublic],
+    positions: &[ServiceItem],
+    rates: &[crate::reward_svod::RewardPublic],
 ) -> Vec<serde_json::Value> {
-    let parts = build_svod_parts(services, rewards);
+    let parts = build_svod_parts(positions, rates);
     vec![
         parts["development"].clone(),
         parts["implementation"].clone(),
     ]
 }
 
+fn role_view_payload() -> serde_json::Value {
+    // Passport: filter button near balance (offers/needs + work_kind + optional position);
+    // one «Заявки» entry (active + submit). No separate «catalog» registry.
+    serde_json::json!({
+        "filter": {
+            "ui": "button_near_balance",
+            "when_off": "showcase_shows_all; params_chosen_on_submit",
+            "mode": ["offers", "needs"],
+            "work_kind": ["development", "implementation"],
+            "svod_code": "optional position code from GET /svod → parts.*.items",
+        },
+        "offers": {
+            "label": "Предложения",
+            "mode": "offers",
+            "showcase": "GET /exchange/listings?work_kind=&svod_code=",
+            "submit_svod": "GET /svod?work_kind= → parts.*.items",
+            "submit_catalog": "GET /svod?work_kind= → parts.*.items",
+            "submit_side": "sell",
+            "hint": "Витрина: публичные лоты. Подать заявку: позиция из Государственного Свода Вознаграждений → side=sell",
+        },
+        "needs": {
+            "label": "Потребность",
+            "mode": "needs",
+            "showcase": "GET /svod?work_kind= → parts.*.items",
+            "submit_svod": "GET /svod?work_kind= → parts.*.items",
+            "submit_catalog": "GET /svod?work_kind= → parts.*.items",
+            "submit_side": "buy",
+            "hint": "Витрина: позиции государства из того же Свода. Подать заявку: позиция Свода → side=buy",
+        },
+    })
+}
+
+/// GET /svod — единый **Государственный Свод Вознаграждений** (две части).
 pub async fn get_catalog_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<CatalogQuery>,
 ) -> Result<Json<ApiResponse>, SvodError> {
-    let services = get_catalog(&state.db, true, q.work_kind.as_deref()).await?;
-    let rewards = crate::reward_svod::list_rewards_public_filtered(
+    let positions = get_catalog(&state.db, true, q.work_kind.as_deref()).await?;
+    let rates = crate::reward_svod::list_rewards_public_filtered(
         &state.db,
         q.work_kind.as_deref(),
     )
     .await
     .map_err(SvodError::Database)?;
-    let parts = build_svod_parts(&services, &rewards);
-    let sections = build_svod_sections(&services, &rewards);
-    let services_json: Vec<_> = services.iter().map(service_with_label).collect();
+    let parts = build_svod_parts(&positions, &rates);
+    let sections = build_svod_sections(&positions, &rates);
+    let items_json: Vec<_> = positions.iter().map(position_with_label).collect();
+    let rates_json: Vec<_> = rates.iter().map(rate_with_kind).collect();
     Ok(Json(ApiResponse::success(serde_json::json!({
         "currency": "КВАЗИ",
-        "title": crate::reward_svod::REWARDS_TITLE,
-        "rewards_title": crate::reward_svod::REWARDS_TITLE,
-        // Canonical two-part structure of the Свод.
+        "title": SVOD_TITLE,
+        "name": SVOD_TITLE,
+        "rewards_title": SVOD_TITLE,
+        "canon": "Единый Государственный Свод Вознаграждений = parts.development + parts.implementation; биржа берёт позиции из parts.*.items (не отдельный каталог).",
         "parts": parts,
         "sections": sections,
         "work_kind_labels": {
             "development": "Разработка",
             "implementation": "Реализация",
         },
-        // Flat lists for backward-compatible clients (same filter applied).
-        "services": services_json,
-        "rewards": rewards,
-        // Passport UX modes (replaces Исполнитель/Заказчик):
-        // offers = Предложения; needs = Потребность. Filter both by work_kind.
-        "role_view": {
-            "offers": {
-                "label": "Предложения",
-                "mode": "offers",
-                "showcase": "GET /exchange/listings?work_kind=",
-                "submit_catalog": "GET /svod?work_kind= → parts.*.services (или services)",
-                "submit_side": "sell",
-                "hint": "Витрина: публичные лоты — что нужно государству. Подать заявку: позиция из Свода → side=sell",
-            },
-            "needs": {
-                "label": "Потребность",
-                "mode": "needs",
-                "showcase": "GET /svod?work_kind= → parts.*.services (или services)",
-                "submit_catalog": "GET /svod?work_kind= → parts.*.services (или services)",
-                "submit_side": "buy",
-                "hint": "Витрина: услуги/ставки государства из Свода. Подать заявку: позиция из Свода → side=buy",
-            },
-        },
+        // Flat lists (same filter). items/rates — канон; services/rewards — алиасы.
+        "items": items_json.clone(),
+        "rates": rates_json.clone(),
+        "services": items_json,
+        "rewards": rates_json,
+        "role_view": role_view_payload(),
     }))))
 }
 
-/// GET /svod/rewards — **Государственный Свод Вознаграждений** в двух частях.
+/// GET /svod/rewards — тот же Свод, акцент на ставках за действия (две части).
 pub async fn get_rewards_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<crate::reward_svod::RewardsQuery>,
 ) -> Result<Json<ApiResponse>, SvodError> {
-    let rewards = crate::reward_svod::list_rewards_public_filtered(
+    let positions = get_catalog(&state.db, true, q.work_kind.as_deref()).await?;
+    let rates = crate::reward_svod::list_rewards_public_filtered(
         &state.db,
         q.work_kind.as_deref(),
     )
     .await
     .map_err(SvodError::Database)?;
-    // Empty service slice: rewards endpoint focuses on rates, still two-part.
-    let empty_services: Vec<ServiceItem> = Vec::new();
-    let parts = build_svod_parts(&empty_services, &rewards);
-    // Drop empty services keys noise — rebuild rewards-only parts.
-    let parts = serde_json::json!({
-        "development": {
-            "work_kind": WORK_KIND_DEVELOPMENT,
-            "title": "Разработка",
-            "hint": "Идеи, темы, креативный вклад",
-            "rewards": parts["development"]["rewards"],
-        },
-        "implementation": {
-            "work_kind": WORK_KIND_IMPLEMENTATION,
-            "title": "Реализация",
-            "hint": "Код, правки, ролики, просмотры, поставка",
-            "rewards": parts["implementation"]["rewards"],
-        },
-    });
-    let sections = vec![
-        parts["development"].clone(),
-        parts["implementation"].clone(),
-    ];
+    // Same two-part registry as GET /svod (positions + rates), one title.
+    let parts = build_svod_parts(&positions, &rates);
+    let sections = build_svod_sections(&positions, &rates);
+    let rates_json: Vec<_> = rates.iter().map(rate_with_kind).collect();
+    let items_json: Vec<_> = positions.iter().map(position_with_label).collect();
     Ok(Json(ApiResponse::success(serde_json::json!({
         "currency": "КВАЗИ",
-        "title": crate::reward_svod::REWARDS_TITLE,
-        "rewards_title": crate::reward_svod::REWARDS_TITLE,
+        "title": SVOD_TITLE,
+        "name": SVOD_TITLE,
+        "rewards_title": SVOD_TITLE,
+        "canon": "Тот же Государственный Свод Вознаграждений; rates — ставки за действия, items — позиции для биржи.",
         "parts": parts,
         "sections": sections,
         "work_kind_labels": {
             "development": "Разработка",
             "implementation": "Реализация",
         },
-        "rewards": rewards,
+        "items": items_json.clone(),
+        "rates": rates_json.clone(),
+        "services": items_json,
+        "rewards": rates_json,
+        "role_view": role_view_payload(),
     }))))
 }
 
