@@ -388,7 +388,7 @@ curl -s -X POST http://localhost:8080/exchange/requests \
   -d '{"side":"sell","svod_code":"WEB_DEV","quantity":2}' | jq .
 ```
 
-После миграции `004_service_catalog.sql` доступны seed-данные: категория `IT`, позиция `WEB_DEV` (base_price **100 QZ**).
+После миграции `004_service_catalog.sql` (внутренняя таблица позиций Свода) доступны seed-данные: категория `IT`, позиция `WEB_DEV` (base_price **100 QZ**). В API/UI это **позиции Свода** (`parts.*.items`), не отдельный реестр.
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
 После миграции `044_exchange_state_mediated.sql` — биржа через государство/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
 После миграции `045_service_work_kind.sql` — `work_kind` на позициях Свода и ставках; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с единым title и `parts`/`sections`; фильтр `?work_kind=` / `?svod_code=` на бирже. UX: `role_view.offers` / `role_view.needs`, позиции из `parts.*.items`.

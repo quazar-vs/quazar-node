@@ -377,9 +377,9 @@ async fn citizen_suspended_projection() {
 }
 
 #[tokio::test]
-async fn svod_catalog_and_exchange_integration() {
+async fn svod_items_and_exchange_integration() {
     let Some(pool) = postgres_pool().await else {
-        eprintln!("skip svod_catalog_and_exchange_integration: PostgreSQL unavailable");
+        eprintln!("skip svod_items_and_exchange_integration: PostgreSQL unavailable");
         return;
     };
     db::run_migrations(&pool)
@@ -391,10 +391,10 @@ async fn svod_catalog_and_exchange_integration() {
         .expect("seed WEB_DEV service");
     assert_eq!(web_dev.base_price, 100);
 
-    let catalog = crate::svod::get_catalog(&pool, true, None)
+    let items = crate::svod::get_svod_items(&pool, true, None)
         .await
-        .expect("catalog");
-    assert!(catalog.iter().any(|s| s.code == "WEB_DEV"));
+        .expect("svod items");
+    assert!(items.iter().any(|s| s.code == "WEB_DEV"));
 
     let svc_code = format!("SMOKE_SVC_{}", uuid::Uuid::new_v4().simple());
 

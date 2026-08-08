@@ -687,7 +687,7 @@ pub async fn sb_verify_request(
 }
 
 /// GET /exchange/listings — public active listings (mode=offers витрина «Предложения»).
-/// Optional `?work_kind=` and `?svod_code=` filter via Свод positions (`service_catalog`).
+/// Optional `?work_kind=` and `?svod_code=` filter via Свод positions (`parts.*.items`).
 pub async fn list_listings(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListQuery>,
@@ -1474,7 +1474,7 @@ pub async fn legacy_create_offer(
         .svod_code
         .or(body.service)
         .ok_or_else(|| ExchangeError::BadRequest("svod_code is required".into()))?;
-    let _ = body.price; // catalog rate is authoritative in state-mediated flow
+    let _ = body.price; // Свод base_price is authoritative in state-mediated flow
     create_request(
         state,
         auth,

@@ -45,7 +45,7 @@ pub struct ServiceItem {
 }
 
 #[derive(Debug, Deserialize)]
-pub struct CatalogQuery {
+pub struct SvodQuery {
     /// Filter: `development` | `implementation`
     pub work_kind: Option<String>,
 }
@@ -119,6 +119,7 @@ impl IntoResponse for SvodError {
 
 type SvodResult<T> = Result<T, SvodError>;
 
+// Table `service_catalog` stores Свод exchange positions (items). API never exposes "catalog".
 const SERVICE_SELECT: &str = "SELECT s.id, s.code, s.name, s.description, s.category_id,
     c.code AS category_code, c.name AS category_name,
     s.base_price, s.min_quantity, s.max_quantity, s.is_active, s.work_kind
@@ -207,7 +208,17 @@ pub async fn get_categories(pool: &PgPool) -> SvodResult<Vec<ServiceCategory>> {
     .map_err(|e| SvodError::Database(e.to_string()))
 }
 
-pub async fn get_catalog(
+/// Load Свод exchange positions (`parts.*.items`). Internal storage table: `service_catalog`.
+pub async fn get_svod_items(
+    pool: &PgPool,
+    active_only: bool,
+    work_kind: Option<&str>,
+) -> SvodResult<Vec<ServiceItem>> {
+    get_positions(pool, active_only, work_kind).await
+}
+
+/// Alias kept for older internal call sites; prefer [`get_svod_items`].
+pub async fn get_positions(
     pool: &PgPool,
     active_only: bool,
     work_kind: Option<&str>,
@@ -391,11 +402,12 @@ fn require_aiya(auth: &AuthContext) -> SvodResult<()> {
         Ok(())
     } else if auth.is_node {
         Err(SvodError::Forbidden(
-            "Node credentials cannot manage the service catalog".to_string(),
+            "Node credentials cannot manage the Государственный Свод Вознаграждений".to_string(),
         ))
     } else {
         Err(SvodError::Forbidden(
-            "Only Aiya and Founder can manage the service catalog (Agent: read-only)".to_string(),
+            "Only Aiya and Founder can manage the Государственный Свод Вознаграждений (Agent: read-only)"
+                .to_string(),
         ))
     }
 }
@@ -530,11 +542,11 @@ fn role_view_payload() -> serde_json::Value {
 }
 
 /// GET /svod — единый **Государственный Свод Вознаграждений** (две части).
-pub async fn get_catalog_handler(
+pub async fn get_svod_handler(
     State(state): State<Arc<AppState>>,
-    Query(q): Query<CatalogQuery>,
+    Query(q): Query<SvodQuery>,
 ) -> Result<Json<ApiResponse>, SvodError> {
-    let positions = get_catalog(&state.db, true, q.work_kind.as_deref()).await?;
+    let positions = get_svod_items(&state.db, true, q.work_kind.as_deref()).await?;
     let rates = crate::reward_svod::list_rewards_public_filtered(
         &state.db,
         q.work_kind.as_deref(),
@@ -550,14 +562,15 @@ pub async fn get_catalog_handler(
         "title": SVOD_TITLE,
         "name": SVOD_TITLE,
         "rewards_title": SVOD_TITLE,
-        "canon": "Единый Государственный Свод Вознаграждений = parts.development + parts.implementation; биржа берёт позиции только из parts.*.items (не отдельный реестр).",
+        "canon": "Единый Государственный Свод Вознаграждений = parts.development + parts.implementation. Позиции биржи = parts.*.items; ставки = parts.*.rates. Отдельного реестра нет.",
+        "note": "Поле services — legacy-алиас items (не UI-имя).",
         "parts": parts,
         "sections": sections,
         "work_kind_labels": {
             "development": "Разработка",
             "implementation": "Реализация",
         },
-        // Flat lists (same filter). items/rates — канон; services/rewards — алиасы.
+        // Flat lists (same filter). items/rates — канон; services/rewards — legacy aliases only.
         "items": items_json.clone(),
         "rates": rates_json.clone(),
         "services": items_json,
@@ -571,7 +584,7 @@ pub async fn get_rewards_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<crate::reward_svod::RewardsQuery>,
 ) -> Result<Json<ApiResponse>, SvodError> {
-    let positions = get_catalog(&state.db, true, q.work_kind.as_deref()).await?;
+    let positions = get_svod_items(&state.db, true, q.work_kind.as_deref()).await?;
     let rates = crate::reward_svod::list_rewards_public_filtered(
         &state.db,
         q.work_kind.as_deref(),
@@ -589,6 +602,7 @@ pub async fn get_rewards_handler(
         "name": SVOD_TITLE,
         "rewards_title": SVOD_TITLE,
         "canon": "Тот же Государственный Свод Вознаграждений; rates — ставки за действия, items — позиции для биржи.",
+        "note": "Поле services — legacy-алиас items (не UI-имя).",
         "parts": parts,
         "sections": sections,
         "work_kind_labels": {

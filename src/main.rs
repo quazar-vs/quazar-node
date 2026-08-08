@@ -374,7 +374,7 @@ async fn main() {
             "/api/channel/videos/:id/view",
             post(reward_svod::view_video_handler),
         )
-        .route("/svod", get(svod::get_catalog_handler))
+        .route("/svod", get(svod::get_svod_handler))
         .route("/svod/rewards", get(svod::get_rewards_handler))
         .route("/svod/categories", get(svod::get_categories_handler))
         .route("/svod/service/:code", get(svod::get_service_handler))
