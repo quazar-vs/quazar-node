@@ -1,4 +1,4 @@
--- Государственный Свод Вознаграждений (часть Свода Оснований): ставки КВАЗИ за действия граждан.
+-- Reward rates inside the single Svod (Свод Оснований): КВАЗИ for citizen actions.
 -- Table name svod_rewards (not "svod") to avoid clashing with the product name /svod API.
 
 DO $$
