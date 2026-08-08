@@ -345,11 +345,13 @@ pub async fn get_catalog_handler(
     Ok(Json(ApiResponse::success(serde_json::json!({
         "currency": "КВАЗИ",
         "services": services,
+        // Official name of the citizen reward rates section (array kept for clients).
+        "rewards_title": crate::reward_svod::REWARDS_TITLE,
         "rewards": rewards,
     }))))
 }
 
-/// GET /svod/rewards — reward section of the same Svod (services stay under /svod).
+/// GET /svod/rewards — **Государственный Свод Вознаграждений** (services stay under `/svod`).
 pub async fn get_rewards_handler(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<ApiResponse>, SvodError> {
@@ -358,6 +360,8 @@ pub async fn get_rewards_handler(
         .map_err(|e| SvodError::Database(e.to_string()))?;
     Ok(Json(ApiResponse::success(serde_json::json!({
         "currency": "КВАЗИ",
+        "title": crate::reward_svod::REWARDS_TITLE,
+        "rewards_title": crate::reward_svod::REWARDS_TITLE,
         "rewards": rewards,
     }))))
 }

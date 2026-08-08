@@ -1,5 +1,7 @@
-//! Reward rates that belong to the single Svod (`/svod`): КВАЗИ for citizen actions.
-//! Stored in `svod_rewards` (not a second product named «Свод»).
+//! **Государственный Свод Вознаграждений** — ставки КВАЗИ за действия граждан.
+//! Часть Свода Оснований (`/svod`); таблица `svod_rewards` (не отдельный продукт «Свод»).
+//!
+//! Официальное отображаемое имя раздела: [`REWARDS_TITLE`].
 
 use std::sync::Arc;
 
@@ -17,6 +19,9 @@ use uuid::Uuid;
 use crate::auth::AuthContext;
 use crate::response::{self, ApiResponse};
 use crate::AppState;
+
+/// Official display name of the citizen reward rates section.
+pub const REWARDS_TITLE: &str = "Государственный Свод Вознаграждений";
 
 pub const ACTION_VIDEO_CREATE: &str = "video_create";
 pub const ACTION_VIDEO_VIEW: &str = "video_view";
@@ -223,7 +228,7 @@ async fn record_ledger(
     Ok(())
 }
 
-/// Award КВАЗИ for an action using current Svod reward rates.
+/// Award КВАЗИ for an action using current rates from the Государственный Свод Вознаграждений.
 pub async fn award_for_action(
     pool: &PgPool,
     citizen_id: &str,
@@ -260,17 +265,21 @@ pub async fn award_for_action(
     Ok((amount, new_balance))
 }
 
-/// POST /svod/admin/reward — Aiya/Founder updates a reward rate inside the Svod.
+/// POST /svod/admin/reward — Aiya/Founder updates a rate in the Государственный Свод Вознаграждений.
 pub async fn update_reward_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(req): Json<UpdateRewardRequest>,
 ) -> impl IntoResponse {
     if auth.is_node {
-        return response::forbidden("Node credentials cannot update svod rewards");
+        return response::forbidden(
+            "Node credentials cannot update the Государственный Свод Вознаграждений",
+        );
     }
     if !auth.can_manage_svod() {
-        return response::forbidden("Only Aiya / Founder can update svod rewards");
+        return response::forbidden(
+            "Only Aiya / Founder can update the Государственный Свод Вознаграждений",
+        );
     }
     let action = req.action.trim();
     if action != ACTION_VIDEO_CREATE && action != ACTION_VIDEO_VIEW {

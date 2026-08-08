@@ -163,7 +163,7 @@ async fn main() {
     if let Err(e) = reward_svod::ensure_rewards_seeded(&pool).await {
         tracing::warn!(error = %e, "failed to seed svod reward defaults");
     } else {
-        tracing::info!("svod rewards seeded / verified");
+        tracing::info!("Государственный Свод Вознаграждений seeded / verified");
     }
     let pending_count = pending::count(&pool).await.unwrap_or(0);
     tracing::info!(pending_events = pending_count, "PostgreSQL connected");
