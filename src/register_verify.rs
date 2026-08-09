@@ -237,7 +237,7 @@ pub async fn email_belongs_to_citizen(pool: &PgPool, email: &str) -> Result<bool
     .await
 }
 
-/// Citizenship and/or street-mayor application exists for this email.
+/// Citizenship and/or legacy street-mayor application exists for this email.
 pub async fn email_has_candidate_application(
     pool: &PgPool,
     email: &str,

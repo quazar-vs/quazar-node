@@ -477,6 +477,12 @@ impl EventValidator {
                 }
                 Ok(())
             }
+            QuazarEventType::MayorNodeLaunchRequested => {
+                Self::require_str(data, "application_id")?;
+                Self::require_str(data, "citizen_id")?;
+                Self::require_str(data, "node_ip")?;
+                Ok(())
+            }
             QuazarEventType::NodeStarted => {
                 Self::require_str(data, "application_id")?;
                 Self::require_str(data, "citizen_id")?;

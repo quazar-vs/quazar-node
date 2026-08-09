@@ -209,7 +209,7 @@ pub struct MyApplicationsResponse {
     pub mayor: Option<MyApplicationSummary>,
 }
 
-/// POST /api/my-applications — latest citizenship + street-mayor apps for a verified email.
+/// POST /api/my-applications — latest citizenship + legacy street-mayor apps for a verified email.
 ///
 /// Requires `email_already_verified: true` and a live in-memory register-verify mark (peek).
 /// Does not consume the mark, so a subsequent apply can still auto-confirm.

@@ -187,6 +187,7 @@ pub enum QuazarEventType {
     YoutubeCommentReplied,
     HermesExternalAction,
     ChatHistoryAdded,
+    MayorNodeLaunchRequested,
     NodeStarted,
     MayorConfirmed,
     MayorApplicationTimedOut,
@@ -265,6 +266,7 @@ impl QuazarEventType {
             "YoutubeCommentReplied" => Ok(QuazarEventType::YoutubeCommentReplied),
             "HermesExternalAction" => Ok(QuazarEventType::HermesExternalAction),
             "ChatHistoryAdded" => Ok(QuazarEventType::ChatHistoryAdded),
+            "MayorNodeLaunchRequested" => Ok(QuazarEventType::MayorNodeLaunchRequested),
             "NodeStarted" => Ok(QuazarEventType::NodeStarted),
             "MayorConfirmed" => Ok(QuazarEventType::MayorConfirmed),
             "MayorApplicationTimedOut" => Ok(QuazarEventType::MayorApplicationTimedOut),
@@ -299,6 +301,8 @@ impl QuazarEventType {
             "CandidateNominated","CandidateVoted","CandidateApproved","CandidateAppointed",
             "CityRegistered",
             "YoutubeIntroPosted","YoutubeCommentPosted","YoutubeCommentReplied","HermesExternalAction",
+            "ChatHistoryAdded",
+            "MayorNodeLaunchRequested","NodeStarted","MayorConfirmed","MayorApplicationTimedOut",
             "ExchangeRequestCreated","ExchangeRequestVerified","ExchangeRequestRejected",
             "ExchangeListingOpened","ExchangeDealOpened","ExchangeDealCancelled",
             "ExchangeDeliveryConfirmed","ExchangeSettled","ExchangeInventoryAdjusted",
@@ -324,12 +328,20 @@ mod tests {
     #[test]
     fn mayor_lifecycle_event_types_parse() {
         assert_eq!(
+            QuazarEventType::from_str("MayorNodeLaunchRequested").unwrap(),
+            QuazarEventType::MayorNodeLaunchRequested
+        );
+        assert_eq!(
             QuazarEventType::from_str("NodeStarted").unwrap(),
             QuazarEventType::NodeStarted
         );
         assert_eq!(
             QuazarEventType::from_str("MayorConfirmed").unwrap(),
             QuazarEventType::MayorConfirmed
+        );
+        assert_eq!(
+            QuazarEventType::from_str("MayorApplicationTimedOut").unwrap(),
+            QuazarEventType::MayorApplicationTimedOut
         );
         assert_eq!(
             QuazarEventType::from_str("ElectionAnnounced").unwrap(),

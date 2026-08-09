@@ -1914,8 +1914,8 @@
       <div class="container">
         <div class="section-header center">
           <span class="tag">Заявка</span>
-          <h2>Подать заявку</h2>
-          <p>Выберите тип: гражданство или мэрство. Email — из подтверждённой сессии входа</p>
+          <h2>Подать заявку на гражданство</h2>
+          <p>Мэрство с сайта недоступно. Путь: гражданство → Passport → мэрство. Email — из подтверждённой сессии входа</p>
         </div>
         <div class="form-wrapper apply-portal">
           <nav class="apply-tabs" aria-label="Заявка">
@@ -3937,11 +3937,12 @@
 
       var SESSION_ID_KEY = 'quazar_app_id';
       var SESSION_KIND_KEY = 'quazar_app_kind';
-      var SESSION_MAYOR_PEER_KEY = 'quazar_mayor_sync_peer';
       var SUBMIT_RATE_KEY = 'quazar_app_last_submit';
       var ADMIN_KEY = 'quazar_admin_api_key';
-      var MAYOR_KEY = 'quazar_mayor_api_key';
       var VERIFIED_EMAIL_KEY = 'quazar_email_verified';
+      // Same default as PASSPORT_DOWNLOAD_URL / credentials email.
+      var PASSPORT_DOWNLOAD_URL = 'https://github.com/quazar-vs/quazar-passport/releases';
+
       var VERIFIED_EMAIL_EXPIRES_KEY = 'quazar_email_verified_expires';
       var emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
       var keepMessageOnNextRender = false;
@@ -3992,32 +3993,28 @@
       }
 
       function getApplyKind() {
-        var kind = '';
-        try { kind = String(sessionStorage.getItem(SESSION_KIND_KEY) || '').trim(); } catch (_) {}
-        return kind === 'mayor' ? 'mayor' : 'citizenship';
+        // Site portal is citizenship-only; mayorship is Passport-only.
+        try { sessionStorage.setItem(SESSION_KIND_KEY, 'citizenship'); } catch (_) {}
+        return 'citizenship';
       }
 
-      function setApplyKind(kind) {
-        var next = kind === 'mayor' ? 'mayor' : 'citizenship';
-        try { sessionStorage.setItem(SESSION_KIND_KEY, next); } catch (_) {}
-        return next;
+      function setApplyKind(_kind) {
+        try { sessionStorage.setItem(SESSION_KIND_KEY, 'citizenship'); } catch (_) {}
+        return 'citizenship';
       }
 
-      function getMayorApiKey() {
-        try {
-          var own = String(sessionStorage.getItem(MAYOR_KEY) || '').trim();
-          if (own) return own;
-          return String(sessionStorage.getItem('quazar_chat_api_key') || '').trim();
-        } catch (_) {
-          return '';
-        }
-      }
-
-      function saveMayorApiKey(key) {
-        try {
-          if (key) sessionStorage.setItem(MAYOR_KEY, key);
-          else sessionStorage.removeItem(MAYOR_KEY);
-        } catch (_) {}
+      function passportDownloadCtaHtml() {
+        return ''
+          + '<div class="apply-muted-box" style="margin-top:1rem">'
+          + '  <p style="margin:0 0 0.5rem"><strong>Следующий шаг — Quazar Passport</strong></p>'
+          + '  <p class="field-hint" style="margin:0 0 0.75rem">'
+          + 'После подачи заявки на гражданство скачайте приложение Passport. '
+          + 'Мэрство с сайта недоступно: его оформляет только гражданин внутри Passport '
+          + '(вход по API-ключу после одобрения).</p>'
+          + '  <a class="btn btn-primary" href="' + PASSPORT_DOWNLOAD_URL + '" target="_blank" rel="noopener noreferrer">'
+          + 'Скачать Passport</a>'
+          + '  <p class="field-hint" style="margin:0.75rem 0 0">Если APK ещё не опубликован, откроется страница релизов GitHub.</p>'
+          + '</div>';
       }
 
       function getConfirmedEmail() {
@@ -4200,11 +4197,12 @@
         if (parts[1] === 'verify') {
           return { route: 'status', kind: 'citizenship', id: parts[2] || '' };
         }
-        if (parts[1] === 'mayor' && parts[2] === 'status') {
-          return { route: 'status', kind: 'mayor', id: parts[3] || '' };
+        // Legacy mayor status links → citizenship apply (street mayor removed).
+        if (parts[1] === 'mayor') {
+          return { route: 'apply', legacyMayor: true };
         }
         if (parts[1] === 'status') {
-          return { route: 'status', kind: getApplyKind(), id: parts[2] || '' };
+          return { route: 'status', kind: 'citizenship', id: parts[2] || '' };
         }
         if (parts[1] === 'admin') return { route: 'admin' };
         return { route: 'apply' };
@@ -4216,13 +4214,8 @@
           return;
         }
         if (route === 'status') {
-          var k = kind || getApplyKind();
-          setApplyKind(k);
-          if (k === 'mayor') {
-            location.hash = 'apply/mayor/status/' + encodeURIComponent(id);
-          } else {
-            location.hash = 'apply/status/' + encodeURIComponent(id);
-          }
+          setApplyKind('citizenship');
+          location.hash = 'apply/status/' + encodeURIComponent(id);
           return;
         }
         if (route === 'admin') location.hash = 'apply/admin';
@@ -4253,21 +4246,14 @@
         showMessage('Сначала войдите с email — поле нельзя заполнить вручную.', 'info');
       }
 
-      function renderKindSwitcher(kind) {
+      function renderKindSwitcher(_kind) {
         return ''
-          + '<fieldset class="apply-kind" id="portalApplyKind">'
-          + '  <legend class="visually-hidden" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)">Тип заявки</legend>'
-          + '  <label>'
-          + '    <input type="radio" name="apply_kind" value="citizenship"' + (kind === 'citizenship' ? ' checked' : '') + '>'
-          + '    <strong>Гражданство</strong>'
-          + '    <span>Новый гражданин Квазара</span>'
-          + '  </label>'
-          + '  <label>'
-          + '    <input type="radio" name="apply_kind" value="mayor"' + (kind === 'mayor' ? ' checked' : '') + '>'
-          + '    <strong>Мэрство</strong>'
-          + '    <span>Заявка с сайта (без API-ключа)</span>'
-          + '  </label>'
-          + '</fieldset>';
+          + '<div class="apply-kind" id="portalApplyKind">'
+          + '  <p style="margin:0 0 0.75rem"><strong>Гражданство</strong></p>'
+          + '  <p class="field-hint" style="margin:0">'
+          + 'Мэрство с лендинга недоступно. Сначала гражданство, затем Passport — мэрство только гражданину в приложении.'
+          + '</p>'
+          + '</div>';
       }
 
       function renderCitizenshipFields(confirmedEmail) {
@@ -4299,46 +4285,8 @@
           + '  <p class="field-hint">Не более 1 заявки в месяц на один email.</p>';
       }
 
-      function renderMayorFields(confirmedEmail) {
-        return ''
-          + '  <div class="hp-field" aria-hidden="true">'
-          + '    <label for="portal_website">Website</label>'
-          + '    <input type="text" id="portal_website" name="website" tabindex="-1" autocomplete="off">'
-          + '  </div>'
-          + '  <div class="row2">'
-          + '    <div class="form-group"><label for="portal_login">Логин</label>'
-          + '      <input id="portal_login" required maxlength="13" pattern="[A-Za-z]{1,13}" title="Только латиница (A–Z, a–z), 1–13 символов" placeholder="например: ivan" autocomplete="username">'
-          + '    </div>'
-          + '    <div class="form-group"><label for="portal_email">Email <span class="hint">(подтверждённый)</span></label>'
-          + '      <input id="portal_email" class="input-readonly" required maxlength="254" type="email" readonly tabindex="-1" aria-readonly="true" value="' + escapeHtml(confirmedEmail) + '" autocomplete="email">'
-          + '    </div>'
-          + '  </div>'
-          + '  <p class="field-hint">Логин: только латиница (A–Z, a–z), без цифр и спецсимволов, 1–13 символов. Регистр не важен. Email нельзя изменить — он из подтверждённой сессии входа. IP узла можно указать позже при одобрении.</p>'
-          + '  <div class="form-group"><label for="portal_full_name">ФИО</label>'
-          + '    <input id="portal_full_name" required maxlength="200" placeholder="Иван Иванов" autocomplete="name">'
-          + '  </div>'
-          + '  <div class="form-group"><label for="portal_passport">Данные паспорта</label>'
-          + '    <textarea id="portal_passport" required maxlength="2000" placeholder="Серия/номер, кем выдан, дата"></textarea>'
-          + '  </div>'
-          + '  <div class="form-group"><label for="portal_reason">Причина</label>'
-          + '    <textarea id="portal_reason" class="input-readonly" required maxlength="5000" readonly tabindex="-1" aria-readonly="true">запуск узла</textarea>'
-          + '  </div>'
-          + '  <div class="form-group"><label for="portal_mayor_ip">IP / адрес узла <span class="hint">(необязательно)</span></label>'
-          + '    <input id="portal_mayor_ip" maxlength="512" placeholder="например: 203.0.113.10" autocomplete="off">'
-          + '  </div>'
-          + '  <div class="form-group" id="recaptcha-field" style="display:none"><label>Проверка</label><div id="recaptcha-mount"></div></div>'
-          + '  <button class="btn btn-primary form-submit" type="submit" id="portalSubmitBtn">Подать заявку на мэрство</button>';
-      }
-
       function bindKindSwitcher() {
-        var radios = document.querySelectorAll('input[name="apply_kind"]');
-        radios.forEach(function (radio) {
-          radio.addEventListener('change', function () {
-            if (!radio.checked) return;
-            setApplyKind(radio.value);
-            renderApply();
-          });
-        });
+        // Citizenship-only portal — no kind radios.
       }
 
       /** Block resubmit for active / approved apps; rejected & timed_out may apply again. */
@@ -4374,47 +4322,39 @@
         if (!app || !app.id) return;
         try {
           sessionStorage.setItem(SESSION_ID_KEY, String(app.id));
-          setApplyKind(kind === 'mayor' ? 'mayor' : 'citizenship');
+          setApplyKind('citizenship');
         } catch (_) {}
-        // Enable «Статус» tab without leaving the apply view.
-        syncTabs({ route: 'apply', id: app.id, kind: kind === 'mayor' ? 'mayor' : 'citizenship' });
+        syncTabs({ route: 'apply', id: app.id, kind: 'citizenship' });
       }
 
       function renderAlreadyApplied(kind, app) {
-        var k = kind === 'mayor' ? 'mayor' : 'citizenship';
-        var label = k === 'mayor' ? 'мэрство' : 'гражданство';
-        rememberApplicationForStatus(k, app);
+        rememberApplicationForStatus('citizenship', app);
         VIEW.innerHTML = ''
-          + renderKindSwitcher(k)
+          + renderKindSwitcher('citizenship')
           + '<div class="apply-muted-box" id="portalAlreadyApplied">'
           + '  <p style="margin:0 0 0.5rem"><strong>' + escapeHtml(applyBlockMessage(app.status)) + '</strong></p>'
-          + '  <p class="field-hint" style="margin:0 0 0.75rem">Тип: ' + escapeHtml(label)
+          + '  <p class="field-hint" style="margin:0 0 0.75rem">Тип: гражданство'
           + ' · статус: ' + pill(app.status)
           + ' · id: <code>' + escapeHtml(app.id) + '</code></p>'
           + '  <button type="button" class="btn btn-primary" id="portalViewStatusBtn">Смотреть статус</button>'
-          + '</div>';
-        bindKindSwitcher();
+          + '</div>'
+          + passportDownloadCtaHtml();
         var btn = document.getElementById('portalViewStatusBtn');
         if (btn) {
           btn.addEventListener('click', function () {
-            setRoute('status', app.id, k);
+            setRoute('status', app.id, 'citizenship');
           });
         }
         showMessage(applyBlockMessage(app.status), 'info');
       }
 
       function renderApplyForm(confirmedEmail, kind) {
-        var fields = kind === 'mayor'
-          ? renderMayorFields(confirmedEmail)
-          : renderCitizenshipFields(confirmedEmail);
-
         VIEW.innerHTML = ''
-          + renderKindSwitcher(kind)
+          + renderKindSwitcher('citizenship')
           + '<form class="stack" id="portal-apply-form" novalidate>'
-          + fields
+          + renderCitizenshipFields(confirmedEmail)
           + '</form>';
 
-        bindKindSwitcher();
         document.getElementById('portal-apply-form').addEventListener('submit', onSubmit);
 
         recaptchaWidgetId = null;
@@ -4437,12 +4377,11 @@
         }
 
         var confirmedEmail = getConfirmedEmail();
-        var kind = getApplyKind();
+        setApplyKind('citizenship');
 
         VIEW.innerHTML = ''
-          + renderKindSwitcher(kind)
+          + renderKindSwitcher('citizenship')
           + '<p class="field-hint">Проверяем ваши заявки…</p>';
-        bindKindSwitcher();
 
         var mine = null;
         try {
@@ -4455,11 +4394,9 @@
             renderApplyGate();
             return;
           }
-          // Network / other: still show form; submit will enforce server rules.
           mine = null;
         }
 
-        // Local TTL may have elapsed while awaiting the network.
         if (!hasConfirmedEmail()) {
           clearConfirmedEmailSession();
           keepMessageOnNextRender = true;
@@ -4468,21 +4405,18 @@
           return;
         }
 
-        var app = kind === 'mayor'
-          ? (mine && mine.mayor)
-          : (mine && mine.citizenship);
+        var app = mine && mine.citizenship;
 
         if (app && app.id && isApplyBlockedStatus(app.status)) {
-          renderAlreadyApplied(kind, app);
+          renderAlreadyApplied('citizenship', app);
           return;
         }
 
-        // Rejected / timed_out: keep id for status tab, but allow a new form.
         if (app && app.id) {
-          rememberApplicationForStatus(kind, app);
+          rememberApplicationForStatus('citizenship', app);
         }
 
-        renderApplyForm(confirmedEmail, kind);
+        renderApplyForm(confirmedEmail, 'citizenship');
       }
 
       async function onSubmitCitizenship(btn) {
@@ -4572,141 +4506,10 @@
 
           sessionStorage.setItem(SESSION_ID_KEY, id);
           setApplyKind('citizenship');
-          try { sessionStorage.removeItem(SESSION_MAYOR_PEER_KEY); } catch (_) {}
           keepMessageOnNextRender = true;
           showMessage((res.data && res.data.message) || 'Заявка принята и ожидает рассмотрения.', 'ok');
           // Block resubmit UI on apply tab; status remains available via button / tab.
           renderAlreadyApplied('citizenship', {
-            id: id,
-            status: (res.data && res.data.status) || 'confirmed'
-          });
-        } catch (err) {
-          if (isSessionAuthError(err)) {
-            clearConfirmedEmailSession();
-            keepMessageOnNextRender = true;
-            showMessage(sessionAuthUserMessage(err), 'err');
-            renderApplyGate();
-            return;
-          }
-          showMessage(err.message || String(err), 'err');
-          if (window.grecaptcha && recaptchaWidgetId !== null) {
-            try { window.grecaptcha.reset(recaptchaWidgetId); } catch (_) {}
-          }
-        } finally {
-          btn.disabled = false;
-        }
-      }
-
-      async function onSubmitMayor(btn) {
-        var honey = document.getElementById('portal_website');
-        if (honey && honey.value.trim()) return;
-
-        var email = getConfirmedEmail();
-        var emailInput = document.getElementById('portal_email');
-        if (emailInput) emailInput.value = email;
-
-        if (!hasConfirmedEmail()) {
-          showMessage('Сначала войдите с подтверждённым email.', 'err');
-          clearConfirmedEmailSession();
-          openLoginForApply();
-          return;
-        }
-
-        var login = document.getElementById('portal_login').value.trim();
-        var full_name = document.getElementById('portal_full_name').value.trim();
-        var passport_data = document.getElementById('portal_passport').value.trim();
-        var reason = document.getElementById('portal_reason').value.trim();
-        var ipEl = document.getElementById('portal_mayor_ip');
-        var ip = ipEl ? ipEl.value.trim() : '';
-
-        if (!login || !full_name || !passport_data || !reason) {
-          showMessage('Заполните все поля.', 'err');
-          return;
-        }
-
-        var loginNorm = login.toLowerCase();
-        if (loginNorm.length < 1 || loginNorm.length > 13) {
-          showMessage('Логин должен быть от 1 до 13 символов.', 'err');
-          return;
-        }
-        if (!/^[a-z]+$/.test(loginNorm)) {
-          showMessage('Логин: только латинские буквы (A–Z, a–z), без цифр и спецсимволов.', 'err');
-          return;
-        }
-        if (loginNorm === 'successful') {
-          showMessage('Имя Successful зарезервировано за основателем.', 'err');
-          return;
-        }
-        if (ip) {
-          if (/\s/.test(ip)) {
-            showMessage('IP / адрес узла не должен содержать пробелы.', 'err');
-            return;
-          }
-          if (!/[0-9]/.test(ip)) {
-            showMessage('Укажите корректный IP-адрес или адрес узла.', 'err');
-            return;
-          }
-        }
-
-        btn.disabled = true;
-        try {
-          try {
-            await fetchMyApplications(email);
-          } catch (pingErr) {
-            if (isSessionAuthError(pingErr)) {
-              clearConfirmedEmailSession();
-              keepMessageOnNextRender = true;
-              showMessage(sessionAuthUserMessage(pingErr), 'err');
-              renderApplyGate();
-              return;
-            }
-          }
-          if (!hasConfirmedEmail()) {
-            clearConfirmedEmailSession();
-            keepMessageOnNextRender = true;
-            showMessage('Сессия подтверждения email истекла. Войдите снова.', 'err');
-            renderApplyGate();
-            return;
-          }
-
-          var captcha_token = getCaptchaToken();
-          if ((recaptchaRequired || recaptchaSiteKey) && !captcha_token) {
-            showMessage('Пройдите проверку reCAPTCHA.', 'err');
-            btn.disabled = false;
-            return;
-          }
-          var payload = {
-            login: loginNorm,
-            full_name: full_name,
-            passport_data: passport_data,
-            email: email,
-            reason: reason,
-            captcha_token: captcha_token || undefined,
-            email_already_verified: true
-          };
-          if (ip) payload.ip = ip;
-
-          var res = await api('/api/mayor/application', {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              'Accept': 'application/json'
-            },
-            body: JSON.stringify(payload)
-          });
-
-          markSubmitted();
-          var id = (res.data && res.data.id) ? res.data.id : '';
-          if (!id) throw new Error('Не удалось получить ID заявки мэра');
-
-          sessionStorage.setItem(SESSION_ID_KEY, id);
-          setApplyKind('mayor');
-          if (res.data && res.data.sync_peer) {
-            try { sessionStorage.setItem(SESSION_MAYOR_PEER_KEY, String(res.data.sync_peer)); } catch (_) {}
-          }
-          keepMessageOnNextRender = true;
-          showMessage((res.data && res.data.message) || 'Заявка на мэрство принята и ожидает рассмотрения.', 'ok');
-          renderAlreadyApplied('mayor', {
             id: id,
             status: (res.data && res.data.status) || 'confirmed'
           });
@@ -4739,11 +4542,7 @@
         var btn = document.getElementById('portalSubmitBtn');
         if (!btn) return;
 
-        if (getApplyKind() === 'mayor') {
-          await onSubmitMayor(btn);
-        } else {
-          await onSubmitCitizenship(btn);
-        }
+        await onSubmitCitizenship(btn);
       }
 
       async function loadCitizenshipStatus(id, resPanel) {
@@ -4769,39 +4568,12 @@
           + '</dl>';
       }
 
-      async function loadMayorStatus(id, resPanel) {
-        var res = await api('/api/mayor/status/' + encodeURIComponent(id), {
-          method: 'GET',
-          headers: { Accept: 'application/json' }
-        });
-        var a = res.data || {};
-        var peer = '';
-        try { peer = String(sessionStorage.getItem(SESSION_MAYOR_PEER_KEY) || ''); } catch (_) {}
-        resPanel.innerHTML = ''
-          + '<h3 style="font-family:var(--font-display);margin:0 0 0.6rem;font-size:1.35rem;color:var(--ll-navy);">'
-          + escapeHtml(a.full_name || 'Заявка на мэрство')
-          + '</h3>'
-          + pill(a.status || 'unknown')
-          + '<p class="field-hint" style="margin:0.75rem 0 0">' + escapeHtml(a.message || '') + '</p>'
-          + '<dl>'
-          + '<dt>Тип</dt><dd>Мэрство</dd>'
-          + '<dt>ID</dt><dd><code>' + escapeHtml(id) + '</code></dd>'
-          + '<dt>Логин</dt><dd>' + escapeHtml(a.login || '—') + '</dd>'
-          + '<dt>Citizen ID</dt><dd>' + escapeHtml(a.citizen_id || '—') + '</dd>'
-          + '<dt>Node ID</dt><dd>' + escapeHtml(a.node_id || '—') + '</dd>'
-          + '<dt>Sync peer</dt><dd>' + (peer ? '<code>' + escapeHtml(peer) + '</code>' : '—') + '</dd>'
-          + '<dt>Комментарий</dt><dd>' + escapeHtml(a.review_note || '—') + '</dd>'
-          + '</dl>';
-      }
-
       async function loadStatus(id, kind) {
         var resPanel = document.getElementById('portalStatusOut');
         if (!resPanel) return;
         resPanel.innerHTML = '<p class="field-hint">Загрузка…</p>';
-        var k = kind === 'mayor' ? 'mayor' : 'citizenship';
         try {
-          if (k === 'mayor') await loadMayorStatus(id, resPanel);
-          else await loadCitizenshipStatus(id, resPanel);
+          await loadCitizenshipStatus(id, resPanel);
         } catch (err) {
           resPanel.innerHTML = '<p class="field-hint">' + escapeHtml(err.message || String(err)) + '</p>';
         }
@@ -4809,19 +4581,17 @@
 
       function renderStatus(state) {
         var id = state.id || sessionStorage.getItem(SESSION_ID_KEY) || '';
-        var kind = state.kind || getApplyKind();
         if (!id) {
-          VIEW.innerHTML = '<p class="field-hint">Сначала отправьте заявку.</p>';
+          VIEW.innerHTML = '<p class="field-hint">Сначала отправьте заявку.</p>' + passportDownloadCtaHtml();
           return;
         }
-        setApplyKind(kind);
-        var hint = kind === 'mayor'
-          ? 'Статус заявки на мэрство. После подтверждения email её рассматривает администрация; затем — запуск узла.'
-          : 'Статус заявки на гражданство. После принятия она ожидает рассмотрения администратором.';
+        setApplyKind('citizenship');
         VIEW.innerHTML = ''
-          + '<p class="field-hint">' + hint + '</p>'
-          + '<div class="apply-status-card" id="portalStatusOut"></div>';
-        loadStatus(id, kind);
+          + '<p class="field-hint">Статус заявки на гражданство. После принятия она ожидает рассмотрения администратором. '
+          + 'Мэрство — только в Passport после получения гражданства.</p>'
+          + '<div class="apply-status-card" id="portalStatusOut"></div>'
+          + passportDownloadCtaHtml();
+        loadStatus(id, 'citizenship');
       }
 
       async function adminAction(id, action, note) {
@@ -5005,8 +4775,21 @@
         if (!state) return;
         var id = state.id || sessionStorage.getItem(SESSION_ID_KEY) || '';
         state.id = id;
-        if (state.kind) setApplyKind(state.kind);
-        else if (state.route === 'status') state.kind = getApplyKind();
+        if (state.legacyMayor) {
+          // Old #apply/mayor… bookmarks → citizenship + Passport path.
+          keepMessageOnNextRender = true;
+          showMessage(
+            'Заявки на мэрство с сайта отключены. Путь: гражданство → Passport → мэрство (только гражданину в приложении).',
+            'info'
+          );
+          if (location.hash !== '#apply') {
+            location.hash = 'apply';
+            return;
+          }
+          state.route = 'apply';
+        }
+        setApplyKind('citizenship');
+        state.kind = 'citizenship';
         // Rewrite legacy verify URLs to status in the address bar
         if (/^#?apply\/verify\//.test(normalizeApplyPath(location.hash || ''))) {
           if (id) {

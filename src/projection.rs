@@ -20,6 +20,7 @@ pub async fn apply_event_projections_in_tx(
             "CandidateVoted" => apply_candidate_voted(tx, event).await?,
             "CandidateApproved" => apply_candidate_approved(tx, event).await?,
             "CandidateAppointed" => apply_candidate_appointed(tx, event).await?,
+            "MayorNodeLaunchRequested" => apply_mayor_node_launch_requested(tx, event).await?,
             "NodeStarted" => apply_node_started(tx, event).await?,
             "MayorConfirmed" => apply_mayor_confirmed(tx, event).await?,
             "LawProposed" => apply_law_proposed(tx, event).await?,
@@ -435,6 +436,81 @@ async fn apply_candidate_appointed(
     .map_err(|e| format!("CandidateAppointed api_keys sync failed: {}", e))?;
 
     tracing::info!(candidacy_id = %candidacy_id, citizen_id = %citizen_id, event_id = %event.event_id, "CandidateAppointed projected");
+    Ok(())
+}
+
+async fn apply_mayor_node_launch_requested(
+    tx: &mut Transaction<'_, Postgres>,
+    event: &Event,
+) -> Result<(), String> {
+    let application_id = require_str(&event.data, "application_id")?;
+    let citizen_id = require_str(&event.data, "citizen_id")?;
+    let node_ip = require_str(&event.data, "node_ip")?;
+    let citizen_name = event
+        .data
+        .get("citizen_name")
+        .and_then(|v| v.as_str())
+        .unwrap_or(citizen_id);
+    let sync_peer = event
+        .data
+        .get("sync_peer")
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    let expires_at = event.data.get("expires_at").cloned();
+    let city = event
+        .data
+        .get("city")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let external_email = event
+        .data
+        .get("external_email")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+
+    let app_uuid = Uuid::parse_str(application_id)
+        .map_err(|e| format!("MayorNodeLaunchRequested: invalid application_id: {e}"))?;
+
+    let mut payload = serde_json::json!({
+        "node_ip": node_ip,
+        "sync_peer": sync_peer,
+        "street": false,
+        "source": event.data.get("source").and_then(|v| v.as_str()).unwrap_or("citizen"),
+    });
+    if let Some(exp) = expires_at {
+        payload["expires_at"] = exp;
+    }
+    if let Some(city) = city {
+        payload["city"] = serde_json::json!(city);
+    }
+    if let Some(email) = external_email {
+        payload["external_email"] = serde_json::json!(email);
+    }
+
+    crate::candidates::upsert_mayor_tx(
+        tx,
+        app_uuid,
+        external_email,
+        Some(citizen_name),
+        "pending",
+        Some(citizen_id),
+        "citizen",
+        payload,
+        None,
+        None,
+    )
+    .await
+    .map_err(|e| format!("MayorNodeLaunchRequested candidates sync failed: {e}"))?;
+
+    tracing::info!(
+        application_id = %application_id,
+        citizen_id = %citizen_id,
+        node_ip = %node_ip,
+        event_id = %event.event_id,
+        "MayorNodeLaunchRequested projected"
+    );
     Ok(())
 }
 

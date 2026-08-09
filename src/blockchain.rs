@@ -1209,6 +1209,82 @@ pub fn build_chat_history_added_event(
     }
 }
 
+pub fn build_mayor_node_launch_requested_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    node_ip: &str,
+    sync_peer: &str,
+    expires_at: &str,
+    city: Option<&str>,
+    external_email: Option<&str>,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    let mut data = serde_json::json!({
+        "application_id": application_id,
+        "citizen_id": citizen_id,
+        "citizen_name": citizen_name,
+        "node_ip": node_ip,
+        "sync_peer": sync_peer,
+        "expires_at": expires_at,
+        "source": "citizen",
+        "status": "pending",
+        "street": false,
+    });
+    if let Some(city) = city.map(str::trim).filter(|s| !s.is_empty()) {
+        data["city"] = serde_json::json!(city);
+    }
+    if let Some(email) = external_email.map(str::trim).filter(|s| !s.is_empty()) {
+        data["external_email"] = serde_json::json!(email);
+    }
+    Event {
+        event_id: event_id.to_string(),
+        timestamp,
+        event_type: "MayorNodeLaunchRequested".to_string(),
+        title: format!("Заявка на запуск узла мэра {}", citizen_name),
+        description: format!(
+            "Гражданин {} подал заявку {} на запуск узла ({})",
+            citizen_name, application_id, node_ip
+        ),
+        initiator: initiator.to_string(),
+        data,
+        previous_hash: "0".to_string(),
+        signatures: vec![],
+        hash: None,
+        public: true,
+    }
+}
+
+pub fn build_signed_mayor_node_launch_requested_event(
+    event_id: &str,
+    application_id: &str,
+    citizen_id: &str,
+    citizen_name: &str,
+    node_ip: &str,
+    sync_peer: &str,
+    expires_at: &str,
+    city: Option<&str>,
+    external_email: Option<&str>,
+    initiator: &str,
+    timestamp: i64,
+) -> Event {
+    signed_pending_event(build_mayor_node_launch_requested_event(
+        event_id,
+        application_id,
+        citizen_id,
+        citizen_name,
+        node_ip,
+        sync_peer,
+        expires_at,
+        city,
+        external_email,
+        initiator,
+        timestamp,
+    ))
+}
+
 pub fn build_node_started_event(
     event_id: &str,
     application_id: &str,
@@ -1857,6 +1933,30 @@ mod tests {
         assert!(chains_share_prefix(&local, &peer, 3));
         let diverged = vec![block(1, "x"), block(2, "b"), block(3, "peer")];
         assert!(!chains_share_prefix(&local, &diverged, 3));
+    }
+
+    #[test]
+    fn mayor_node_launch_requested_event_carries_projection_fields() {
+        let event = build_mayor_node_launch_requested_event(
+            "mayor_launch_1",
+            "11111111-1111-1111-1111-111111111111",
+            "QZ-42",
+            "MayorCandidate",
+            "mayor.example.com",
+            "QZ-NODE@https://peer.example",
+            "2026-01-02T12:00:00Z",
+            Some("NeoTokyo"),
+            Some("mayor@example.com"),
+            "QZ-NODE",
+            1_700_000_000,
+        );
+        assert_eq!(event.event_type, "MayorNodeLaunchRequested");
+        assert_eq!(event.data["status"], "pending");
+        assert_eq!(event.data["source"], "citizen");
+        assert_eq!(event.data["node_ip"], "mayor.example.com");
+        assert_eq!(event.data["city"], "NeoTokyo");
+        assert_eq!(event.data["citizen_id"], "QZ-42");
+        assert_eq!(event.data["application_id"], "11111111-1111-1111-1111-111111111111");
     }
 
     #[test]

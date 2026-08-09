@@ -1,7 +1,7 @@
 use std::time::Duration;
 
 use lettre::message::header::ContentType;
-use lettre::message::Mailbox;
+use lettre::message::{Attachment, Mailbox, MultiPart, SinglePart};
 use lettre::transport::smtp::authentication::Credentials;
 use lettre::transport::smtp::client::{Tls, TlsParameters};
 use lettre::{Message, SmtpTransport, Transport};
@@ -186,22 +186,24 @@ fn build_mailer(config: &SmtpConfig) -> Result<SmtpTransport, String> {
     }
 }
 
+fn from_mailbox(config: &SmtpConfig) -> Result<Mailbox, String> {
+    Ok(Mailbox::new(
+        Some(config.from_name.clone()),
+        config
+            .user
+            .parse()
+            .map_err(|e| format!("invalid from address: {e}"))?,
+    ))
+}
+
 fn send_plain_email_blocking(
     config: &SmtpConfig,
     to_email: &str,
     subject: &str,
     body: String,
 ) -> Result<(), String> {
-    let from_mailbox: Mailbox = Mailbox::new(
-        Some(config.from_name.clone()),
-        config
-            .user
-            .parse()
-            .map_err(|e| format!("invalid from address: {e}"))?,
-    );
-
     let email = Message::builder()
-        .from(from_mailbox)
+        .from(from_mailbox(config)?)
         .to(to_email
             .parse()
             .map_err(|e| format!("invalid recipient address: {e}"))?)
@@ -215,6 +217,70 @@ fn send_plain_email_blocking(
         .map_err(|e| format!("failed to send email: {e}"))?;
 
     Ok(())
+}
+
+/// One file attachment (UTF-8 text / script).
+pub struct EmailAttachment {
+    pub filename: String,
+    pub mime: &'static str,
+    pub content: String,
+}
+
+fn send_email_with_attachments_blocking(
+    config: &SmtpConfig,
+    to_email: &str,
+    subject: &str,
+    body: String,
+    attachments: Vec<EmailAttachment>,
+) -> Result<(), String> {
+    let mut multipart = MultiPart::mixed().singlepart(
+        SinglePart::builder()
+            .header(ContentType::TEXT_PLAIN)
+            .body(body),
+    );
+
+    for att in attachments {
+        let ctype = ContentType::parse(att.mime)
+            .unwrap_or(ContentType::TEXT_PLAIN);
+        multipart = multipart.singlepart(Attachment::new(att.filename).body(att.content, ctype));
+    }
+
+    let email = Message::builder()
+        .from(from_mailbox(config)?)
+        .to(to_email
+            .parse()
+            .map_err(|e| format!("invalid recipient address: {e}"))?)
+        .subject(subject)
+        .multipart(multipart)
+        .map_err(|e| format!("failed to build email: {e}"))?;
+
+    build_mailer(config)?
+        .send(&email)
+        .map_err(|e| format!("failed to send email: {e}"))?;
+
+    Ok(())
+}
+
+async fn send_email_with_attachments(
+    config: &SmtpConfig,
+    to_email: &str,
+    subject: &str,
+    body: String,
+    attachments: Vec<EmailAttachment>,
+) -> Result<(), String> {
+    let config = config.clone();
+    let to_email = to_email.to_string();
+    let subject = subject.to_string();
+
+    timeout(
+        Duration::from_secs(25),
+        tokio::task::spawn_blocking(move || {
+            send_email_with_attachments_blocking(&config, &to_email, &subject, body, attachments)
+        }),
+    )
+    .await
+    .map_err(|_| "SMTP send timed out (check network or SMTP credentials)".to_string())?
+    .map_err(|e| format!("SMTP task failed: {e}"))?
 }
 
 pub async fn send_plain_email_public(
@@ -563,6 +629,47 @@ pub async fn send_citizenship_rejection(
     .await
     .map_err(|_| "SMTP send timed out (check network or SMTP credentials)".to_string())?
     .map_err(|e| format!("SMTP task failed: {e}"))?
+}
+
+/// Email to citizen after mayor apply: instructions + installer wrapper attachment.
+pub async fn send_mayor_installer_package(
+    config: &SmtpConfig,
+    to_email: &str,
+    citizen_name: &str,
+    city: &str,
+    application_id: &str,
+    node_ip: &str,
+    body: String,
+    installer_script: String,
+) -> Result<(), String> {
+    tracing::info!(
+        email = %to_email,
+        application_id = %application_id,
+        city = %city,
+        citizen = %citizen_name,
+        node_ip = %node_ip,
+        "📧 Отправка установщика узла мэра"
+    );
+
+    send_email_with_attachments(
+        config,
+        to_email,
+        "Квазар: материалы для установки узла мэра",
+        body,
+        vec![EmailAttachment {
+            filename: "install-quazar-node.sh".to_string(),
+            mime: "text/x-shellscript",
+            content: installer_script,
+        }],
+    )
+    .await?;
+
+    tracing::info!(
+        email = %to_email,
+        application_id = %application_id,
+        "📧 Установщик узла мэра отправлен"
+    );
+    Ok(())
 }
 
 #[cfg(test)]

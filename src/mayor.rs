@@ -1,10 +1,7 @@
-use std::collections::HashMap;
-use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, OnceLock};
-use std::time::{Duration as StdDuration, Instant};
+use std::sync::Arc;
 
 use axum::{
-    extract::{ConnectInfo, Extension, Path, Query, State},
+    extract::{Extension, Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     Json,
@@ -15,7 +12,6 @@ use sqlx::{PgPool, Postgres, Transaction};
 use tokio::time;
 use uuid::Uuid;
 
-use crate::applications::{recaptcha_required, verify_recaptcha_with_ip};
 use crate::auth::{AuthContext, KeyStore};
 use crate::block_producer;
 use crate::blockchain::{
@@ -24,13 +20,12 @@ use crate::blockchain::{
     build_signed_mayor_election_announced_event, build_signed_mayor_election_candidate_event,
     build_signed_mayor_election_endorse_event, build_signed_mayor_election_vote_cast_event,
     build_signed_mayor_election_vote_result_event, build_signed_mayor_election_vote_started_event,
-    build_signed_node_started_event, build_signed_passport_issued_event,
+    build_signed_mayor_node_launch_requested_event, build_signed_node_started_event,
+    build_signed_passport_issued_event,
 };
 use crate::citizen::hash_key;
-use crate::client_ip;
 use crate::email::{
-    notify_email, send_mayor_street_application, send_mayor_street_confirmation,
-    send_registration_credentials_soft, SmtpConfig,
+    send_mayor_installer_package, send_registration_credentials_soft, SmtpConfig,
 };
 use crate::gossip;
 use crate::keys::push_key_to_peers;
@@ -41,35 +36,16 @@ use crate::node_generator::{
 };
 use crate::pending;
 use crate::nodes::{Node, NodeStatus};
-use crate::register_verify::{
-    clear_recent_email_verification, email_belongs_to_citizen, is_valid_email, normalize_email,
-    take_recent_email_verification, CITIZEN_USE_APP_MESSAGE,
-};
 use crate::response::{self, ApiResponse};
 use crate::types::Role;
-use crate::validator::{normalize_and_validate_citizen_name, EventValidator};
+use crate::validator::EventValidator;
 use crate::AppState;
 
-static STREET_MAYOR_SUBMIT_RATE: OnceLock<Mutex<HashMap<String, Instant>>> = OnceLock::new();
-
-fn allow_street_mayor_submit(ip: &str) -> bool {
-    let mutex = STREET_MAYOR_SUBMIT_RATE.get_or_init(|| Mutex::new(HashMap::new()));
-    let mut map = mutex.lock().expect("street mayor submit rate mutex");
-
-    let now = Instant::now();
-    let max_age = StdDuration::from_secs(120);
-    map.retain(|_, t| now.duration_since(*t) < max_age);
-
-    let min_interval = StdDuration::from_secs(60);
-    if let Some(last) = map.get(ip) {
-        if now.duration_since(*last) < min_interval {
-            return false;
-        }
-    }
-
-    map.insert(ip.to_string(), now);
-    true
-}
+/// Canon: mayorship is citizen-only via Passport (`POST /api/mayor/apply`).
+/// Public street submit from the landing site is permanently disabled (410 Gone).
+pub const STREET_MAYOR_DISABLED_MESSAGE: &str = "Заявки на мэрство с сайта отключены. \
+Мэрство доступно только гражданам через приложение Quazar Passport \
+(POST /api/mayor/apply с Bearer API-ключом).";
 
 fn generate_temp_public_key_hex() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
@@ -77,17 +53,6 @@ fn generate_temp_public_key_hex() -> String {
 
 fn generate_citizen_api_key() -> String {
     format!("qz_citizen_{}", Uuid::new_v4().simple())
-}
-
-fn validate_non_empty_len(value: &str, field: &'static str, max: usize) -> Result<String, String> {
-    let s = value.trim().to_string();
-    if s.is_empty() {
-        return Err(format!("{field} обязателен"));
-    }
-    if s.len() > max {
-        return Err(format!("{field} слишком длинное (макс. {max} символов)"));
-    }
-    Ok(s)
 }
 
 /// Absolute majority: floor(n/2)+1 == 50%+1 of cast votes.
@@ -157,7 +122,11 @@ impl CandidateStatus {
 
 #[derive(Debug, Deserialize)]
 pub struct MayorApplyRequest {
+    /// Public IP or DNS name of the future mayor node (only external field required).
     pub ip: String,
+    /// Optional city label; not required — core prefers registry data.
+    #[serde(default)]
+    pub city: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,8 +136,8 @@ pub struct MayorApplyResponse {
     pub sync_peer: String,
 }
 
-/// Public street application (website, no Bearer).
-/// Same core fields as citizenship submit, plus optional node IP.
+/// Deprecated: street mayor submit from the landing site is disabled (410 Gone).
+/// Kept for API shape / admin review of historical records only.
 #[derive(Debug, Deserialize)]
 pub struct StreetMayorApplicationRequest {
     pub login: String,
@@ -176,7 +145,6 @@ pub struct StreetMayorApplicationRequest {
     pub passport_data: String,
     pub email: String,
     pub reason: String,
-    /// Optional until admin approve (street flow may submit without a node address).
     #[serde(default)]
     pub ip: Option<String>,
     #[serde(default)]
@@ -330,6 +298,7 @@ pub enum MayorError {
     Message(String),
     Forbidden(String),
     NotFound(String),
+    Gone(String),
     Database(String),
 }
 
@@ -346,11 +315,16 @@ impl MayorError {
         Self::NotFound(msg.into())
     }
 
+    fn gone(msg: impl Into<String>) -> Self {
+        Self::Gone(msg.into())
+    }
+
     pub fn to_response(&self) -> (StatusCode, Json<ApiResponse>) {
         let (status, message) = match self {
             MayorError::Message(m) => (StatusCode::BAD_REQUEST, m),
             MayorError::Forbidden(m) => (StatusCode::FORBIDDEN, m),
             MayorError::NotFound(m) => (StatusCode::NOT_FOUND, m),
+            MayorError::Gone(m) => (StatusCode::GONE, m),
             MayorError::Database(m) => (StatusCode::INTERNAL_SERVER_ERROR, m),
         };
         (status, Json(ApiResponse::error(message)))
@@ -1406,15 +1380,88 @@ pub fn start_mayor_timeout_worker(state: Arc<AppState>) {
     });
 }
 
-fn is_valid_node_ip(ip: &str) -> bool {
-    let s = ip.trim();
+/// Accept public IPv4/IPv6 or a DNS hostname (no whitespace).
+/// Domains without digits (e.g. `mayor.example.com`) are valid.
+fn is_valid_node_host(host: &str) -> bool {
+    let s = host.trim();
     if s.is_empty() || s.len() > 512 {
         return false;
     }
     if s.chars().any(|c| c.is_whitespace()) {
         return false;
     }
-    s.chars().any(|c| c.is_ascii_digit())
+
+    let stripped = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .unwrap_or(s);
+    let host_part = stripped
+        .split('/')
+        .next()
+        .unwrap_or(stripped)
+        .trim_end_matches('/');
+    if host_part.is_empty() {
+        return false;
+    }
+
+    // Bracketed IPv6, optionally with port: [::1] or [::1]:8080
+    if host_part.starts_with('[') {
+        let end = match host_part.find(']') {
+            Some(i) => i,
+            None => return false,
+        };
+        let ip = &host_part[1..end];
+        let rest = &host_part[end + 1..];
+        let port_ok = rest.is_empty()
+            || (rest.starts_with(':') && rest[1..].chars().all(|c| c.is_ascii_digit()));
+        if !port_ok {
+            return false;
+        }
+        return ip.parse::<std::net::Ipv6Addr>().is_ok();
+    }
+
+    if host_part.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+
+    // hostname or hostname:port
+    let name = if let Some((name, port)) = host_part.rsplit_once(':') {
+        if name.is_empty() || port.is_empty() || !port.chars().all(|c| c.is_ascii_digit()) {
+            return false;
+        }
+        if name.parse::<std::net::IpAddr>().is_ok() {
+            return true;
+        }
+        name
+    } else {
+        host_part
+    };
+
+    is_valid_dns_hostname(name)
+}
+
+fn is_valid_dns_hostname(name: &str) -> bool {
+    let name = name.trim_end_matches('.');
+    if name.is_empty() || name.len() > 253 {
+        return false;
+    }
+    // Allow bare "localhost" for single-node / lab installs.
+    if name.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    let labels: Vec<&str> = name.split('.').collect();
+    if labels.len() < 2 {
+        return false;
+    }
+    labels.iter().all(|label| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-')
+    })
 }
 
 async fn resolve_apply_citizen(
@@ -1510,23 +1557,244 @@ async fn citizen_has_active_mayor_application(
     Ok(exists)
 }
 
+fn shell_single_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+fn env_nonempty(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn resolve_mayor_install_network_url() -> String {
+    env_nonempty("QUAZAR_NETWORK_URL")
+        .or_else(|| env_nonempty("QUAZAR_NODE_URL"))
+        .unwrap_or_else(|| "https://quazar.website:8443".to_string())
+        .trim_end_matches('/')
+        .to_string()
+}
+
+fn resolve_api_key_from_headers(headers: &HeaderMap) -> Result<String, MayorError> {
+    if let Some(auth) = headers
+        .get("Authorization")
+        .and_then(|v| v.to_str().ok())
+    {
+        if let Some(rest) = auth.strip_prefix("Bearer ") {
+            let key = rest.trim();
+            if !key.is_empty() {
+                return Ok(key.to_string());
+            }
+        }
+    }
+    if let Some(key) = headers
+        .get("X-API-Key")
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|k| !k.is_empty())
+    {
+        return Ok(key.to_string());
+    }
+    Err(MayorError::forbidden(
+        "Укажите API-ключ в заголовке Authorization (Bearer) или X-API-Key",
+    ))
+}
+
+/// Build a ready-to-run wrapper around `scripts/install-node.sh` for the applicant.
+///
+/// Embedded: network URL of a live core, citizen API key, host. At start the
+/// installer calls the live core (`/api/mayor/setup-package`) for node_id/secret/peers.
+/// reCAPTCHA keys are NOT copied from the coordinating node — they belong to the new node.
+pub fn build_mayor_installer_script(
+    citizen_name: &str,
+    city_or_label: &str,
+    application_id: &str,
+    node_host: &str,
+    api_key: &str,
+    sync_peer: &str,
+    network_url: &str,
+) -> String {
+    let repo_url = env_nonempty("QUAZAR_REPO_URL")
+        .unwrap_or_else(|| "https://github.com/quazar-vs/quazar-node.git".to_string());
+    let repo_branch = env_nonempty("QUAZAR_REPO_BRANCH").unwrap_or_else(|| "main".to_string());
+    let label = if city_or_label.trim().is_empty() {
+        citizen_name
+    } else {
+        city_or_label
+    };
+    let install_dir_default = format!(
+        "quazar-node-{}",
+        label
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect::<String>()
+            .trim_matches('-')
+            .to_lowercase()
+    );
+    let install_dir_default = if install_dir_default == "quazar-node-" || install_dir_default.is_empty()
+    {
+        "quazar-node".to_string()
+    } else {
+        install_dir_default
+    };
+    let city_line = if city_or_label.trim().is_empty() {
+        "(не указан)".to_string()
+    } else {
+        city_or_label.to_string()
+    };
+
+    format!(
+        r#"#!/usr/bin/env bash
+# =============================================================================
+# install-quazar-node.sh — персональный установщик узла мэра Квазара
+#
+# Гражданин: {citizen}
+# Город:     {city}
+# Заявка:    {app_id}
+# Host:      {ip}
+# Sync peer: {peer}
+#
+# Зашито: URL работающего ядра сети, ваш API-ключ, host.
+# При старте scripts/install-node.sh подключается к живому ядру и получает
+# setup-package (идентификатор узла, секрет, peers) — лишнее снаружи не тащится.
+# reCAPTCHA: ключи НОВОГО узла (портал гражданства на нём), не ключи сети.
+# =============================================================================
+set -euo pipefail
+
+# RECAPTCHA: задайте ключи вашего сайта на этом сервере перед запуском.
+export QUAZAR_NETWORK_URL={network_q}
+export QUAZAR_REPO_URL={repo_q}
+export QUAZAR_REPO_BRANCH={branch_q}
+
+NODE_HOST={ip_q}
+API_KEY={key_q}
+INSTALL_DIR="${{QUAZAR_INSTALL_DIR:-$HOME/{install_dir}}}"
+SYNC_PEER={peer_q}
+
+if [[ -z "${{RECAPTCHA_SITE_KEY:-}}" || -z "${{RECAPTCHA_SECRET_KEY:-}}" ]]; then
+  echo "ОШИБКА: нужны RECAPTCHA_SITE_KEY и RECAPTCHA_SECRET_KEY в окружении." >&2
+  echo "Это ключи Google reCAPTCHA для ПОРТАЛА ГРАЖДАНСТВА на новом узле." >&2
+  echo "Получите их в Google reCAPTCHA admin и экспортируйте, затем запустите снова." >&2
+  exit 1
+fi
+
+if [[ ! -f "$INSTALL_DIR/scripts/install-node.sh" ]]; then
+  echo "Клонирование ${{QUAZAR_REPO_URL}} → ${{INSTALL_DIR}} ..."
+  mkdir -p "$(dirname "$INSTALL_DIR")"
+  git clone --branch "$QUAZAR_REPO_BRANCH" --depth 1 "$QUAZAR_REPO_URL" "$INSTALL_DIR"
+fi
+
+cd "$INSTALL_DIR"
+chmod +x scripts/install-node.sh
+
+PEER_ARGS=()
+if [[ -n "${{SYNC_PEER}}" ]]; then
+  PEER_ARGS=(--peer "$SYNC_PEER")
+fi
+
+exec sudo ./scripts/install-node.sh \
+  --ip "$NODE_HOST" \
+  --api-key "$API_KEY" \
+  --network-url "$QUAZAR_NETWORK_URL" \
+  --dir "$INSTALL_DIR" \
+  "${{PEER_ARGS[@]}}" \
+  "$@"
+"#,
+        citizen = citizen_name,
+        city = city_line,
+        app_id = application_id,
+        ip = node_host,
+        peer = sync_peer,
+        network_q = shell_single_quote(network_url),
+        repo_q = shell_single_quote(&repo_url),
+        branch_q = shell_single_quote(&repo_branch),
+        ip_q = shell_single_quote(node_host),
+        key_q = shell_single_quote(api_key),
+        peer_q = shell_single_quote(sync_peer),
+        install_dir = install_dir_default,
+    )
+}
+
+pub fn build_mayor_installer_email_body(
+    citizen_name: &str,
+    city: Option<&str>,
+    application_id: &str,
+    node_host: &str,
+    sync_peer: &str,
+    network_url: &str,
+) -> String {
+    let city_line = city
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|c| format!("Город: {c}\n"))
+        .unwrap_or_default();
+
+    format!(
+        "Здравствуйте, {citizen_name}!\n\n\
+         Ваша заявка на запуск узла мэра Квазара принята и зафиксирована в реестре \
+         (событие MayorNodeLaunchRequested).\n\n\
+         {city_line}Номер заявки: {application_id}\n\
+         Адрес узла: {node_host}\n\
+         Sync peer: {sync_peer}\n\
+         Живое ядро сети: {network_url}\n\
+         Срок на запуск узла: 24 часа с момента подачи.\n\n\
+         Во вложении — персональный скрипт install-quazar-node.sh.\n\
+         В нём зашиты URL работающего ядра, ваш API-ключ и host.\n\
+         При запуске установщик запрашивает у ядра setup-package \
+         (node_id / secret / peers) — не тащите секреты узла снаружи.\n\n\
+         Что сделать:\n\
+         1. Сохраните вложение на сервер с адресом {node_host}.\n\
+         2. chmod +x install-quazar-node.sh\n\
+         3. Задайте ключи reCAPTCHA ДЛЯ НОВОГО УЗЛА (портал гражданства):\n\
+         \n\
+            export RECAPTCHA_SITE_KEY=...\n\
+            export RECAPTCHA_SECRET_KEY=...\n\
+         \n\
+         4. Запустите: ./install-quazar-node.sh\n\
+            (нужны root/sudo, Docker и доступ в интернет).\n\
+         5. Дальше цепочка реестра: NodeStarted → синхронизация → MayorConfirmed.\n\n\
+         Статус заявки: GET /api/mayor/status/{application_id}\n\n\
+         Храните API-ключ в безопасности — он ваш личный.\n\n\
+         С уважением,\n\
+         Квазар\n"
+    )
+}
+
 pub async fn apply_for_mayor_node(
     state: Arc<AppState>,
     auth: &AuthContext,
     req: MayorApplyRequest,
+    raw_api_key: &str,
 ) -> Result<MayorApplyResponse, MayorError> {
     let citizen_id = resolve_apply_citizen(auth, &state.db).await?;
 
     let node_ip = req.ip.trim().to_string();
-    if !is_valid_node_ip(&node_ip) {
+    if !is_valid_node_host(&node_ip) {
         return Err(MayorError::bad_request(
-            "Укажите корректный IP-адрес или адрес узла",
+            "Укажите корректный IP-адрес или DNS-имя узла",
         ));
     }
 
+    let city = req
+        .city
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| {
+            if s.len() > 100 {
+                Err(MayorError::bad_request(
+                    "Название города: максимум 100 символов".to_string(),
+                ))
+            } else {
+                Ok(s.to_string())
+            }
+        })
+        .transpose()?;
+
     if mayor_application_ip_taken(&state.db, &node_ip).await? {
         return Err(MayorError::bad_request(
-            "Этот IP уже занят другой заявкой на узел мэра",
+            "Этот адрес уже занят другой заявкой на узел мэра",
         ));
     }
 
@@ -1541,14 +1809,17 @@ pub async fn apply_for_mayor_node(
     let expires_at = now + Duration::hours(24);
     let sync_peer = select_mayor_sync_peer(&state).await?;
 
-    let citizen_email: Option<String> = sqlx::query_scalar(
-        "SELECT email FROM citizens WHERE id = $1",
+    let citizen_row: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT name, email FROM citizens WHERE id = $1",
     )
     .bind(&citizen_id)
     .fetch_optional(&state.db)
     .await
-    .map_err(|e| MayorError::Database(e.to_string()))?
-    .flatten();
+    .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    let (citizen_name, citizen_email) = citizen_row.ok_or_else(|| {
+        MayorError::bad_request("Гражданин не найден в реестре")
+    })?;
 
     let external_email = citizen_email
         .as_deref()
@@ -1556,26 +1827,106 @@ pub async fn apply_for_mayor_node(
         .filter(|s| !s.is_empty())
         .map(str::to_string);
 
+    let mut payload = serde_json::json!({
+        "node_ip": node_ip,
+        "sync_peer": sync_peer,
+        "expires_at": expires_at,
+        "external_email": external_email,
+        "street": false,
+    });
+    if let Some(ref city) = city {
+        payload["city"] = serde_json::json!(city);
+    }
+
+    // Chain event first (auditable lifecycle), then local candidates row for immediate API use.
+    let event_id = format!("mayor_node_launch_requested_{}", application_id);
+    let timestamp = now.timestamp();
+    let expires_at_str = expires_at.to_rfc3339();
+    let event = build_signed_mayor_node_launch_requested_event(
+        &event_id,
+        &application_id.to_string(),
+        &citizen_id,
+        &citizen_name,
+        &node_ip,
+        &sync_peer,
+        &expires_at_str,
+        city.as_deref(),
+        external_email.as_deref(),
+        &state.node_id,
+        timestamp,
+    );
+    submit_mayor_pending_event(state.clone(), event).await?;
+
     crate::candidates::upsert_mayor(
         &state.db,
         application_id,
         external_email.as_deref(),
-        Some(&citizen_id),
+        Some(&citizen_name),
         "pending",
         Some(&citizen_id),
         "citizen",
-        serde_json::json!({
-            "node_ip": node_ip,
-            "sync_peer": sync_peer,
-            "expires_at": expires_at,
-            "external_email": external_email,
-            "street": false,
-        }),
+        payload,
         None,
         None,
     )
     .await
     .map_err(|e| MayorError::Database(e.to_string()))?;
+
+    // Soft-fail email: заявка и событие уже созданы; отсутствие SMTP/email не откатывает apply.
+    if let Some(to) = external_email.as_deref() {
+        if let Some(smtp) = SmtpConfig::from_env() {
+            let network_url = resolve_mayor_install_network_url();
+            let app_id = application_id.to_string();
+            let city_label = city.as_deref().unwrap_or("");
+            let body = build_mayor_installer_email_body(
+                &citizen_name,
+                city.as_deref(),
+                &app_id,
+                &node_ip,
+                &sync_peer,
+                &network_url,
+            );
+            let script = build_mayor_installer_script(
+                &citizen_name,
+                city_label,
+                &app_id,
+                &node_ip,
+                raw_api_key,
+                &sync_peer,
+                &network_url,
+            );
+            if let Err(e) = send_mayor_installer_package(
+                &smtp,
+                to,
+                &citizen_name,
+                city_label,
+                &app_id,
+                &node_ip,
+                body,
+                script,
+            )
+            .await
+            {
+                tracing::warn!(
+                    email = %to,
+                    application_id = %application_id,
+                    error = %e,
+                    "failed to send mayor installer email"
+                );
+            }
+        } else {
+            tracing::warn!(
+                application_id = %application_id,
+                "SMTP not configured — skipping mayor installer email"
+            );
+        }
+    } else {
+        tracing::warn!(
+            application_id = %application_id,
+            citizen_id = %citizen_id,
+            "citizen has no email — skipping mayor installer email"
+        );
+    }
 
     Ok(MayorApplyResponse {
         application_id: application_id.to_string(),
@@ -1583,183 +1934,14 @@ pub async fn apply_for_mayor_node(
     })
 }
 
-/// Public street mayor application (website): no Bearer, email-verified → confirmed.
+/// Deprecated: street create is disabled. Always returns 410 Gone.
+/// Historical street records may still be approved/rejected by admin.
 pub async fn apply_street_mayor_application(
-    state: Arc<AppState>,
-    client_ip: &str,
-    req: StreetMayorApplicationRequest,
+    _state: Arc<AppState>,
+    _client_ip: &str,
+    _req: StreetMayorApplicationRequest,
 ) -> Result<StreetMayorApplicationResponse, MayorError> {
-    if let Err(msg) = crate::auth::ensure_recaptcha_secret() {
-        return Err(MayorError::Message(msg));
-    }
-    if recaptcha_required() {
-        let token = req.captcha_token.as_deref().unwrap_or("");
-        if let Err(msg) = verify_recaptcha_with_ip(token, Some(client_ip)).await {
-            return Err(MayorError::bad_request(msg));
-        }
-    }
-
-    let login = normalize_and_validate_citizen_name(&req.login)
-        .map_err(|msg| MayorError::bad_request(msg))?;
-    let full_name = validate_non_empty_len(&req.full_name, "ФИО", 200)
-        .map_err(MayorError::bad_request)?;
-    let passport_data = validate_non_empty_len(&req.passport_data, "Данные паспорта", 2000)
-        .map_err(MayorError::bad_request)?;
-    let reason = validate_non_empty_len(&req.reason, "Причина", 5000)
-        .map_err(MayorError::bad_request)?;
-
-    let email = normalize_email(&req.email);
-    if !is_valid_email(&email) {
-        return Err(MayorError::bad_request("Введите корректный email-адрес"));
-    }
-
-    match email_belongs_to_citizen(&state.db, &email).await {
-        Ok(true) => {
-            clear_recent_email_verification(&email);
-            return Err(MayorError::forbidden(CITIZEN_USE_APP_MESSAGE));
-        }
-        Ok(false) => {}
-        Err(e) => return Err(MayorError::Database(e.to_string())),
-    }
-
-    let node_ip = match req.ip.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-        Some(ip) => {
-            if !is_valid_node_ip(ip) {
-                return Err(MayorError::bad_request(
-                    "Укажите корректный IP-адрес или адрес узла",
-                ));
-            }
-            if mayor_application_ip_taken(&state.db, ip).await? {
-                return Err(MayorError::bad_request(
-                    "Этот IP уже занят другой заявкой на узел мэра",
-                ));
-            }
-            Some(ip.to_string())
-        }
-        None => None,
-    };
-
-    let email_active: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM candidates
-            WHERE kind = 'mayor'
-              AND citizen_id IS NULL
-              AND lower(email) = lower($1)
-              AND status = ANY($2)
-        )
-        "#,
-    )
-    .bind(&email)
-    .bind(&["pending", "confirmed"][..])
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?;
-    if email_active {
-        return Err(MayorError::bad_request(
-            "На этот email уже есть активная заявка на мэрство",
-        ));
-    }
-
-    let login_active: bool = sqlx::query_scalar(
-        r#"
-        SELECT EXISTS(
-            SELECT 1 FROM candidates
-            WHERE kind = 'mayor'
-              AND citizen_id IS NULL
-              AND lower(payload->>'login') = lower($1)
-              AND status = ANY($2)
-        )
-        "#,
-    )
-    .bind(&login)
-    .bind(&["pending", "confirmed"][..])
-    .fetch_one(&state.db)
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?;
-    if login_active {
-        return Err(MayorError::bad_request(
-            "Логин уже используется в заявке на мэрство",
-        ));
-    }
-
-    // Same as citizenship: client hint + recent /auth/register/verify-code consume.
-    let client_claims_verified = req.email_already_verified.unwrap_or(false);
-    let auto_confirm = client_claims_verified && take_recent_email_verification(&email);
-    if !auto_confirm {
-        return Err(MayorError::forbidden(
-            "Сначала подтвердите email через вход на сайте, затем подайте заявку снова",
-        ));
-    }
-
-    let application_id = Uuid::new_v4();
-    let now = Utc::now();
-    // Review window (node 24h timer starts only after admin approve → pending).
-    let expires_at = now + Duration::days(30);
-    let sync_peer = select_mayor_sync_peer(&state).await?;
-
-    crate::candidates::upsert_mayor(
-        &state.db,
-        application_id,
-        Some(&email),
-        Some(&full_name),
-        "confirmed",
-        None,
-        "street",
-        serde_json::json!({
-            "login": login,
-            "full_name": full_name,
-            "passport_data": passport_data,
-            "reason": reason,
-            "node_ip": node_ip,
-            "sync_peer": sync_peer,
-            "confirmed_at": now,
-            "external_email": email,
-            "expires_at": expires_at,
-            "street": true,
-        }),
-        None,
-        None,
-    )
-    .await
-    .map_err(|e| MayorError::Database(e.to_string()))?;
-
-    // Notify admins (NOTIFY_EMAIL) + confirmation to applicant — same pattern as citizenship.
-    if let Some(smtp) = SmtpConfig::from_env() {
-        let notify_to = notify_email().unwrap_or_else(|| smtp.user.clone());
-        if let Err(e) = send_mayor_street_application(
-            &smtp,
-            &notify_to,
-            &full_name,
-            &email,
-            &login,
-            &passport_data,
-            &reason,
-        )
-        .await
-        {
-            tracing::warn!(to = %notify_to, error = %e, "failed to send mayor street application notification");
-        }
-        if let Err(e) =
-            send_mayor_street_confirmation(&smtp, &email, &application_id.to_string()).await
-        {
-            tracing::warn!(
-                email = %email,
-                application_id = %application_id,
-                error = %e,
-                "failed to send mayor street confirmation email"
-            );
-        }
-    } else {
-        tracing::warn!("SMTP not configured — skipping mayor application emails");
-    }
-
-    Ok(StreetMayorApplicationResponse {
-        id: application_id.to_string(),
-        status: "confirmed".to_string(),
-        message: "Заявка принята и ожидает рассмотрения. Email уже был подтверждён.".to_string(),
-        sync_peer: Some(sync_peer),
-    })
+    Err(MayorError::gone(STREET_MAYOR_DISABLED_MESSAGE))
 }
 
 #[derive(Debug, sqlx::FromRow)]
@@ -1774,7 +1956,8 @@ struct StreetMayorReviewRow {
     citizen_id: Option<String>,
 }
 
-/// Admin approve of a street mayor application: create/link citizen, enter node pending flow.
+/// Admin approve of a legacy street mayor application (deprecated create path).
+/// New street submits are disabled; kept to finish historical `confirmed` records.
 pub async fn approve_street_mayor_application(
     state: Arc<AppState>,
     auth: &AuthContext,
@@ -1850,7 +2033,7 @@ pub async fn approve_street_mayor_application(
             MayorError::bad_request("Укажите IP узла в заявке или в теле approve ({ip})")
         })?;
 
-    if !is_valid_node_ip(&node_ip) {
+    if !is_valid_node_host(&node_ip) {
         return Err(MayorError::bad_request(
             "Укажите корректный IP-адрес или адрес узла",
         ));
@@ -2333,7 +2516,7 @@ pub fn mayor_application_status_message(
         }
         "rejected" => "Заявка на мэрство отклонена.".to_string(),
         "timed_out" => {
-            "Срок действия заявки истёк. Подайте новую заявку через /api/mayor/apply или сайт."
+            "Срок действия заявки истёк. Подайте новую заявку через приложение Passport (POST /api/mayor/apply)."
                 .to_string()
         }
         other => format!("Статус заявки: {other}."),
@@ -2432,7 +2615,7 @@ pub async fn build_mayor_setup_package(
     raw_api_key: &str,
 ) -> Result<MayorSetupPackageResponse, MayorError> {
     let ip = node_ip.trim();
-    if !is_valid_node_ip(ip) {
+    if !is_valid_node_host(ip) {
         return Err(MayorError::bad_request(
             "Укажите корректный IP-адрес или адрес узла",
         ));
@@ -3340,34 +3523,23 @@ pub async fn mayor_setup_package_handler(
 pub async fn mayor_apply_handler(
     Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
     Json(req): Json<MayorApplyRequest>,
 ) -> impl IntoResponse {
-    match apply_for_mayor_node(state, &auth, req).await {
+    let api_key = match resolve_api_key_from_headers(&headers) {
+        Ok(k) => k,
+        Err(e) => return e.to_response().into_response(),
+    };
+    match apply_for_mayor_node(state, &auth, req, &api_key).await {
         Ok(resp) => (StatusCode::CREATED, Json(ApiResponse::success(resp))).into_response(),
         Err(e) => e.to_response().into_response(),
     }
 }
 
-/// POST /api/mayor/application — public street apply (no Bearer).
-pub async fn street_mayor_application_handler(
-    State(state): State<Arc<AppState>>,
-    headers: HeaderMap,
-    connect: ConnectInfo<SocketAddr>,
-    Json(req): Json<StreetMayorApplicationRequest>,
-) -> impl IntoResponse {
-    let trusted = state.trusted_proxies.snapshot().await;
-    let ip = client_ip::resolve_from_connect(&headers, Some(&connect), &trusted);
-    if !allow_street_mayor_submit(&ip) {
-        return response::too_many_requests(
-            "Слишком часто. Подождите минуту и попробуйте снова.",
-        )
-        .into_response();
-    }
-
-    match apply_street_mayor_application(state, &ip, req).await {
-        Ok(resp) => (StatusCode::CREATED, Json(ApiResponse::success(resp))).into_response(),
-        Err(e) => e.to_response().into_response(),
-    }
+/// POST /api/mayor/application — permanently disabled (410 Gone).
+/// Mayorship is citizen-only via Passport: POST /api/mayor/apply + Bearer.
+pub async fn street_mayor_application_handler() -> impl IntoResponse {
+    response::gone(STREET_MAYOR_DISABLED_MESSAGE)
 }
 
 pub async fn list_street_mayor_applications_handler(
@@ -3614,6 +3786,56 @@ mod tests {
         assert!(node_secrets_match("0xAbCd", "abcd"));
         assert!(node_secrets_match("0xABCD", "0xabcd"));
         assert!(!node_secrets_match("abcd", "abce"));
+    }
+
+    #[test]
+    fn mayor_installer_script_embeds_params_not_foreign_secrets() {
+        let script = build_mayor_installer_script(
+            "alice",
+            "NeoTokyo",
+            "app-1",
+            "203.0.113.10",
+            "qz_secret_key",
+            "QZ-NODE@https://peer.example",
+            "https://quazar.website:8443",
+        );
+        assert!(script.contains("--ip"));
+        assert!(script.contains("203.0.113.10"));
+        assert!(script.contains("qz_secret_key"));
+        assert!(script.contains("NeoTokyo"));
+        assert!(script.contains("QUAZAR_NETWORK_URL"));
+        assert!(script.contains("setup-package") || script.contains("живому ядру"));
+        assert!(script.contains("install-node.sh"));
+        assert!(!script.contains("node_secret"));
+        assert!(!script.contains("export RECAPTCHA_SITE_KEY='"));
+    }
+
+    #[test]
+    fn mayor_installer_email_mentions_city_and_steps() {
+        let body = build_mayor_installer_email_body(
+            "alice",
+            Some("NeoTokyo"),
+            "app-1",
+            "203.0.113.10",
+            "QZ-NODE@https://peer.example",
+            "https://quazar.website:8443",
+        );
+        assert!(body.contains("NeoTokyo"));
+        assert!(body.contains("install-quazar-node.sh"));
+        assert!(body.contains("RECAPTCHA_SITE_KEY"));
+        assert!(body.contains("MayorNodeLaunchRequested"));
+        assert!(body.contains("app-1"));
+    }
+
+    #[test]
+    fn node_host_accepts_ip_and_domain() {
+        assert!(is_valid_node_host("203.0.113.10"));
+        assert!(is_valid_node_host("mayor.example.com"));
+        assert!(is_valid_node_host("localhost"));
+        assert!(is_valid_node_host("https://node.example.org"));
+        assert!(!is_valid_node_host(""));
+        assert!(!is_valid_node_host("bad host"));
+        assert!(!is_valid_node_host("nodots"));
     }
 
     #[test]
