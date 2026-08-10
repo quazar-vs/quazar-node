@@ -804,20 +804,48 @@ fn row_is_item(unit: &str) -> bool {
     u.contains("позиц") || u.contains("бирж")
 }
 
-/// Expand access cell (`Г, Ст, Сд, М` / `Г, авто`) into status names + `auto_verify`.
+/// Case-insensitive remove of a normalized needle; returns (remainder, found).
+fn remove_norm_phrase(hay: &str, needle_norm: &str) -> (String, bool) {
+    let hay_chars: Vec<char> = hay.chars().collect();
+    let hay_norm: Vec<char> = norm_header(hay).chars().collect();
+    let needle: Vec<char> = needle_norm.chars().collect();
+    if needle.is_empty() || hay_norm.len() < needle.len() {
+        return (hay.to_string(), false);
+    }
+    if let Some(start) = hay_norm
+        .windows(needle.len())
+        .position(|w| w == needle.as_slice())
+    {
+        let mut out = String::new();
+        out.extend(&hay_chars[..start]);
+        out.push(' ');
+        out.extend(&hay_chars[start + needle.len()..]);
+        (out, true)
+    } else {
+        (hay.to_string(), false)
+    }
+}
+
+/// Expand access cell (`Г, Ст, Сд, М` / `Г, Агент СБ`) into status names + `auto_verify`.
+/// `auto_verify` is set only when the cell contains the marker «Агент СБ».
 fn parse_access_cell(raw: &str) -> Result<(Vec<String>, bool), String> {
-    let mut access: Vec<String> = Vec::new();
+    let mut rest = raw.trim().to_string();
     let mut auto_verify = false;
-    for tok in raw.split(|c: char| c == ',' || c == ';' || c == '/' || c.is_whitespace()) {
+    for marker in ["агент сб", "агентсб"] {
+        let (next, found) = remove_norm_phrase(&rest, marker);
+        if found {
+            auto_verify = true;
+            rest = next;
+        }
+    }
+
+    let mut access: Vec<String> = Vec::new();
+    for tok in rest.split(|c: char| c == ',' || c == ';' || c == '/' || c.is_whitespace()) {
         let t = tok.trim().trim_matches('*');
         if t.is_empty() {
             continue;
         }
         let n = norm_header(t);
-        if n == "авто" || n == "auto" || n == "auto_verify" {
-            auto_verify = true;
-            continue;
-        }
         let status = if n == "г" || n.starts_with("гражданин") {
             "Гражданин"
         } else if n == "ст" || n.starts_with("страж") {
@@ -828,7 +856,7 @@ fn parse_access_cell(raw: &str) -> Result<(Vec<String>, bool), String> {
             "Мэр"
         } else {
             return Err(format!(
-                "SVOD.md Доступ: unknown token `{t}` (expected Г/Ст/Сд/М or авто)"
+                "SVOD.md Доступ: unknown token `{t}` (expected Г/Ст/Сд/М or «Агент СБ»)"
             ));
         };
         if !access.iter().any(|s| s == status) {
@@ -836,7 +864,9 @@ fn parse_access_cell(raw: &str) -> Result<(Vec<String>, bool), String> {
         }
     }
     if access.is_empty() {
-        return Err(format!("SVOD.md Доступ: empty or only auto flags in `{raw}`"));
+        return Err(format!(
+            "SVOD.md Доступ: empty status list in `{raw}` (need Г/Ст/Сд/М; «Агент СБ» only sets auto_verify)"
+        ));
     }
     Ok((access, auto_verify))
 }
@@ -1126,7 +1156,7 @@ mod tests {
 |---------|----------------|---------|--------|
 | WEB_DEV | 100 | позиция биржи | Г, Ст, Сд, М |
 | video_create | 50 | 1 ролик | Г, Ст, Сд, М |
-| video_view | 10 | 10 просмотров | Г, авто |
+| video_view | 10 | 10 просмотров | Г, Агент СБ |
 "#;
         let json = parse_svod_markdown(md).expect("parse");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
