@@ -835,7 +835,7 @@ mod tests {
         laws.insert("constitution".to_string(), "# C\n".to_string());
         laws.insert(
             "svod".to_string(),
-            "## Часть 1. Разработка\n\n| Позиция | Ставка (КВАЗИ) | Единица |\n|---|---|---|\n| X | 1 | позиция биржи |\n"
+            "## Часть 1. Разработка\n\n| Позиция | Ставка (КВАЗИ) | Единица | Доступ |\n|---|---|---|---|\n| X | 1 | позиция биржи | Г |\n"
                 .to_string(),
         );
         fs::write(&laws_cache, serde_json::to_string(&laws).unwrap()).unwrap();

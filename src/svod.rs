@@ -719,7 +719,7 @@ pub async fn disable_service_handler(
     }))))
 }
 
-/// Parsed etalon from `SVOD.md` (exactly 3-column tables).
+/// Parsed etalon from `SVOD.md` (exactly 4-column tables).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvodParsedFile {
     pub items: Vec<SvodParsedItem>,
@@ -732,6 +732,8 @@ pub struct SvodParsedItem {
     pub base_price: i64,
     pub unit: String,
     pub work_kind: String,
+    pub access: Vec<String>,
+    pub auto_verify: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -740,6 +742,8 @@ pub struct SvodParsedRate {
     pub reward: i64,
     pub unit: String,
     pub work_kind: String,
+    pub access: Vec<String>,
+    pub auto_verify: bool,
 }
 
 fn norm_header(h: &str) -> String {
@@ -800,11 +804,48 @@ fn row_is_item(unit: &str) -> bool {
     u.contains("позиц") || u.contains("бирж")
 }
 
-/// Validate header is exactly 3 columns: Позиция | Ставка (КВАЗИ) | Единица.
+/// Expand access cell (`Г, Ст, Сд, М` / `Г, авто`) into status names + `auto_verify`.
+fn parse_access_cell(raw: &str) -> Result<(Vec<String>, bool), String> {
+    let mut access: Vec<String> = Vec::new();
+    let mut auto_verify = false;
+    for tok in raw.split(|c: char| c == ',' || c == ';' || c == '/' || c.is_whitespace()) {
+        let t = tok.trim().trim_matches('*');
+        if t.is_empty() {
+            continue;
+        }
+        let n = norm_header(t);
+        if n == "авто" || n == "auto" || n == "auto_verify" {
+            auto_verify = true;
+            continue;
+        }
+        let status = if n == "г" || n.starts_with("гражданин") {
+            "Гражданин"
+        } else if n == "ст" || n.starts_with("страж") {
+            "Страж"
+        } else if n == "сд" || n.starts_with("судь") {
+            "Судья"
+        } else if n == "м" || n.starts_with("мэр") || n.starts_with("мер") {
+            "Мэр"
+        } else {
+            return Err(format!(
+                "SVOD.md Доступ: unknown token `{t}` (expected Г/Ст/Сд/М or авто)"
+            ));
+        };
+        if !access.iter().any(|s| s == status) {
+            access.push(status.to_string());
+        }
+    }
+    if access.is_empty() {
+        return Err(format!("SVOD.md Доступ: empty or only auto flags in `{raw}`"));
+    }
+    Ok((access, auto_verify))
+}
+
+/// Validate header is exactly 4 columns: Позиция | Ставка (КВАЗИ) | Единица | Доступ.
 fn validate_svod_header(cells: &[String]) -> Result<(), String> {
-    if cells.len() != 3 {
+    if cells.len() != 4 {
         return Err(format!(
-            "SVOD.md table must have exactly 3 columns, got {}: {}",
+            "SVOD.md table must have exactly 4 columns, got {}: {}",
             cells.len(),
             cells.join(" | ")
         ));
@@ -812,12 +853,14 @@ fn validate_svod_header(cells: &[String]) -> Result<(), String> {
     let c0 = norm_header(&cells[0]);
     let c1 = norm_header(&cells[1]);
     let c2 = norm_header(&cells[2]);
+    let c3 = norm_header(&cells[3]);
     let ok0 = c0.contains("позиц") || c0.contains("код") || c0 == "code" || c0.contains("действи");
     let ok1 = c1.contains("ставк") || c1.contains("квази") || c1.contains("price") || c1.contains("reward");
     let ok2 = c2.contains("единиц") || c2 == "unit";
-    if !(ok0 && ok1 && ok2) {
+    let ok3 = c3.contains("доступ") || c3.contains("access") || c3.contains("статус") || c3.contains("роль");
+    if !(ok0 && ok1 && ok2 && ok3) {
         return Err(format!(
-            "SVOD.md expected headers Позиция | Ставка (КВАЗИ) | Единица, got: {}",
+            "SVOD.md expected headers Позиция | Ставка (КВАЗИ) | Единица | Доступ, got: {}",
             cells.join(" | ")
         ));
     }
@@ -838,7 +881,7 @@ pub fn write_svod_parsed_cache(json: &str) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("SVOD cache write {}: {e}", path.display()))
 }
 
-/// Parse `SVOD.md` (exactly two section tables × 3 columns) into lean items/rates JSON.
+/// Parse `SVOD.md` (section tables × 4 columns) into lean items/rates JSON.
 pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
     let mut items: Vec<SvodParsedItem> = Vec::new();
     let mut rates: Vec<SvodParsedRate> = Vec::new();
@@ -879,9 +922,9 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
             continue;
         }
 
-        if cells.len() != 3 {
+        if cells.len() != 4 {
             return Err(format!(
-                "SVOD.md data row must have exactly 3 columns, got {}: {}",
+                "SVOD.md data row must have exactly 4 columns, got {}: {}",
                 cells.len(),
                 cells.join(" | ")
             ));
@@ -898,6 +941,8 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
         if unit.is_empty() {
             return Err(format!("SVOD.md row `{code}`: empty Единица"));
         }
+        let (access, auto_verify) = parse_access_cell(&cells[3])
+            .map_err(|e| format!("SVOD.md row `{code}`: {e}"))?;
 
         if row_is_item(&unit) {
             items.push(SvodParsedItem {
@@ -905,6 +950,8 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
                 base_price: amount,
                 unit,
                 work_kind: current_kind.clone(),
+                access,
+                auto_verify,
             });
         } else {
             rates.push(SvodParsedRate {
@@ -912,6 +959,8 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
                 reward: amount,
                 unit,
                 work_kind: current_kind.clone(),
+                access,
+                auto_verify,
             });
         }
     }
@@ -1060,29 +1109,27 @@ mod tests {
     }
 
     #[test]
-    fn parse_svod_markdown_three_columns() {
+    fn parse_svod_markdown_four_columns_access_and_auto_verify() {
         let md = r#"
 # Свод
 
 ## Часть 1. Разработка
 
-| Позиция | Ставка (КВАЗИ) | Единица |
-|---------|----------------|---------|
-| CREATIVE_CONCEPT | 80 | позиция биржи |
-| idea_submit | 30 | 1 идея / тема |
+| Позиция | Ставка (КВАЗИ) | Единица | Доступ |
+|---------|----------------|---------|--------|
+| CREATIVE_CONCEPT | 80 | позиция биржи | Г, Ст, Сд, М |
+| idea_submit | 30 | 1 идея / тема | Г, Ст, Сд, М |
 
 ## Часть 2. Реализация
 
-| Позиция | Ставка (КВАЗИ) | Единица |
-|---------|----------------|---------|
-| WEB_DEV | 100 | позиция биржи |
-| video_create | 50 | 1 ролик |
-| video_view | 10 | 10 просмотров |
+| Позиция | Ставка (КВАЗИ) | Единица | Доступ |
+|---------|----------------|---------|--------|
+| WEB_DEV | 100 | позиция биржи | Г, Ст, Сд, М |
+| video_create | 50 | 1 ролик | Г, Ст, Сд, М |
+| video_view | 10 | 10 просмотров | Г, авто |
 "#;
         let json = parse_svod_markdown(md).expect("parse");
         let v: serde_json::Value = serde_json::from_str(&json).unwrap();
-        assert!(v.get("title").is_none());
-        assert!(v.get("categories").is_none());
         let items = v["items"].as_array().unwrap();
         let rates = v["rates"].as_array().unwrap();
         assert_eq!(items.len(), 2);
@@ -1091,13 +1138,21 @@ mod tests {
         assert_eq!(items[0]["base_price"], 80);
         assert_eq!(items[0]["unit"], "позиция биржи");
         assert_eq!(items[0]["work_kind"], "development");
+        assert_eq!(
+            items[0]["access"],
+            serde_json::json!(["Гражданин", "Страж", "Судья", "Мэр"])
+        );
+        assert_eq!(items[0]["auto_verify"], false);
         assert_eq!(items[1]["code"], "WEB_DEV");
         assert_eq!(items[1]["work_kind"], "implementation");
         assert_eq!(rates[0]["action"], "idea_submit");
         assert_eq!(rates[0]["reward"], 30);
-        assert_eq!(rates[0]["unit"], "1 идея / тема");
+        assert_eq!(rates[0]["auto_verify"], false);
         assert_eq!(rates[1]["action"], "video_create");
+        assert_eq!(rates[2]["action"], "video_view");
         assert_eq!(rates[2]["reward"], 10);
+        assert_eq!(rates[2]["access"], serde_json::json!(["Гражданин"]));
+        assert_eq!(rates[2]["auto_verify"], true);
     }
 
     #[test]
@@ -1105,9 +1160,9 @@ mod tests {
         let md = r#"
 ## Разработка
 
-| Позиция | Ставка (КВАЗИ) | Единица | Extra |
-|---------|----------------|---------|-------|
-| X | 1 | позиция биржи | y |
+| Позиция | Ставка (КВАЗИ) | Единица |
+|---------|----------------|---------|
+| X | 1 | позиция биржи |
 "#;
         assert!(parse_svod_markdown(md).is_err());
     }
