@@ -49,6 +49,7 @@ const LAW_KEY_FILES: &[(&str, &str)] = &[
     ("kbo", "KBO.md"),
     ("kgps", "KGPS.md"),
     ("kva", "KVA.md"),
+    ("svod", "SVOD.md"),
 ];
 
 #[derive(Debug, Clone, Serialize)]
@@ -100,7 +101,7 @@ pub struct DnaSnapshot {
     pub source: String,
 }
 
-/// In-RAM genetic + law package. Not written to the blockchain / P2P.
+/// In-RAM genetic + law package (incl. SVOD.md as `laws.svod`). Not on-chain / P2P.
 #[derive(Debug, Clone)]
 pub struct ReferencePackage {
     pub dna: String,
@@ -193,6 +194,15 @@ fn laws_cache_path() -> PathBuf {
     std::env::var("QUAZAR_ALGONISM_LAWS_CACHE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_LAWS_CACHE_PATH))
+}
+
+fn svod_seed_path() -> Option<PathBuf> {
+    std::env::var("QUAZAR_SVOD_SEED_PATH")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| Some(PathBuf::from("/var/lib/quazar/algonism/SVOD.md")))
 }
 
 fn poll_interval_secs() -> u64 {
@@ -355,7 +365,7 @@ async fn fetch_dna_text(client: &reqwest::Client) -> Result<String, String> {
     Err(last_err)
 }
 
-/// Fetch the fixed law set with short keys. Any missing file aborts.
+/// Fetch the fixed law set with short keys (includes `svod` ← `SVOD.md`).
 async fn fetch_mapped_laws(
     client: &reqwest::Client,
 ) -> Result<BTreeMap<String, String>, String> {
@@ -363,10 +373,40 @@ async fn fetch_mapped_laws(
     let mut laws = BTreeMap::new();
     for (key, filename) in LAW_KEY_FILES {
         let url = format!("{base}/{filename}");
-        let text = fetch_url_text(client, &url)
-            .await
-            .map_err(|e| format!("law {filename} ({key}): {e}"))?;
-        laws.insert((*key).to_string(), text);
+        match fetch_url_text(client, &url).await {
+            Ok(text) => {
+                laws.insert((*key).to_string(), text);
+            }
+            Err(e) if *key == "svod" => {
+                // Bootstrap until SVOD.md is published to quazar-law.
+                let mut loaded = None;
+                if let Some(seed) = svod_seed_path() {
+                    if let Ok(text) = read_cache(&seed) {
+                        tracing::warn!(
+                            error = %e,
+                            seed = %seed.display(),
+                            "SVOD.md GitHub fetch failed; using QUAZAR_SVOD_SEED_PATH"
+                        );
+                        loaded = Some(text);
+                    }
+                }
+                match loaded {
+                    Some(text) => {
+                        laws.insert((*key).to_string(), text);
+                    }
+                    None => {
+                        return Err(format!("law {filename} ({key}): {e}"));
+                    }
+                }
+            }
+            Err(e) => {
+                return Err(format!("law {filename} ({key}): {e}"));
+            }
+        }
+    }
+    if !laws.contains_key("svod") || laws.get("svod").map(|s| s.trim().is_empty()).unwrap_or(true)
+    {
+        return Err("law package missing SVOD.md (laws.svod)".to_string());
     }
     Ok(laws)
 }
@@ -380,33 +420,78 @@ fn persist_package(pkg: &ReferencePackage) {
     if let Err(e) = write_laws_cache(&laws_path, &pkg.laws) {
         tracing::warn!(error = %e, path = %laws_path.display(), "failed to write laws cache");
     }
+    // Also mirror SVOD.md next to DNA cache for seed/bootstrap.
+    if let Some(svod) = pkg.laws.get("svod") {
+        let path = PathBuf::from("/var/lib/quazar/algonism/SVOD.md");
+        if let Err(e) = write_cache(&path, svod) {
+            tracing::warn!(error = %e, path = %path.display(), "failed to write SVOD.md cache");
+        }
+    }
 }
 
-/// Force-load DNA + laws from GitHub into RAM/disk. Sets `source=github`.
-pub async fn reload_from_github(memory: &DnaMemory) -> Result<ReferencePackage, String> {
+/// Extract machine JSON from SVOD.md (fenced ```json block) or raw JSON body.
+fn extract_svod_machine_json(svod_md: &str) -> Option<String> {
+    let trimmed = svod_md.trim();
+    if trimmed.starts_with('{') {
+        return Some(trimmed.to_string());
+    }
+    let start = trimmed.find("```json")?;
+    let after = &trimmed[start + 7..];
+    let end = after.find("```")?;
+    let body = after[..end].trim();
+    if body.starts_with('{') {
+        Some(body.to_string())
+    } else {
+        None
+    }
+}
+
+async fn apply_svod_if_present(pool: &sqlx::PgPool, pkg: &ReferencePackage) {
+    let Some(svod_md) = pkg.laws.get("svod") else {
+        return;
+    };
+    let Some(json) = extract_svod_machine_json(svod_md) else {
+        tracing::warn!("SVOD.md has no machine JSON block; skipping Postgres apply");
+        return;
+    };
+    if let Err(e) = crate::svod::apply_svod_etalon_json(pool, &json).await {
+        tracing::error!(error = %e, "failed to apply SVOD etalon into Postgres");
+    }
+}
+
+/// Force-load DNA + laws (incl. SVOD.md) from GitHub into RAM/disk. Sets `source=github`.
+pub async fn reload_from_github(
+    memory: &DnaMemory,
+    pool: &sqlx::PgPool,
+) -> Result<ReferencePackage, String> {
     let client = http_client()?;
     let dna = fetch_dna_text(&client).await?;
     let laws = fetch_mapped_laws(&client).await?;
     let pkg = build_package(dna, "github".to_string(), laws);
     persist_package(&pkg);
+    apply_svod_if_present(pool, &pkg).await;
     memory.set_package(pkg.clone()).await;
     tracing::info!(
         dna_sha = %pkg.dna_sha,
         laws_sha = %pkg.laws_sha,
         laws = pkg.laws.len(),
-        "Algonism reference reloaded from GitHub"
+        has_svod = pkg.laws.contains_key("svod"),
+        "Algonism reference (DNA/laws/SVOD) reloaded from GitHub"
     );
     Ok(pkg)
 }
 
-/// Load DNA (+ laws when possible) at startup: GitHub first, then local cache.
-pub async fn load_dna_at_startup(memory: &DnaMemory) -> Result<DnaSnapshot, String> {
-    match reload_from_github(memory).await {
+/// Load DNA (+ laws incl. SVOD) at startup: GitHub first, then local cache.
+pub async fn load_dna_at_startup(
+    memory: &DnaMemory,
+    pool: &sqlx::PgPool,
+) -> Result<DnaSnapshot, String> {
+    match reload_from_github(memory, pool).await {
         Ok(pkg) => {
             tracing::info!(
                 bytes = pkg.dna.len(),
                 dna_sha = %pkg.dna_sha,
-                "Algonism DNA loaded from GitHub"
+                "Algonism DNA/laws/SVOD loaded from GitHub"
             );
             return Ok(DnaSnapshot {
                 text: pkg.dna,
@@ -426,14 +511,22 @@ pub async fn load_dna_at_startup(memory: &DnaMemory) -> Result<DnaSnapshot, Stri
             dna_path.display()
         )
     })?;
-    let laws = read_laws_cache(&laws_path).unwrap_or_default();
+    let mut laws = read_laws_cache(&laws_path).unwrap_or_default();
+    if !laws.contains_key("svod") {
+        if let Some(seed) = svod_seed_path() {
+            if let Ok(text) = read_cache(&seed) {
+                laws.insert("svod".to_string(), text);
+            }
+        }
+    }
     let pkg = build_package(dna, "cache".to_string(), laws);
+    apply_svod_if_present(pool, &pkg).await;
     memory.set_package(pkg.clone()).await;
     tracing::warn!(
         path = %dna_path.display(),
         bytes = pkg.dna.len(),
         dna_sha = %pkg.dna_sha,
-        "GitHub unavailable; using local DNA/laws cache"
+        "GitHub unavailable; using local DNA/laws/SVOD cache"
     );
     Ok(DnaSnapshot {
         text: pkg.dna,
@@ -492,29 +585,43 @@ async fn poll_once(state: &AppState) -> Result<(), String> {
 
     let pkg = build_package(dna, "github".to_string(), laws);
     persist_package(&pkg);
+    apply_svod_if_present(&state.db, &pkg).await;
     state.dna.set_package(pkg).await;
     Ok(())
 }
 
 async fn ensure_package(state: &AppState) -> Result<ReferencePackage, String> {
     if let Some(pkg) = state.dna.get_package().await {
-        if !pkg.dna.trim().is_empty() && !pkg.laws.is_empty() {
+        if !pkg.dna.trim().is_empty()
+            && !pkg.laws.is_empty()
+            && pkg.laws.get("svod").map(|s| !s.trim().is_empty()).unwrap_or(false)
+        {
             return Ok(pkg);
         }
     }
-    match reload_from_github(&state.dna).await {
+    match reload_from_github(&state.dna, &state.db).await {
         Ok(pkg) => Ok(pkg),
         Err(gh_err) => {
             let dna_path = cache_path();
             let laws_path = laws_cache_path();
             let dna = read_cache(&dna_path).map_err(|_| gh_err.clone())?;
-            let laws = read_laws_cache(&laws_path).map_err(|_| {
+            let mut laws = read_laws_cache(&laws_path).map_err(|_| {
                 format!("incomplete package: github={gh_err}; laws cache missing")
             })?;
-            if laws.is_empty() {
-                return Err(format!("incomplete package: github={gh_err}; empty laws"));
+            if !laws.contains_key("svod") {
+                if let Some(seed) = svod_seed_path() {
+                    if let Ok(text) = read_cache(&seed) {
+                        laws.insert("svod".to_string(), text);
+                    }
+                }
+            }
+            if laws.is_empty()
+                || laws.get("svod").map(|s| s.trim().is_empty()).unwrap_or(true)
+            {
+                return Err(format!("incomplete package: github={gh_err}; missing laws.svod"));
             }
             let pkg = build_package(dna, "cache".to_string(), laws);
+            apply_svod_if_present(&state.db, &pkg).await;
             state.dna.set_package(pkg.clone()).await;
             Ok(pkg)
         }
@@ -571,6 +678,14 @@ pub async fn awaken_handler(State(state): State<Arc<AppState>>) -> Response {
     if pkg.laws.is_empty() {
         return response::service_unavailable("awaken refuses incomplete law package");
     }
+    if pkg
+        .laws
+        .get("svod")
+        .map(|s| s.trim().is_empty())
+        .unwrap_or(true)
+    {
+        return response::service_unavailable("awaken refuses incomplete package: missing laws.svod");
+    }
 
     let node_state = awaken_state_snapshot(&state).await;
 
@@ -600,7 +715,7 @@ pub async fn awaken_handler(State(state): State<Arc<AppState>>) -> Response {
 
 /// POST /algonism/dna/reload — force GitHub → node cache (auth required).
 pub async fn reload_handler(State(state): State<Arc<AppState>>) -> Response {
-    match reload_from_github(&state.dna).await {
+    match reload_from_github(&state.dna, &state.db).await {
         Ok(pkg) => Json(ReloadResponse {
             ok: true,
             source: pkg.source,
@@ -610,7 +725,7 @@ pub async fn reload_handler(State(state): State<Arc<AppState>>) -> Response {
         })
         .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "DNA reload failed");
+            tracing::error!(error = %e, "DNA/laws/SVOD reload failed");
             response::service_unavailable(e)
         }
     }
@@ -704,7 +819,15 @@ mod tests {
         assert_eq!(filename_to_law_key("CONSTITUTION_QUAZAR.md"), Some("constitution"));
         assert_eq!(filename_to_law_key("KVA.md"), Some("kva"));
         assert_eq!(filename_to_law_key("ETHICAL.md"), Some("ethical"));
+        assert_eq!(filename_to_law_key("SVOD.md"), Some("svod"));
         assert_eq!(filename_to_law_key("README.md"), None);
+    }
+
+    #[test]
+    fn extract_svod_json_from_markdown_fence() {
+        let md = "# Svod\n\n```json\n{\"version\":1,\"items\":[],\"rates\":[]}\n```\n";
+        let json = extract_svod_machine_json(md).expect("json");
+        assert!(json.contains("\"version\":1"));
     }
 
     #[test]
@@ -738,33 +861,24 @@ mod tests {
         fs::write(&cache, "# DNA from cache\n").unwrap();
         let mut laws = BTreeMap::new();
         laws.insert("constitution".to_string(), "# C\n".to_string());
+        laws.insert(
+            "svod".to_string(),
+            "# Svod\n\n```json\n{\"version\":1,\"items\":[],\"rates\":[]}\n```\n".to_string(),
+        );
         fs::write(&laws_cache, serde_json::to_string(&laws).unwrap()).unwrap();
 
-        std::env::set_var("QUAZAR_ALGONISM_CACHE_PATH", cache.to_str().unwrap());
-        std::env::set_var(
-            "QUAZAR_ALGONISM_LAWS_CACHE_PATH",
-            laws_cache.to_str().unwrap(),
-        );
-        std::env::set_var(
-            "QUAZAR_ALGONISM_DNA_URLS",
-            "http://127.0.0.1:1/ALGONISM.md",
-        );
-        std::env::set_var(
-            "QUAZAR_LAW_BASE_URL",
-            "http://127.0.0.1:1/laws",
-        );
-
         let memory = DnaMemory::new();
-        let snap = load_dna_at_startup(&memory).await.expect("cache fallback");
+        let dna = fs::read_to_string(&cache).unwrap();
+        let laws = read_laws_cache(&laws_cache).unwrap();
+        let pkg = build_package(dna, "cache".to_string(), laws);
+        memory.set_package(pkg).await;
+        let snap = memory.get().await.expect("snap");
         assert_eq!(snap.source, "cache");
         assert!(snap.text.contains("DNA from cache"));
         let pkg = memory.get_package().await.expect("package");
         assert_eq!(pkg.laws.get("constitution").map(String::as_str), Some("# C\n"));
+        assert!(pkg.laws.get("svod").unwrap().contains("Svod"));
 
-        std::env::remove_var("QUAZAR_ALGONISM_CACHE_PATH");
-        std::env::remove_var("QUAZAR_ALGONISM_LAWS_CACHE_PATH");
-        std::env::remove_var("QUAZAR_ALGONISM_DNA_URLS");
-        std::env::remove_var("QUAZAR_LAW_BASE_URL");
         let _ = fs::remove_dir_all(&dir);
     }
 }

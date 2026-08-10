@@ -718,6 +718,181 @@ pub async fn disable_service_handler(
     }))))
 }
 
+/// GitHub etalon (`SVOD.json` in quazar-law) applied into local Postgres.
+#[derive(Debug, Deserialize)]
+struct SvodEtalonFile {
+    #[serde(default)]
+    categories: Vec<SvodEtalonCategory>,
+    #[serde(default)]
+    items: Vec<SvodEtalonItem>,
+    #[serde(default)]
+    rates: Vec<SvodEtalonRate>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SvodEtalonCategory {
+    code: String,
+    name: String,
+    description: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct SvodEtalonItem {
+    code: String,
+    name: String,
+    description: Option<String>,
+    category_code: Option<String>,
+    base_price: i64,
+    #[serde(default = "default_min_qty")]
+    min_quantity: i64,
+    #[serde(default = "default_max_qty")]
+    max_quantity: i64,
+    #[serde(default = "default_impl_kind")]
+    work_kind: String,
+    #[serde(default = "default_true")]
+    is_active: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct SvodEtalonRate {
+    action: String,
+    unit: String,
+    reward: i64,
+    #[serde(default = "default_impl_kind")]
+    work_kind: String,
+}
+
+fn default_min_qty() -> i64 {
+    1
+}
+fn default_max_qty() -> i64 {
+    100
+}
+fn default_impl_kind() -> String {
+    WORK_KIND_IMPLEMENTATION.to_string()
+}
+fn default_true() -> bool {
+    true
+}
+
+/// Upsert categories/items/rates from GitHub `SVOD.json` text into local DB.
+/// Positions absent from the etalon are deactivated (not deleted — FK safety).
+pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), String> {
+    let etalon: SvodEtalonFile =
+        serde_json::from_str(raw).map_err(|e| format!("SVOD.json parse: {e}"))?;
+    if etalon.items.is_empty() && etalon.rates.is_empty() {
+        return Err("SVOD.json has no items and no rates".to_string());
+    }
+
+    for cat in &etalon.categories {
+        let code = cat.code.trim();
+        if code.is_empty() {
+            continue;
+        }
+        sqlx::query(
+            "INSERT INTO service_categories (code, name, description)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (code) DO UPDATE
+             SET name = EXCLUDED.name,
+                 description = EXCLUDED.description",
+        )
+        .bind(code)
+        .bind(cat.name.trim())
+        .bind(cat.description.as_deref())
+        .execute(pool)
+        .await
+        .map_err(|e| format!("svod category {code}: {e}"))?;
+    }
+
+    let mut active_codes: Vec<String> = Vec::new();
+    for item in &etalon.items {
+        let code = normalize_code(&item.code).map_err(|e| e.to_string())?;
+        let work_kind = normalize_work_kind(&item.work_kind).map_err(|e| e.to_string())?;
+        if item.base_price <= 0 {
+            return Err(format!("SVOD item {code}: base_price must be > 0"));
+        }
+        let category_id =
+            resolve_category_id(pool, None, item.category_code.as_deref()).await
+                .map_err(|e| e.to_string())?;
+
+        sqlx::query(
+            "INSERT INTO service_catalog
+                (code, name, description, category_id, base_price, min_quantity, max_quantity, work_kind, is_active, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,NOW())
+             ON CONFLICT (code) DO UPDATE SET
+                name = EXCLUDED.name,
+                description = EXCLUDED.description,
+                category_id = EXCLUDED.category_id,
+                base_price = EXCLUDED.base_price,
+                min_quantity = EXCLUDED.min_quantity,
+                max_quantity = EXCLUDED.max_quantity,
+                work_kind = EXCLUDED.work_kind,
+                is_active = EXCLUDED.is_active,
+                updated_at = NOW()",
+        )
+        .bind(&code)
+        .bind(item.name.trim())
+        .bind(item.description.as_deref())
+        .bind(category_id)
+        .bind(item.base_price)
+        .bind(item.min_quantity)
+        .bind(item.max_quantity)
+        .bind(&work_kind)
+        .bind(item.is_active)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("svod item {code}: {e}"))?;
+        if item.is_active {
+            active_codes.push(code);
+        }
+    }
+
+    if !active_codes.is_empty() {
+        // Deactivate local positions not present (or inactive) in etalon.
+        sqlx::query(
+            "UPDATE service_catalog
+             SET is_active = FALSE, updated_at = NOW()
+             WHERE is_active = TRUE AND NOT (code = ANY($1))",
+        )
+        .bind(&active_codes)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("svod deactivate missing: {e}"))?;
+    }
+
+    for rate in &etalon.rates {
+        let action = rate.action.trim();
+        if action.is_empty() {
+            continue;
+        }
+        let work_kind = normalize_work_kind(&rate.work_kind).map_err(|e| e.to_string())?;
+        sqlx::query(
+            "INSERT INTO svod_rewards (action, unit, reward, work_kind, updated_at)
+             VALUES ($1, $2, $3, $4, NOW())
+             ON CONFLICT (action) DO UPDATE SET
+                unit = EXCLUDED.unit,
+                reward = EXCLUDED.reward,
+                work_kind = EXCLUDED.work_kind,
+                updated_at = NOW()",
+        )
+        .bind(action)
+        .bind(rate.unit.trim())
+        .bind(rate.reward)
+        .bind(&work_kind)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("svod rate {action}: {e}"))?;
+    }
+
+    tracing::info!(
+        categories = etalon.categories.len(),
+        items = etalon.items.len(),
+        rates = etalon.rates.len(),
+        "SVOD etalon applied from GitHub JSON into Postgres"
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

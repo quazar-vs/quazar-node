@@ -224,7 +224,7 @@ async fn main() {
 
     let trusted_proxies = client_ip::TrustedProxyCache::new(pool.clone());
     let dna = algonism::DnaMemory::new();
-    if let Err(e) = algonism::load_dna_at_startup(&dna).await {
+    if let Err(e) = algonism::load_dna_at_startup(&dna, &pool).await {
         tracing::warn!(error = %e, "Algonism DNA not loaded at startup (will retry on /algonism/identity|/awaken|/dna/reload)");
     }
 

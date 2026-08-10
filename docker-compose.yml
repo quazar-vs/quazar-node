@@ -70,7 +70,9 @@ services:
       # Optional private DNA (set GITHUB_TOKEN in .env when algonism-core is private)
       GITHUB_TOKEN: ${GITHUB_TOKEN:-}
       QUAZAR_ALGONISM_CACHE_PATH: /var/lib/quazar/algonism/ALGONISM.md
-      # Poll GitHub DNA/laws into node cache (60–300s). DNA/laws never go over P2P.
+      # Seed SVOD.md until published on quazar-law (loaded into laws.svod).
+      QUAZAR_SVOD_SEED_PATH: ${QUAZAR_SVOD_SEED_PATH:-/var/lib/quazar/algonism/SVOD.md}
+      # Poll GitHub DNA/laws/SVOD into node cache (60–300s). Never go over P2P.
       QUAZAR_ALGONISM_POLL_SECS: ${QUAZAR_ALGONISM_POLL_SECS:-120}
     depends_on:
       postgres:
