@@ -14,6 +14,7 @@ use sqlx::PgPool;
 use tower_http::{limit::RequestBodyLimitLayer, trace::TraceLayer};
 use tracing_subscriber::EnvFilter;
 
+mod algonism;
 mod auth;
 mod auth_login;
 mod agent_permissions;
@@ -124,6 +125,8 @@ pub struct AppState {
     pub tunnel_registry: Arc<TunnelRegistry>,
     /// Trusted proxies for XFF: `nodes` registry (non-local) + `QUAZAR_TRUSTED_PROXIES`.
     pub trusted_proxies: client_ip::TrustedProxyCache,
+    /// In-RAM Algonism DNA (genetic memory); not stored on-chain.
+    pub dna: algonism::DnaMemory,
 }
 
 fn init_tracing() {
@@ -220,6 +223,11 @@ async fn main() {
     }
 
     let trusted_proxies = client_ip::TrustedProxyCache::new(pool.clone());
+    let dna = algonism::DnaMemory::new();
+    if let Err(e) = algonism::load_dna_at_startup(&dna).await {
+        tracing::warn!(error = %e, "Algonism DNA not loaded at startup (will retry on /algonism/identity|/awaken)");
+    }
+
     let state = Arc::new(AppState {
         db: pool,
         node_registry,
@@ -227,6 +235,7 @@ async fn main() {
         channel_hub: Arc::new(ChannelHub::new()),
         tunnel_registry: Arc::new(TunnelRegistry::new()),
         trusted_proxies,
+        dna,
     });
 
     let state_clone = state.clone();
@@ -278,6 +287,9 @@ async fn main() {
         .route("/api/tunnel/heartbeat", post(tunnel_heartbeat_handler))
         .route("/api/tunnel/clients", get(tunnel_clients_handler))
         .route("/health", get(health_handler))
+        .route("/algonism/identity", get(algonism::identity_handler))
+        .route("/algonism/awaken", get(algonism::awaken_handler))
+        .route("/law/:filename", get(algonism::law_handler))
         .route("/citizen/apply", post(apply_for_citizenship))
         .route("/citizen/apply/citizenship", post(apply_for_citizenship))
         .route("/citizen/verify-email", post(verify_citizenship_email))

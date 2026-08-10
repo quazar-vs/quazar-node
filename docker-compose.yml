@@ -21,6 +21,7 @@ services:
       - "127.0.0.1:8080:8080"
     volumes:
       - /var/lib/quazar/tunnel:/var/lib/quazar/tunnel
+      - /var/lib/quazar/algonism:/var/lib/quazar/algonism
     environment:
       DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
       QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}
@@ -66,6 +67,9 @@ services:
       VPN_AUTHORIZED_KEYS_PATH: ${VPN_AUTHORIZED_KEYS_PATH:-}
       SVOD_VIDEO_CREATE_REWARD: ${SVOD_VIDEO_CREATE_REWARD:-50}
       SVOD_VIDEO_VIEW_REWARD: ${SVOD_VIDEO_VIEW_REWARD:-10}
+      # Optional private DNA (set GITHUB_TOKEN in .env when algonism-core is private)
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      QUAZAR_ALGONISM_CACHE_PATH: /var/lib/quazar/algonism/ALGONISM.md
     depends_on:
       postgres:
         condition: service_healthy

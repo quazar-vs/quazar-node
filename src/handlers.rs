@@ -2,10 +2,11 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    extract::{Extension, State},
+    extract::{Extension, Query, State},
     response::{IntoResponse, Json},
 };
 use chrono::Utc;
+use serde::Deserialize;
 use tokio::time;
 
 use crate::auth::{internal_node_signature, AuthContext};
@@ -20,6 +21,16 @@ use crate::response::{self, ApiResponse};
 use crate::validator::EventValidator;
 use crate::vpn::{self, VPN_CLEANUP_INTERVAL};
 use crate::AppState;
+
+/// Optional filters for long-term memory queries (`GET /events`, `GET /blocks`).
+#[derive(Debug, Clone, Default, Deserialize)]
+pub struct MemoryQuery {
+    /// Filter by event_type (e.g. `CitizenAdded`).
+    #[serde(rename = "type")]
+    pub event_type: Option<String>,
+    /// Max items (events or blocks).
+    pub limit: Option<u32>,
+}
 
 pub async fn add_event(
     Extension(auth): Extension<AuthContext>,
@@ -87,13 +98,52 @@ pub async fn add_event(
     }
 }
 
-pub async fn get_events(State(state): State<Arc<AppState>>) -> Json<ApiResponse> {
-    let events = pending::fetch_all(&state.db).await.unwrap_or_default();
-    tracing::debug!(count = events.len(), "returning pending events");
+pub async fn get_events(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MemoryQuery>,
+) -> Json<ApiResponse> {
+    let type_filter = q
+        .event_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let limit = q.limit.filter(|n| *n > 0);
+
+    // Peer sync uses bare GET /events (pending queue). Filters switch to registry history.
+    if type_filter.is_none() && limit.is_none() {
+        let events = pending::fetch_all(&state.db).await.unwrap_or_default();
+        tracing::debug!(count = events.len(), "returning pending events");
+        return Json(ApiResponse::success(events));
+    }
+
+    let events = match fetch_registry_events(&state.db, type_filter, limit).await {
+        Ok(events) => events,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch registry events");
+            Vec::new()
+        }
+    };
+    tracing::debug!(
+        count = events.len(),
+        event_type = ?type_filter,
+        limit = ?limit,
+        "returning registry events"
+    );
     Json(ApiResponse::success(events))
 }
 
-pub async fn get_blocks(State(state): State<Arc<AppState>>) -> Json<ApiResponse> {
+pub async fn get_blocks(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<MemoryQuery>,
+) -> Json<ApiResponse> {
+    let type_filter = q
+        .event_type
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let limit = q.limit.filter(|n| *n > 0);
+
     let rows: Vec<String> = sqlx::query_scalar(
         "SELECT block_data FROM blocks ORDER BY block_number ASC",
     )
@@ -101,12 +151,114 @@ pub async fn get_blocks(State(state): State<Arc<AppState>>) -> Json<ApiResponse>
     .await
     .unwrap_or_default();
 
-    let blocks: Vec<Block> = rows
+    let mut blocks: Vec<Block> = rows
         .iter()
         .filter_map(|data| serde_json::from_str(data).ok())
         .collect();
-    tracing::debug!(count = blocks.len(), "returning blocks");
+
+    if let Some(ref t) = type_filter {
+        for block in &mut blocks {
+            block.events.retain(|e| e.event_type == *t);
+            block.events_count = block.events.len();
+        }
+        blocks.retain(|b| !b.events.is_empty());
+    }
+
+    if let Some(n) = limit {
+        let n = n as usize;
+        if blocks.len() > n {
+            // Keep the most recent N blocks after filtering.
+            let skip = blocks.len() - n;
+            blocks = blocks.into_iter().skip(skip).collect();
+        }
+    }
+
+    tracing::debug!(
+        count = blocks.len(),
+        event_type = ?type_filter,
+        limit = ?limit,
+        "returning blocks"
+    );
     Json(ApiResponse::success(blocks))
+}
+
+async fn fetch_registry_events(
+    pool: &sqlx::PgPool,
+    event_type: Option<&str>,
+    limit: Option<u32>,
+) -> Result<Vec<Event>, String> {
+    let limit = limit.unwrap_or(100).min(1000) as i64;
+
+    let rows: Vec<(
+        String,
+        i64,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        String,
+        bool,
+    )> = if let Some(t) = event_type {
+        sqlx::query_as(
+            r#"
+            SELECT event_id, timestamp, event_type, title, description, initiator,
+                   data, previous_hash, signatures, hash, public
+            FROM events
+            WHERE event_type = $1
+            ORDER BY timestamp DESC, id DESC
+            LIMIT $2
+            "#,
+        )
+        .bind(t)
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?
+    } else {
+        sqlx::query_as(
+            r#"
+            SELECT event_id, timestamp, event_type, title, description, initiator,
+                   data, previous_hash, signatures, hash, public
+            FROM events
+            ORDER BY timestamp DESC, id DESC
+            LIMIT $1
+            "#,
+        )
+        .bind(limit)
+        .fetch_all(pool)
+        .await
+        .map_err(|e| e.to_string())?
+    };
+
+    let mut events = Vec::with_capacity(rows.len());
+    for (event_id, timestamp, event_type, title, description, initiator, data, previous_hash, signatures, hash, public) in rows
+    {
+        let data: serde_json::Value =
+            serde_json::from_str(&data).unwrap_or(serde_json::Value::Null);
+        let signatures: Vec<String> =
+            serde_json::from_str(&signatures).unwrap_or_default();
+        events.push(Event {
+            event_id,
+            timestamp,
+            event_type,
+            title,
+            description,
+            initiator,
+            data,
+            previous_hash,
+            signatures,
+            hash: if hash.is_empty() {
+                None
+            } else {
+                Some(hash)
+            },
+            public,
+        });
+    }
+    Ok(events)
 }
 
 pub async fn gossip_event(

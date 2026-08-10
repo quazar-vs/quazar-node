@@ -158,9 +158,16 @@ pub(crate) async fn verify_recaptcha_with_ip(
 
 /// GET /api/public-config — non-secret frontend config (reCAPTCHA site key).
 pub async fn public_config_handler() -> impl IntoResponse {
+    let passport_url = std::env::var("PASSPORT_DOWNLOAD_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .filter(|s| !s.contains("github.com/quazar-vs/quazar-passport"))
+        .unwrap_or_default();
     Json(ApiResponse::success(serde_json::json!({
         "recaptcha_site_key": recaptcha_site_key(),
         "recaptcha_required": recaptcha_required(),
+        "passport_download_url": passport_url,
     })))
 }
 

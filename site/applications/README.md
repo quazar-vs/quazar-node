@@ -23,7 +23,7 @@ UI: подача заявки на гражданство и просмотр с
 
 Поля: `login`, `full_name`, `passport_data`, `email`, `reason`, captcha.
 
-После submit на сайте: CTA «Скачать Passport» (по умолчанию `https://github.com/quazar-vs/quazar-passport/releases`, как `PASSPORT_DOWNLOAD_URL`).
+После submit на сайте: CTA «Скачать Passport» (URL берётся из `PASSPORT_DOWNLOAD_URL` / `GET /api/public-config`, без публичных ссылок на приватный репозиторий).
 
 ## Мэрство — citizen path only (Bearer / Passport)
 

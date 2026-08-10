@@ -76,9 +76,14 @@ pub fn notify_email() -> Option<String> {
 }
 
 fn passport_download_url() -> String {
-    std::env::var("PASSPORT_DOWNLOAD_URL").unwrap_or_else(|_| {
-        "https://github.com/quazar-vs/quazar-passport/releases".to_string()
-    })
+    std::env::var("PASSPORT_DOWNLOAD_URL")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| {
+            // Private repo — do not advertise a public GitHub releases URL.
+            String::new()
+        })
 }
 
 pub fn registration_credentials_body(
