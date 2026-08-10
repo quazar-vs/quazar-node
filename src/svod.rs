@@ -150,19 +150,24 @@ pub fn work_kind_label(kind: &str) -> &'static str {
 }
 
 fn normalize_code(code: &str) -> Result<String, SvodError> {
-    let code = code.trim();
-    if code.is_empty() {
+    let trimmed = code.trim();
+    if trimmed.is_empty() {
         return Err(SvodError::BadRequest("Service code is required".to_string()));
     }
-    if !code
+    // Position may be a human label («Промт шортс»): collapse whitespace → `_`.
+    let collapsed: String = trimmed.split_whitespace().collect::<Vec<_>>().join("_");
+    if collapsed.is_empty() {
+        return Err(SvodError::BadRequest("Service code is required".to_string()));
+    }
+    if !collapsed
         .chars()
-        .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+        .all(|c| c.is_alphanumeric() || c == '_' || c == '-')
     {
         return Err(SvodError::BadRequest(
             "Service code may contain only letters, digits, underscore and hyphen".to_string(),
         ));
     }
-    Ok(code.to_string())
+    Ok(collapsed)
 }
 
 async fn resolve_category_id(
@@ -1026,7 +1031,8 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
 
     let mut active_codes: Vec<String> = Vec::new();
     for item in &etalon.items {
-        let code = normalize_code(&item.code).map_err(|e| e.to_string())?;
+        let display_name = item.code.trim();
+        let code = normalize_code(display_name).map_err(|e| e.to_string())?;
         let work_kind = normalize_work_kind(&item.work_kind).map_err(|e| e.to_string())?;
         if item.base_price <= 0 {
             return Err(format!("SVOD item {code}: base_price must be > 0"));
@@ -1051,7 +1057,7 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
                 updated_at = NOW()",
         )
         .bind(&code)
-        .bind(&code) // name = code (lean etalon has no display name)
+        .bind(display_name)
         .bind(Some(item.unit.as_str()))
         .bind(category_id)
         .bind(item.base_price)
@@ -1124,6 +1130,11 @@ mod tests {
     #[test]
     fn normalize_code_accepts_alphanumeric() {
         assert_eq!(normalize_code("WEB_DEV-1").unwrap(), "WEB_DEV-1");
+    }
+
+    #[test]
+    fn normalize_code_accepts_unicode_and_spaces() {
+        assert_eq!(normalize_code("Промт шортс").unwrap(), "Промт_шортс");
     }
 
     #[test]
