@@ -718,9 +718,13 @@ pub async fn disable_service_handler(
     }))))
 }
 
-/// GitHub etalon (`SVOD.json` in quazar-law) applied into local Postgres.
-#[derive(Debug, Deserialize)]
+/// GitHub etalon (`SVOD.md` markdown tables) applied into local Postgres.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SvodEtalonFile {
+    #[serde(default)]
+    title: String,
+    #[serde(default)]
+    version: u32,
     #[serde(default)]
     categories: Vec<SvodEtalonCategory>,
     #[serde(default)]
@@ -729,14 +733,14 @@ struct SvodEtalonFile {
     rates: Vec<SvodEtalonRate>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SvodEtalonCategory {
     code: String,
     name: String,
     description: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SvodEtalonItem {
     code: String,
     name: String,
@@ -753,7 +757,7 @@ struct SvodEtalonItem {
     is_active: bool,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct SvodEtalonRate {
     action: String,
     unit: String,
@@ -775,13 +779,252 @@ fn default_true() -> bool {
     true
 }
 
-/// Upsert categories/items/rates from GitHub `SVOD.json` text into local DB.
+fn norm_header(h: &str) -> String {
+    h.trim()
+        .to_lowercase()
+        .replace('ё', "е")
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+/// Map a table header cell to a logical field; unknown columns → None (ignored).
+fn map_svod_column(header: &str) -> Option<&'static str> {
+    let h = norm_header(header);
+    if h.contains("код") || h == "code" || h.contains("действи") || h == "action" {
+        Some("code")
+    } else if h.contains("назван") || h == "name" || h.contains("title") {
+        Some("name")
+    } else if h.contains("ставк")
+        || h.contains("цен")
+        || h.contains("reward")
+        || h.contains("price")
+        || h.contains("сумм")
+        || h.contains("квази")
+    {
+        Some("amount")
+    } else if h.contains("единиц") || h == "unit" {
+        Some("unit")
+    } else if h.contains("тип") || h == "type" || h == "kind" || h == "роль" {
+        Some("row_kind")
+    } else if h.contains("work_kind") || h.contains("част") || h.contains("раздел") {
+        Some("work_kind")
+    } else if h.contains("категор") || h.contains("category") {
+        Some("category")
+    } else if h.contains("описан") || h.contains("description") {
+        Some("description")
+    } else {
+        None
+    }
+}
+
+fn split_md_row(line: &str) -> Vec<String> {
+    let line = line.trim().trim_matches('|');
+    line.split('|')
+        .map(|c| c.trim().to_string())
+        .collect()
+}
+
+fn is_md_separator_row(cells: &[String]) -> bool {
+    !cells.is_empty()
+        && cells.iter().all(|c| {
+            let t = c.trim();
+            !t.is_empty()
+                && t.chars()
+                    .all(|ch| ch == '-' || ch == ':' || ch == ' ')
+        })
+}
+
+fn parse_amount_cell(raw: &str) -> Option<i64> {
+    let mut num = String::new();
+    for ch in raw.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else if !num.is_empty() {
+            break;
+        }
+    }
+    if num.is_empty() {
+        None
+    } else {
+        num.parse().ok()
+    }
+}
+
+fn work_kind_from_heading(heading: &str) -> Option<&'static str> {
+    let h = norm_header(heading);
+    if h.contains("разработ") || h.contains("development") {
+        Some(WORK_KIND_DEVELOPMENT)
+    } else if h.contains("реализ") || h.contains("implementation") {
+        Some(WORK_KIND_IMPLEMENTATION)
+    } else {
+        None
+    }
+}
+
+fn row_is_item(unit: &str, row_kind: &str) -> bool {
+    let u = norm_header(unit);
+    let k = norm_header(row_kind);
+    if !k.is_empty() {
+        return k.contains("позиц")
+            || k.contains("item")
+            || k.contains("service")
+            || k.contains("бирж");
+    }
+    u.contains("позиц") || u.contains("бирж")
+}
+
+/// Parse `SVOD.md` markdown tables into operational etalon JSON (items + rates).
+/// Extra columns are ignored; section headings set `work_kind`.
+pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
+    let mut items: Vec<SvodEtalonItem> = Vec::new();
+    let mut rates: Vec<SvodEtalonRate> = Vec::new();
+    let mut current_kind = WORK_KIND_IMPLEMENTATION.to_string();
+    let mut col_map: Vec<Option<&'static str>> = Vec::new();
+    let mut in_table = false;
+
+    for raw_line in md.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+
+        if let Some(rest) = line.strip_prefix('#') {
+            let heading = rest.trim_start_matches('#').trim();
+            if let Some(k) = work_kind_from_heading(heading) {
+                current_kind = k.to_string();
+            }
+            in_table = false;
+            col_map.clear();
+            continue;
+        }
+
+        if !line.starts_with('|') {
+            in_table = false;
+            col_map.clear();
+            continue;
+        }
+
+        let cells = split_md_row(line);
+        if cells.is_empty() {
+            continue;
+        }
+        if is_md_separator_row(&cells) {
+            continue;
+        }
+
+        if !in_table {
+            // Header row — map known columns; unknown → None (resilient to new cols).
+            col_map = cells.iter().map(|c| map_svod_column(c)).collect();
+            if col_map.iter().all(|c| c.is_none()) {
+                return Err(format!(
+                    "SVOD.md table has no recognized columns: {}",
+                    cells.join(" | ")
+                ));
+            }
+            in_table = true;
+            continue;
+        }
+
+        let mut code = String::new();
+        let mut name = String::new();
+        let mut amount: Option<i64> = None;
+        let mut unit = String::new();
+        let mut row_kind = String::new();
+        let mut work_kind = current_kind.clone();
+        let mut category = String::new();
+        let mut description = String::new();
+
+        for (i, cell) in cells.iter().enumerate() {
+            let Some(field) = col_map.get(i).copied().flatten() else {
+                continue;
+            };
+            match field {
+                "code" => code = cell.trim().to_string(),
+                "name" => name = cell.trim().to_string(),
+                "amount" => amount = parse_amount_cell(cell),
+                "unit" => unit = cell.trim().to_string(),
+                "row_kind" => row_kind = cell.trim().to_string(),
+                "work_kind" => {
+                    if let Ok(k) = normalize_work_kind(cell) {
+                        work_kind = k;
+                    }
+                }
+                "category" => category = cell.trim().to_string(),
+                "description" => description = cell.trim().to_string(),
+                _ => {}
+            }
+        }
+
+        if code.is_empty() {
+            continue;
+        }
+        let Some(amount) = amount else {
+            return Err(format!("SVOD.md row `{code}`: missing numeric amount"));
+        };
+        if name.is_empty() {
+            name = code.clone();
+        }
+
+        if row_is_item(&unit, &row_kind) {
+            items.push(SvodEtalonItem {
+                code,
+                name,
+                description: if description.is_empty() {
+                    None
+                } else {
+                    Some(description)
+                },
+                category_code: if category.is_empty() {
+                    Some("IT".to_string())
+                } else {
+                    Some(category)
+                },
+                base_price: amount,
+                min_quantity: 1,
+                max_quantity: 100,
+                work_kind,
+                is_active: true,
+            });
+        } else {
+            rates.push(SvodEtalonRate {
+                action: code,
+                unit: if unit.is_empty() {
+                    "1".to_string()
+                } else {
+                    unit
+                },
+                reward: amount,
+                work_kind,
+            });
+        }
+    }
+
+    if items.is_empty() && rates.is_empty() {
+        return Err("SVOD.md tables produced no items and no rates".to_string());
+    }
+
+    let etalon = SvodEtalonFile {
+        title: SVOD_TITLE.to_string(),
+        version: 1,
+        categories: vec![SvodEtalonCategory {
+            code: "IT".to_string(),
+            name: "Information Technology".to_string(),
+            description: Some("IT-услуги и разработка".to_string()),
+        }],
+        items,
+        rates,
+    };
+    serde_json::to_string_pretty(&etalon).map_err(|e| format!("SVOD serialize: {e}"))
+}
+
+/// Upsert categories/items/rates from parsed etalon JSON into local DB.
 /// Positions absent from the etalon are deactivated (not deleted — FK safety).
 pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), String> {
     let etalon: SvodEtalonFile =
-        serde_json::from_str(raw).map_err(|e| format!("SVOD.json parse: {e}"))?;
+        serde_json::from_str(raw).map_err(|e| format!("SVOD etalon JSON parse: {e}"))?;
     if etalon.items.is_empty() && etalon.rates.is_empty() {
-        return Err("SVOD.json has no items and no rates".to_string());
+        return Err("SVOD etalon has no items and no rates".to_string());
     }
 
     for cat in &etalon.categories {
@@ -888,9 +1131,15 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
         categories = etalon.categories.len(),
         items = etalon.items.len(),
         rates = etalon.rates.len(),
-        "SVOD etalon applied from GitHub JSON into Postgres"
+        "SVOD etalon applied from markdown tables into Postgres"
     );
     Ok(())
+}
+
+/// Parse `SVOD.md` tables and apply into Postgres.
+pub async fn apply_svod_etalon_markdown(pool: &PgPool, md: &str) -> Result<(), String> {
+    let json = parse_svod_markdown(md)?;
+    apply_svod_etalon_json(pool, &json).await
 }
 
 #[cfg(test)]
@@ -912,5 +1161,48 @@ mod tests {
         assert_eq!(normalize_work_kind("development").unwrap(), "development");
         assert_eq!(normalize_work_kind("Реализация").unwrap(), "implementation");
         assert!(normalize_work_kind("other").is_err());
+    }
+
+    #[test]
+    fn parse_svod_markdown_tables_to_items_and_rates() {
+        let md = r#"
+# Свод
+
+## Разработка
+
+| Код / действие | Название | Ставка / цена | Единица | Примечание |
+|----------------|----------|---------------|---------|------------|
+| CREATIVE_CONCEPT | Creative Concept | 80 КВАЗИ | позиция биржи | extra col ignored |
+| idea_submit | Подача идеи | 30 КВАЗИ | 1 идея / тема | |
+
+## Реализация
+
+| Код / действие | Название | Ставка / цена | Единица |
+|----------------|----------|---------------|---------|
+| WEB_DEV | Web Development | 100 КВАЗИ | позиция биржи |
+| video_create | Создание ролика | 50 КВАЗИ | 1 ролик |
+| video_view | Просмотры | 10 КВАЗИ | 10 просмотров |
+"#;
+        let json = parse_svod_markdown(md).expect("parse");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let items = v["items"].as_array().unwrap();
+        let rates = v["rates"].as_array().unwrap();
+        assert_eq!(items.len(), 2);
+        assert_eq!(rates.len(), 3);
+        assert_eq!(items[0]["code"], "CREATIVE_CONCEPT");
+        assert_eq!(items[0]["base_price"], 80);
+        assert_eq!(items[0]["work_kind"], "development");
+        assert_eq!(items[1]["code"], "WEB_DEV");
+        assert_eq!(items[1]["work_kind"], "implementation");
+        assert_eq!(rates[0]["action"], "idea_submit");
+        assert_eq!(rates[0]["reward"], 30);
+        assert_eq!(rates[1]["action"], "video_create");
+        assert_eq!(rates[2]["reward"], 10);
+    }
+
+    #[test]
+    fn parse_svod_rejects_empty_tables() {
+        let md = "# Empty\n\nno tables here\n";
+        assert!(parse_svod_markdown(md).is_err());
     }
 }

@@ -429,33 +429,12 @@ fn persist_package(pkg: &ReferencePackage) {
     }
 }
 
-/// Extract machine JSON from SVOD.md (fenced ```json block) or raw JSON body.
-fn extract_svod_machine_json(svod_md: &str) -> Option<String> {
-    let trimmed = svod_md.trim();
-    if trimmed.starts_with('{') {
-        return Some(trimmed.to_string());
-    }
-    let start = trimmed.find("```json")?;
-    let after = &trimmed[start + 7..];
-    let end = after.find("```")?;
-    let body = after[..end].trim();
-    if body.starts_with('{') {
-        Some(body.to_string())
-    } else {
-        None
-    }
-}
-
 async fn apply_svod_if_present(pool: &sqlx::PgPool, pkg: &ReferencePackage) {
     let Some(svod_md) = pkg.laws.get("svod") else {
         return;
     };
-    let Some(json) = extract_svod_machine_json(svod_md) else {
-        tracing::warn!("SVOD.md has no machine JSON block; skipping Postgres apply");
-        return;
-    };
-    if let Err(e) = crate::svod::apply_svod_etalon_json(pool, &json).await {
-        tracing::error!(error = %e, "failed to apply SVOD etalon into Postgres");
+    if let Err(e) = crate::svod::apply_svod_etalon_markdown(pool, svod_md).await {
+        tracing::error!(error = %e, "failed to apply SVOD.md tables into Postgres");
     }
 }
 
@@ -824,13 +803,6 @@ mod tests {
     }
 
     #[test]
-    fn extract_svod_json_from_markdown_fence() {
-        let md = "# Svod\n\n```json\n{\"version\":1,\"items\":[],\"rates\":[]}\n```\n";
-        let json = extract_svod_machine_json(md).expect("json");
-        assert!(json.contains("\"version\":1"));
-    }
-
-    #[test]
     fn laws_sha_is_sorted_key_text_concat() {
         let mut laws = BTreeMap::new();
         laws.insert("kva".to_string(), "A".to_string());
@@ -863,7 +835,8 @@ mod tests {
         laws.insert("constitution".to_string(), "# C\n".to_string());
         laws.insert(
             "svod".to_string(),
-            "# Svod\n\n```json\n{\"version\":1,\"items\":[],\"rates\":[]}\n```\n".to_string(),
+            "## Разработка\n\n| Код | Название | Ставка | Единица |\n|---|---|---|---|\n| X | Y | 1 КВАЗИ | позиция биржи |\n"
+                .to_string(),
         );
         fs::write(&laws_cache, serde_json::to_string(&laws).unwrap()).unwrap();
 
