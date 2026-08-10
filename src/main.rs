@@ -225,7 +225,7 @@ async fn main() {
     let trusted_proxies = client_ip::TrustedProxyCache::new(pool.clone());
     let dna = algonism::DnaMemory::new();
     if let Err(e) = algonism::load_dna_at_startup(&dna).await {
-        tracing::warn!(error = %e, "Algonism DNA not loaded at startup (will retry on /algonism/identity|/awaken)");
+        tracing::warn!(error = %e, "Algonism DNA not loaded at startup (will retry on /algonism/identity|/awaken|/dna/reload)");
     }
 
     let state = Arc::new(AppState {
@@ -237,6 +237,9 @@ async fn main() {
         trusted_proxies,
         dna,
     });
+
+    // GitHub → node cache poll (DNA + laws). Never gossiped over P2P.
+    algonism::spawn_reference_poller(state.clone());
 
     let state_clone = state.clone();
     tokio::spawn(async move {
@@ -338,6 +341,7 @@ async fn main() {
         .with_state(state.clone());
 
     let protected_routes = Router::new()
+        .route("/algonism/dna/reload", post(algonism::reload_handler))
         .route("/blocks", get(handlers::get_blocks))
         .route("/events", get(handlers::get_events))
         .route("/events/gossip", post(handlers::gossip_event))

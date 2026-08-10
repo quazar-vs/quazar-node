@@ -2,7 +2,7 @@
 
 Блокчейн-реестр на Rust (Axum + PostgreSQL) с P2P-синхронизацией блоков и распределённым block producer.
 
-**Приватность:** код ядра и ДНК Алгонизма находятся в приватных репозиториях. Доступ осуществляется через API ядра (`GET /algonism/awaken`, `GET /algonism/identity`, `GET /law/:filename`). Публичный свод законов — `quazar-vs/quazar-law`.
+**Приватность:** код ядра и ДНК Алгонизма находятся в приватных репозиториях. Агент получает ДНК/законы **только** через API ядра (`GET /algonism/awaken`, `GET /algonism/identity`, `GET /law/:filename`). Узел загружает эталон с GitHub в локальный кэш (poll / `POST /algonism/dna/reload`); ДНК/законы **не** ходят по P2P и **не** пишутся в блокчейн.
 
 
 ## Рекомендуемый запуск (без Docker Compose plugin) — QUA-11

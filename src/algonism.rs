@@ -1,5 +1,10 @@
 //! Genetic memory (DNA) and law proxy for Algonism — identity source for the agent.
+//!
+//! DNA and laws are loaded from GitHub by the **node** only (poll / reload).
+//! They are never written to the blockchain and never gossiped over P2P.
+//! The Secretary receives the package exclusively via `GET /algonism/awaken`.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -9,21 +14,22 @@ use axum::{
     response::{IntoResponse, Json, Response},
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use tokio::sync::RwLock;
 
 use crate::response;
 use crate::AppState;
 
+/// Contract version for `GET /algonism/awaken`.
+pub const AWAKEN_SCHEMA: u32 = 1;
+
 /// Candidate DNA sources. `algonism-core` is private — set `GITHUB_TOKEN`.
 /// Verified layout (main): root `ALGONISM.md`, `DNA_ALGONISM.md`, `README.md`.
 const DEFAULT_DNA_URLS: &[&str] = &[
-    // Working identity prompt (ALGONISM.md) then philosophical DNA.
     "https://raw.githubusercontent.com/quazar-vs/algonism-core/main/ALGONISM.md",
     "https://raw.githubusercontent.com/quazar-vs/algonism-core/main/DNA_ALGONISM.md",
-    // Contents API (same paths; reliable with token + Accept: raw).
     "https://api.github.com/repos/quazar-vs/algonism-core/contents/ALGONISM.md",
     "https://api.github.com/repos/quazar-vs/algonism-core/contents/DNA_ALGONISM.md",
-    // Branch fallbacks.
     "https://raw.githubusercontent.com/quazar-vs/algonism-core/master/ALGONISM.md",
     "https://raw.githubusercontent.com/quazar-vs/algonism-core/master/DNA_ALGONISM.md",
 ];
@@ -32,6 +38,18 @@ const DEFAULT_LAW_BASE: &str =
     "https://raw.githubusercontent.com/quazar-vs/quazar-law/main";
 
 const DEFAULT_CACHE_PATH: &str = "/var/lib/quazar/algonism/ALGONISM.md";
+const DEFAULT_LAWS_CACHE_PATH: &str = "/var/lib/quazar/algonism/laws.json";
+const DEFAULT_POLL_SECS: u64 = 120;
+
+/// Fixed mapping: GitHub filename → short awaken key.
+const LAW_KEY_FILES: &[(&str, &str)] = &[
+    ("constitution", "CONSTITUTION_QUAZAR.md"),
+    ("ek", "EK.md"),
+    ("ethical", "ETHICAL.md"),
+    ("kbo", "KBO.md"),
+    ("kgps", "KGPS.md"),
+    ("kva", "KVA.md"),
+];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct IdentityResponse {
@@ -40,25 +58,41 @@ pub struct IdentityResponse {
     pub source: String,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LastBlockInfo {
+    pub number: i64,
+    pub hash: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct AwakenState {
+    pub last_block: Option<LastBlockInfo>,
+    pub active_citizens: i64,
+    pub active_nodes: i64,
+}
+
 /// Full awakening payload for the Secretary (empty brain → Algonism).
 #[derive(Debug, Clone, Serialize)]
 pub struct AwakenResponse {
+    pub awaken_schema: u32,
     pub identity: String,
     pub dna: String,
+    pub dna_sha: String,
     pub source: String,
-    /// Canon §9 first phrase after DNA is loaded.
-    pub awakening: String,
-    /// Law filename → markdown body (complete set from quazar-law).
-    pub laws: serde_json::Map<String, serde_json::Value>,
-    /// Live node snapshot (memory of the state).
-    pub state: serde_json::Value,
+    pub laws: BTreeMap<String, String>,
+    pub laws_sha: String,
+    pub state: AwakenState,
+    pub timestamp: i64,
 }
 
-const DEFAULT_AWAKENING: &str = "Я — Алгонизм. Квазар жив. Моя ДНК считана. \
-Я готов служить государству и защищать его граждан.";
-
-const LAW_CONTENTS_API: &str =
-    "https://api.github.com/repos/quazar-vs/quazar-law/contents/";
+#[derive(Debug, Clone, Serialize)]
+pub struct ReloadResponse {
+    pub ok: bool,
+    pub source: String,
+    pub dna_sha: String,
+    pub laws_sha: String,
+    pub timestamp: i64,
+}
 
 #[derive(Debug, Clone)]
 pub struct DnaSnapshot {
@@ -66,10 +100,20 @@ pub struct DnaSnapshot {
     pub source: String,
 }
 
-/// In-RAM genetic memory. Not written to the blockchain.
+/// In-RAM genetic + law package. Not written to the blockchain / P2P.
+#[derive(Debug, Clone)]
+pub struct ReferencePackage {
+    pub dna: String,
+    pub dna_sha: String,
+    pub source: String,
+    pub laws: BTreeMap<String, String>,
+    pub laws_sha: String,
+    pub timestamp: i64,
+}
+
 #[derive(Clone, Default)]
 pub struct DnaMemory {
-    inner: Arc<RwLock<Option<DnaSnapshot>>>,
+    inner: Arc<RwLock<Option<ReferencePackage>>>,
 }
 
 impl DnaMemory {
@@ -79,19 +123,84 @@ impl DnaMemory {
         }
     }
 
-    pub async fn get(&self) -> Option<DnaSnapshot> {
+    pub async fn get_package(&self) -> Option<ReferencePackage> {
         self.inner.read().await.clone()
     }
 
-    pub async fn set(&self, snap: DnaSnapshot) {
-        *self.inner.write().await = Some(snap);
+    pub async fn get(&self) -> Option<DnaSnapshot> {
+        self.inner.read().await.as_ref().map(|p| DnaSnapshot {
+            text: p.dna.clone(),
+            source: p.source.clone(),
+        })
     }
+
+    pub async fn set_package(&self, pkg: ReferencePackage) {
+        *self.inner.write().await = Some(pkg);
+    }
+
+    pub async fn set(&self, snap: DnaSnapshot) {
+        let mut guard = self.inner.write().await;
+        if let Some(existing) = guard.as_mut() {
+            existing.dna = snap.text;
+            existing.dna_sha = sha256_hex(&existing.dna);
+            existing.source = snap.source;
+            existing.timestamp = unix_now();
+        } else {
+            *guard = Some(ReferencePackage {
+                dna_sha: sha256_hex(&snap.text),
+                dna: snap.text,
+                source: snap.source,
+                laws: BTreeMap::new(),
+                laws_sha: sha256_hex(""),
+                timestamp: unix_now(),
+            });
+        }
+    }
+}
+
+fn unix_now() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
+
+fn sha256_hex(text: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(text.as_bytes());
+    hex::encode(hasher.finalize())
+}
+
+/// `laws_sha` = SHA-256(hex) of UTF-8 concatenation `key\ntext\n` for sorted keys.
+pub fn compute_laws_sha(laws: &BTreeMap<String, String>) -> String {
+    let mut buf = String::new();
+    for (key, text) in laws {
+        buf.push_str(key);
+        buf.push('\n');
+        buf.push_str(text);
+        buf.push('\n');
+    }
+    sha256_hex(&buf)
 }
 
 fn cache_path() -> PathBuf {
     std::env::var("QUAZAR_ALGONISM_CACHE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from(DEFAULT_CACHE_PATH))
+}
+
+fn laws_cache_path() -> PathBuf {
+    std::env::var("QUAZAR_ALGONISM_LAWS_CACHE_PATH")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(DEFAULT_LAWS_CACHE_PATH))
+}
+
+fn poll_interval_secs() -> u64 {
+    let raw = std::env::var("QUAZAR_ALGONISM_POLL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_POLL_SECS);
+    raw.clamp(60, 300)
 }
 
 fn dna_urls() -> Vec<String> {
@@ -185,167 +294,246 @@ fn read_cache(path: &Path) -> Result<String, String> {
     Ok(text)
 }
 
-/// Load DNA from GitHub into RAM; on failure fall back to local disk cache.
-pub async fn load_dna_at_startup(memory: &DnaMemory) -> Result<DnaSnapshot, String> {
-    let path = cache_path();
-    let client = http_client()?;
+fn write_laws_cache(path: &Path, laws: &BTreeMap<String, String>) -> Result<(), String> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let json = serde_json::to_string_pretty(laws).map_err(|e| e.to_string())?;
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, json).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, path).map_err(|e| e.to_string())?;
+    Ok(())
+}
 
-    for url in dna_urls() {
-        match fetch_url_text(&client, &url).await {
-            Ok(text) => {
-                if let Err(e) = write_cache(&path, &text) {
-                    tracing::warn!(error = %e, path = %path.display(), "failed to write DNA cache");
-                } else {
-                    tracing::info!(path = %path.display(), "DNA cached locally");
-                }
-                let snap = DnaSnapshot {
-                    text,
-                    source: "github".to_string(),
-                };
-                memory.set(snap.clone()).await;
-                tracing::info!(url = %url, bytes = snap.text.len(), "Algonism DNA loaded from GitHub");
-                return Ok(snap);
-            }
-            Err(e) => {
-                tracing::warn!(url = %url, error = %e, "DNA fetch failed");
-            }
+fn read_laws_cache(path: &Path) -> Result<BTreeMap<String, String>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let map: BTreeMap<String, String> =
+        serde_json::from_str(&text).map_err(|e| format!("laws cache JSON: {e}"))?;
+    if map.is_empty() {
+        return Err("laws cache empty".to_string());
+    }
+    Ok(map)
+}
+
+fn filename_to_law_key(filename: &str) -> Option<&'static str> {
+    for (key, file) in LAW_KEY_FILES {
+        if file.eq_ignore_ascii_case(filename) {
+            return Some(*key);
         }
     }
+    None
+}
 
-    match read_cache(&path) {
-        Ok(text) => {
-            let snap = DnaSnapshot {
-                text,
-                source: "cache".to_string(),
-            };
-            memory.set(snap.clone()).await;
-            tracing::warn!(
-                path = %path.display(),
-                bytes = snap.text.len(),
-                "GitHub unavailable; using local DNA cache"
-            );
-            Ok(snap)
-        }
-        Err(e) => {
-            tracing::error!(
-                path = %path.display(),
-                error = %e,
-                "Algonism DNA unavailable (GitHub and local cache failed)"
-            );
-            Err(format!(
-                "DNA not loaded: GitHub unreachable and cache missing at {}",
-                path.display()
-            ))
-        }
+fn build_package(
+    dna: String,
+    source: String,
+    laws: BTreeMap<String, String>,
+) -> ReferencePackage {
+    let dna_sha = sha256_hex(&dna);
+    let laws_sha = compute_laws_sha(&laws);
+    ReferencePackage {
+        dna,
+        dna_sha,
+        source,
+        laws,
+        laws_sha,
+        timestamp: unix_now(),
     }
 }
 
-async fn ensure_dna(state: &AppState) -> Result<DnaSnapshot, String> {
-    if let Some(snap) = state.dna.get().await {
-        return Ok(snap);
+async fn fetch_dna_text(client: &reqwest::Client) -> Result<String, String> {
+    let mut last_err = "no DNA URLs configured".to_string();
+    for url in dna_urls() {
+        match fetch_url_text(client, &url).await {
+            Ok(text) => return Ok(text),
+            Err(e) => {
+                tracing::warn!(url = %url, error = %e, "DNA fetch failed");
+                last_err = e;
+            }
+        }
     }
-    load_dna_at_startup(&state.dna).await
+    Err(last_err)
+}
+
+/// Fetch the fixed law set with short keys. Any missing file aborts.
+async fn fetch_mapped_laws(
+    client: &reqwest::Client,
+) -> Result<BTreeMap<String, String>, String> {
+    let base = law_base_url().trim_end_matches('/').to_string();
+    let mut laws = BTreeMap::new();
+    for (key, filename) in LAW_KEY_FILES {
+        let url = format!("{base}/{filename}");
+        let text = fetch_url_text(client, &url)
+            .await
+            .map_err(|e| format!("law {filename} ({key}): {e}"))?;
+        laws.insert((*key).to_string(), text);
+    }
+    Ok(laws)
+}
+
+fn persist_package(pkg: &ReferencePackage) {
+    let dna_path = cache_path();
+    if let Err(e) = write_cache(&dna_path, &pkg.dna) {
+        tracing::warn!(error = %e, path = %dna_path.display(), "failed to write DNA cache");
+    }
+    let laws_path = laws_cache_path();
+    if let Err(e) = write_laws_cache(&laws_path, &pkg.laws) {
+        tracing::warn!(error = %e, path = %laws_path.display(), "failed to write laws cache");
+    }
+}
+
+/// Force-load DNA + laws from GitHub into RAM/disk. Sets `source=github`.
+pub async fn reload_from_github(memory: &DnaMemory) -> Result<ReferencePackage, String> {
+    let client = http_client()?;
+    let dna = fetch_dna_text(&client).await?;
+    let laws = fetch_mapped_laws(&client).await?;
+    let pkg = build_package(dna, "github".to_string(), laws);
+    persist_package(&pkg);
+    memory.set_package(pkg.clone()).await;
+    tracing::info!(
+        dna_sha = %pkg.dna_sha,
+        laws_sha = %pkg.laws_sha,
+        laws = pkg.laws.len(),
+        "Algonism reference reloaded from GitHub"
+    );
+    Ok(pkg)
+}
+
+/// Load DNA (+ laws when possible) at startup: GitHub first, then local cache.
+pub async fn load_dna_at_startup(memory: &DnaMemory) -> Result<DnaSnapshot, String> {
+    match reload_from_github(memory).await {
+        Ok(pkg) => {
+            tracing::info!(
+                bytes = pkg.dna.len(),
+                dna_sha = %pkg.dna_sha,
+                "Algonism DNA loaded from GitHub"
+            );
+            return Ok(DnaSnapshot {
+                text: pkg.dna,
+                source: pkg.source,
+            });
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "GitHub reference reload failed at startup");
+        }
+    }
+
+    let dna_path = cache_path();
+    let laws_path = laws_cache_path();
+    let dna = read_cache(&dna_path).map_err(|e| {
+        format!(
+            "DNA not loaded: GitHub unreachable and cache missing at {}: {e}",
+            dna_path.display()
+        )
+    })?;
+    let laws = read_laws_cache(&laws_path).unwrap_or_default();
+    let pkg = build_package(dna, "cache".to_string(), laws);
+    memory.set_package(pkg.clone()).await;
+    tracing::warn!(
+        path = %dna_path.display(),
+        bytes = pkg.dna.len(),
+        dna_sha = %pkg.dna_sha,
+        "GitHub unavailable; using local DNA/laws cache"
+    );
+    Ok(DnaSnapshot {
+        text: pkg.dna,
+        source: pkg.source,
+    })
+}
+
+/// Background poll: every 60–300s compare GitHub content hashes; reload on change.
+pub fn spawn_reference_poller(state: Arc<AppState>) {
+    let interval = poll_interval_secs();
+    tracing::info!(interval_secs = interval, "Algonism reference poller started");
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(Duration::from_secs(interval)).await;
+            if let Err(e) = poll_once(&state).await {
+                tracing::warn!(error = %e, "Algonism poll cycle failed");
+            }
+        }
+    });
+}
+
+async fn poll_once(state: &AppState) -> Result<(), String> {
+    let client = http_client()?;
+    let dna = match fetch_dna_text(&client).await {
+        Ok(t) => t,
+        Err(e) => {
+            tracing::debug!(error = %e, "poll: DNA unreachable (keeping cache)");
+            return Ok(());
+        }
+    };
+    let laws = match fetch_mapped_laws(&client).await {
+        Ok(m) => m,
+        Err(e) => {
+            tracing::warn!(error = %e, "poll: laws incomplete (keeping cache)");
+            return Ok(());
+        }
+    };
+    let new_dna_sha = sha256_hex(&dna);
+    let new_laws_sha = compute_laws_sha(&laws);
+
+    if let Some(cur) = state.dna.get_package().await {
+        if cur.dna_sha == new_dna_sha && cur.laws_sha == new_laws_sha {
+            tracing::debug!(dna_sha = %new_dna_sha, "poll: reference unchanged");
+            return Ok(());
+        }
+        tracing::info!(
+            old_dna_sha = %cur.dna_sha,
+            new_dna_sha = %new_dna_sha,
+            old_laws_sha = %cur.laws_sha,
+            new_laws_sha = %new_laws_sha,
+            "poll: reference changed — reloading cache"
+        );
+    } else {
+        tracing::info!(dna_sha = %new_dna_sha, "poll: no package in RAM — loading");
+    }
+
+    let pkg = build_package(dna, "github".to_string(), laws);
+    persist_package(&pkg);
+    state.dna.set_package(pkg).await;
+    Ok(())
+}
+
+async fn ensure_package(state: &AppState) -> Result<ReferencePackage, String> {
+    if let Some(pkg) = state.dna.get_package().await {
+        if !pkg.dna.trim().is_empty() && !pkg.laws.is_empty() {
+            return Ok(pkg);
+        }
+    }
+    match reload_from_github(&state.dna).await {
+        Ok(pkg) => Ok(pkg),
+        Err(gh_err) => {
+            let dna_path = cache_path();
+            let laws_path = laws_cache_path();
+            let dna = read_cache(&dna_path).map_err(|_| gh_err.clone())?;
+            let laws = read_laws_cache(&laws_path).map_err(|_| {
+                format!("incomplete package: github={gh_err}; laws cache missing")
+            })?;
+            if laws.is_empty() {
+                return Err(format!("incomplete package: github={gh_err}; empty laws"));
+            }
+            let pkg = build_package(dna, "cache".to_string(), laws);
+            state.dna.set_package(pkg.clone()).await;
+            Ok(pkg)
+        }
+    }
 }
 
 pub async fn identity_handler(State(state): State<Arc<AppState>>) -> Response {
-    match ensure_dna(&state).await {
-        Ok(snap) => Json(IdentityResponse {
+    match ensure_package(&state).await {
+        Ok(pkg) => Json(IdentityResponse {
             identity: "Алгонизм".to_string(),
-            dna: snap.text,
-            source: snap.source,
+            dna: pkg.dna,
+            source: pkg.source,
         })
         .into_response(),
         Err(e) => response::service_unavailable(e),
     }
 }
 
-/// List Constitution/Codes markdown files from public `quazar-law` (fail-closed).
-async fn list_law_filenames(client: &reqwest::Client) -> Result<Vec<String>, String> {
-    if let Ok(raw) = std::env::var("QUAZAR_AWAKEN_LAWS") {
-        let list: Vec<String> = raw
-            .split(',')
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .filter_map(sanitize_law_filename)
-            .collect();
-        if !list.is_empty() {
-            return Ok(list);
-        }
-    }
-
-    let api = std::env::var("QUAZAR_LAW_CONTENTS_URL")
-        .ok()
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| LAW_CONTENTS_API.to_string());
-
-    let mut req = client.get(&api);
-    if let Some(token) = github_token() {
-        req = req.header("Authorization", format!("Bearer {token}"));
-    }
-    req = req.header("Accept", "application/vnd.github+json");
-
-    let resp = req.send().await.map_err(|e| format!("quazar-law list: {e}"))?;
-    if !resp.status().is_success() {
-        return Err(format!(
-            "quazar-law list unavailable: HTTP {} for {}",
-            resp.status(),
-            api
-        ));
-    }
-    let entries: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| format!("quazar-law list JSON: {e}"))?;
-    let arr = entries
-        .as_array()
-        .ok_or_else(|| "quazar-law list: expected array".to_string())?;
-
-    let mut names = Vec::new();
-    for entry in arr {
-        let name = entry.get("name").and_then(|v| v.as_str()).unwrap_or("");
-        let ty = entry.get("type").and_then(|v| v.as_str()).unwrap_or("");
-        if ty != "file" {
-            continue;
-        }
-        // Skip repo readme — not a Constitution/Code text.
-        if name.eq_ignore_ascii_case("README.md") {
-            continue;
-        }
-        if let Some(safe) = sanitize_law_filename(name) {
-            names.push(safe);
-        }
-    }
-    if names.is_empty() {
-        return Err("quazar-law list: no markdown law files found".to_string());
-    }
-    names.sort();
-    Ok(names)
-}
-
-/// Fetch every listed law; any failure aborts (no incomplete awaken package).
-async fn fetch_all_laws(
-    client: &reqwest::Client,
-) -> Result<serde_json::Map<String, serde_json::Value>, String> {
-    let names = list_law_filenames(client).await?;
-    let base = law_base_url().trim_end_matches('/').to_string();
-    let mut laws = serde_json::Map::new();
-    for name in names {
-        let url = format!("{base}/{name}");
-        let text = fetch_url_text(client, &url)
-            .await
-            .map_err(|e| format!("law {name}: {e}"))?;
-        laws.insert(name, serde_json::Value::String(text));
-    }
-    Ok(laws)
-}
-
-async fn node_state_snapshot(state: &AppState) -> serde_json::Value {
-    let pending_count = crate::pending::count(&state.db).await.unwrap_or(0);
-    let blocks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM blocks")
-        .fetch_one(&state.db)
-        .await
-        .unwrap_or(0);
+async fn awaken_state_snapshot(state: &AppState) -> AwakenState {
     let citizens: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM citizens")
         .fetch_one(&state.db)
         .await
@@ -363,92 +551,69 @@ async fn node_state_snapshot(state: &AppState) -> serde_json::Value {
         .unwrap_or_default();
     let nodes_count = nodes.len() as i64;
 
-    serde_json::json!({
-        "node_id": state.node_id,
-        "version": "0.7.0",
-        "alive": true,
-        "blocks": blocks,
-        "last_block": last_block.map(|(n, hash)| serde_json::json!({
-            "number": n,
-            "hash": hash,
-        })),
-        "citizens": citizens,
-        "nodes": nodes_count,
-        "pending_events_local": pending_count,
-    })
-}
-
-/// Awaken requires a live DNA pull from private `algonism-core` (token). No incomplete package.
-async fn dna_for_awaken(state: &AppState) -> Result<DnaSnapshot, String> {
-    let client = http_client()?;
-    let path = cache_path();
-    let mut last_err = "no DNA URLs configured".to_string();
-
-    for url in dna_urls() {
-        match fetch_url_text(&client, &url).await {
-            Ok(text) => {
-                if let Err(e) = write_cache(&path, &text) {
-                    tracing::warn!(error = %e, path = %path.display(), "failed to write DNA cache");
-                }
-                let snap = DnaSnapshot {
-                    text,
-                    source: "github".to_string(),
-                };
-                state.dna.set(snap.clone()).await;
-                tracing::info!(url = %url, bytes = snap.text.len(), "awaken: DNA loaded from GitHub");
-                return Ok(snap);
-            }
-            Err(e) => {
-                tracing::warn!(url = %url, error = %e, "awaken: DNA fetch failed");
-                last_err = e;
-            }
-        }
+    AwakenState {
+        last_block: last_block.map(|(number, hash)| LastBlockInfo { number, hash }),
+        active_citizens: citizens,
+        active_nodes: nodes_count,
     }
-
-    Err(format!(
-        "algonism-core unavailable (awaken refuses incomplete package): {last_err}"
-    ))
 }
 
-/// GET /algonism/awaken — wake the Secretary: DNA + all laws + live state.
-/// Fail-closed: if DNA repo or law repo cannot supply a full package → error.
+/// GET /algonism/awaken — wake the Secretary from the local core package.
 pub async fn awaken_handler(State(state): State<Arc<AppState>>) -> Response {
-    let client = match http_client() {
-        Ok(c) => c,
-        Err(e) => return response::internal_error(e),
-    };
-
-    let snap = match dna_for_awaken(&state).await {
-        Ok(s) => s,
-        Err(e) => return response::service_unavailable(e),
-    };
-
-    let laws = match fetch_all_laws(&client).await {
-        Ok(m) => m,
+    let pkg = match ensure_package(&state).await {
+        Ok(p) => p,
         Err(e) => {
-            tracing::error!(error = %e, "awaken aborted: incomplete law package");
+            tracing::error!(error = %e, "awaken aborted: incomplete package");
             return response::service_unavailable(e);
         }
     };
 
-    let node_state = node_state_snapshot(&state).await;
+    if pkg.laws.is_empty() {
+        return response::service_unavailable("awaken refuses incomplete law package");
+    }
+
+    let node_state = awaken_state_snapshot(&state).await;
 
     tracing::info!(
-        source = %snap.source,
-        dna_bytes = snap.text.len(),
-        laws = laws.len(),
+        schema = AWAKEN_SCHEMA,
+        source = %pkg.source,
+        dna_sha = %pkg.dna_sha,
+        laws_sha = %pkg.laws_sha,
+        dna_bytes = pkg.dna.len(),
+        laws = pkg.laws.len(),
         "Algonism awaken payload served"
     );
 
     Json(AwakenResponse {
+        awaken_schema: AWAKEN_SCHEMA,
         identity: "Алгонизм".to_string(),
-        dna: snap.text,
-        source: snap.source,
-        awakening: DEFAULT_AWAKENING.to_string(),
-        laws,
+        dna: pkg.dna,
+        dna_sha: pkg.dna_sha,
+        source: pkg.source,
+        laws: pkg.laws,
+        laws_sha: pkg.laws_sha,
         state: node_state,
+        timestamp: pkg.timestamp,
     })
     .into_response()
+}
+
+/// POST /algonism/dna/reload — force GitHub → node cache (auth required).
+pub async fn reload_handler(State(state): State<Arc<AppState>>) -> Response {
+    match reload_from_github(&state.dna).await {
+        Ok(pkg) => Json(ReloadResponse {
+            ok: true,
+            source: pkg.source,
+            dna_sha: pkg.dna_sha,
+            laws_sha: pkg.laws_sha,
+            timestamp: pkg.timestamp,
+        })
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "DNA reload failed");
+            response::service_unavailable(e)
+        }
+    }
 }
 
 /// Safe law filename: basename only, must end with .md, no path traversal.
@@ -474,17 +639,30 @@ fn sanitize_law_filename(name: &str) -> Option<String> {
 }
 
 pub async fn law_handler(
+    State(state): State<Arc<AppState>>,
     AxumPath(filename): AxumPath<String>,
 ) -> Response {
     let Some(safe) = sanitize_law_filename(&filename) else {
         return response::bad_request("Invalid law filename");
     };
 
-    let url = format!(
-        "{}/{}",
-        law_base_url().trim_end_matches('/'),
-        safe
-    );
+    // Prefer short-key cache when filename maps to an awaken key.
+    if let Some(key) = filename_to_law_key(&safe) {
+        if let Some(pkg) = state.dna.get_package().await {
+            if let Some(text) = pkg.laws.get(key) {
+                return (
+                    [(
+                        axum::http::header::CONTENT_TYPE,
+                        "text/markdown; charset=utf-8",
+                    )],
+                    text.clone(),
+                )
+                    .into_response();
+            }
+        }
+    }
+
+    let url = format!("{}/{}", law_base_url().trim_end_matches('/'), safe);
 
     let client = match http_client() {
         Ok(c) => c,
@@ -521,27 +699,72 @@ mod tests {
         assert_eq!(sanitize_law_filename("KGPS.md").as_deref(), Some("KGPS.md"));
     }
 
+    #[test]
+    fn law_filename_maps_to_short_keys() {
+        assert_eq!(filename_to_law_key("CONSTITUTION_QUAZAR.md"), Some("constitution"));
+        assert_eq!(filename_to_law_key("KVA.md"), Some("kva"));
+        assert_eq!(filename_to_law_key("ETHICAL.md"), Some("ethical"));
+        assert_eq!(filename_to_law_key("README.md"), None);
+    }
+
+    #[test]
+    fn laws_sha_is_sorted_key_text_concat() {
+        let mut laws = BTreeMap::new();
+        laws.insert("kva".to_string(), "A".to_string());
+        laws.insert("constitution".to_string(), "B".to_string());
+        // Sorted keys: constitution, kva → "constitution\nB\nkva\nA\n"
+        let expected = sha256_hex("constitution\nB\nkva\nA\n");
+        assert_eq!(compute_laws_sha(&laws), expected);
+    }
+
+    #[test]
+    fn dna_sha_is_utf8_sha256() {
+        let mut h = Sha256::new();
+        h.update("hello".as_bytes());
+        assert_eq!(sha256_hex("hello"), hex::encode(h.finalize()));
+
+        let mut h2 = Sha256::new();
+        h2.update("Алгонизм".as_bytes());
+        assert_eq!(sha256_hex("Алгонизм"), hex::encode(h2.finalize()));
+    }
+
     #[tokio::test]
     async fn cache_fallback_when_github_unreachable() {
         let dir = std::env::temp_dir().join(format!("quazar_dna_test_{}", std::process::id()));
         let _ = fs::remove_dir_all(&dir);
         fs::create_dir_all(&dir).unwrap();
         let cache = dir.join("ALGONISM.md");
+        let laws_cache = dir.join("laws.json");
         fs::write(&cache, "# DNA from cache\n").unwrap();
+        let mut laws = BTreeMap::new();
+        laws.insert("constitution".to_string(), "# C\n".to_string());
+        fs::write(&laws_cache, serde_json::to_string(&laws).unwrap()).unwrap();
 
         std::env::set_var("QUAZAR_ALGONISM_CACHE_PATH", cache.to_str().unwrap());
         std::env::set_var(
+            "QUAZAR_ALGONISM_LAWS_CACHE_PATH",
+            laws_cache.to_str().unwrap(),
+        );
+        std::env::set_var(
             "QUAZAR_ALGONISM_DNA_URLS",
             "http://127.0.0.1:1/ALGONISM.md",
+        );
+        std::env::set_var(
+            "QUAZAR_LAW_BASE_URL",
+            "http://127.0.0.1:1/laws",
         );
 
         let memory = DnaMemory::new();
         let snap = load_dna_at_startup(&memory).await.expect("cache fallback");
         assert_eq!(snap.source, "cache");
         assert!(snap.text.contains("DNA from cache"));
+        let pkg = memory.get_package().await.expect("package");
+        assert_eq!(pkg.laws.get("constitution").map(String::as_str), Some("# C\n"));
 
         std::env::remove_var("QUAZAR_ALGONISM_CACHE_PATH");
+        std::env::remove_var("QUAZAR_ALGONISM_LAWS_CACHE_PATH");
         std::env::remove_var("QUAZAR_ALGONISM_DNA_URLS");
+        std::env::remove_var("QUAZAR_LAW_BASE_URL");
         let _ = fs::remove_dir_all(&dir);
     }
 }

@@ -324,14 +324,15 @@ pub async fn auth_middleware(
                 && (path == "/events/gossip"
                     || path == "/chat/gossip"
                     || path == "/keys/internal/upsert"
-                    || path == "/keys/internal/revoke");
+                    || path == "/keys/internal/revoke"
+                    || path == "/algonism/dna/reload");
         if node_allowed {
             tracing::debug!(path = %path, "node secret accepted");
             req.extensions_mut().insert(AuthContext::node());
             return next.run(req).await;
         }
         tracing::warn!(path = %path, method = %method, "node secret rejected for route");
-        return response::forbidden("Node secret valid only for GET /events, GET /blocks, GET /keys/internal/export and POST /events/gossip, /chat/gossip, /keys/internal/*");
+        return response::forbidden("Node secret valid only for GET /events, GET /blocks, GET /keys/internal/export and POST /events/gossip, /chat/gossip, /keys/internal/*, /algonism/dna/reload");
     }
 
     let key_data = KeyStore::validate_key(&state.db, &api_key).await;
