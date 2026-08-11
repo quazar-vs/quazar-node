@@ -146,6 +146,38 @@ fn require_aiya_admin(auth: &AuthContext) -> Option<axum::response::Response> {
     None
 }
 
+fn role_display_ru(role: &Role) -> &'static str {
+    match role {
+        Role::Citizen => "Гражданин",
+        Role::Guardian => "Страж",
+        Role::Judge => "Судья",
+        Role::Mayor => "Мэр",
+        Role::Aiya => "Айя",
+        Role::Founder => "Основатель",
+        Role::Agent => "Агент",
+        Role::Candidate => "Кандидат",
+    }
+}
+
+fn access_for_role(role: &Role) -> Vec<&'static str> {
+    if matches!(
+        role,
+        Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder
+    ) {
+        vec!["global_lots", "local_lots", "verify_trades"]
+    } else {
+        vec!["global_lots"]
+    }
+}
+
+/// Resolve the role to apply on VPN activate: keep assigned governance/citizen role.
+fn role_to_apply(raw: &str) -> Role {
+    match Role::from_str(raw) {
+        Some(Role::Candidate) | Some(Role::Agent) | None => Role::Citizen,
+        Some(r) => r,
+    }
+}
+
 fn generate_openssh_keypair(comment: &str) -> Result<(String, String), String> {
     let mut key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
         .map_err(|e| format!("Failed to generate Ed25519 key: {e}"))?;
@@ -638,6 +670,149 @@ pub async fn list_vpn_keys_handler(
             response::internal_error("Failed to list VPN keys")
         }
     }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ActivateVpnBody {
+    pub vpn_session_id: String,
+}
+
+/// POST /api/citizen/activate_vpn — единый акт: ВПН = принятие роли.
+/// Идемпотентно: повторный вызов при status=active не ломает состояние.
+pub async fn activate_vpn_handler(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<Arc<AppState>>,
+    Json(body): Json<ActivateVpnBody>,
+) -> impl IntoResponse {
+    if let Some(resp) = require_citizen(&auth) {
+        return resp;
+    }
+    let session = body.vpn_session_id.trim();
+    if session.is_empty() {
+        return response::bad_request("vpn_session_id is required");
+    }
+
+    let citizen_id = auth.resolve_account_id(&state.db).await;
+    let row: Option<(String, String, bool)> = match sqlx::query_as(
+        "SELECT status, role, passport_issued FROM citizens WHERE id = $1",
+    )
+    .bind(&citizen_id)
+    .fetch_optional(&state.db)
+    .await
+    {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::error!(error = %e, "activate_vpn citizen lookup failed");
+            return response::internal_error("Database error");
+        }
+    };
+    let Some((status, role_raw, passport_issued)) = row else {
+        return response::bad_request("Citizen not found");
+    };
+    if !passport_issued {
+        return response::bad_request("Паспорт ещё не выдан — ВПН-активация недоступна");
+    }
+    if matches!(status.as_str(), "suspended" | "revoked" | "applicant") {
+        return response::bad_request(format!("Статус {status} не допускает активацию ВПН"));
+    }
+
+    let applied = role_to_apply(&role_raw);
+    let access = access_for_role(&applied);
+    let role_ru = role_display_ru(&applied);
+
+    if status == "active" {
+        let _ = sqlx::query(
+            "UPDATE vpn_keys SET last_used = NOW()
+             WHERE citizen_id = $1 AND is_active = TRUE AND expires_at > NOW()
+               AND ($2 = '' OR id = $2)",
+        )
+        .bind(&citizen_id)
+        .bind(session)
+        .execute(&state.db)
+        .await;
+        return Json(ApiResponse::success(serde_json::json!({
+            "status": "active",
+            "role": role_ru,
+            "role_code": applied.as_str(),
+            "access": access,
+            "idempotent": true,
+            "vpn_session_id": session,
+        })))
+        .into_response();
+    }
+
+    let session_ok: bool = sqlx::query_scalar(
+        "SELECT EXISTS(
+            SELECT 1 FROM vpn_keys
+            WHERE id = $1 AND citizen_id = $2 AND is_active = TRUE AND expires_at > NOW()
+         )",
+    )
+    .bind(session)
+    .bind(&citizen_id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false);
+    if !session_ok {
+        return response::bad_request(
+            "Недействительная ВПН-сессия: получите ключ (POST /api/vpn/key) и передайте его id как vpn_session_id",
+        );
+    }
+
+    if let Err(e) = sqlx::query(
+        "UPDATE citizens SET status = 'active', role = $1 WHERE id = $2",
+    )
+    .bind(applied.as_str())
+    .bind(&citizen_id)
+    .execute(&state.db)
+    .await
+    {
+        tracing::error!(error = %e, "activate_vpn update failed");
+        return response::internal_error("Failed to activate citizen");
+    }
+
+    let _ = sqlx::query(
+        "UPDATE api_keys SET role = $1 WHERE citizen_id = $2 AND is_active = TRUE",
+    )
+    .bind(applied.as_str())
+    .bind(&citizen_id)
+    .execute(&state.db)
+    .await;
+
+    let _ = sqlx::query(
+        "UPDATE vpn_keys SET last_used = NOW() WHERE id = $1 AND citizen_id = $2",
+    )
+    .bind(session)
+    .bind(&citizen_id)
+    .execute(&state.db)
+    .await;
+
+    let now_ts = Utc::now().timestamp();
+    let _ = sqlx::query(
+        "INSERT INTO citizen_status (citizen_id, status, last_seen) VALUES ($1, 'online', $2)
+         ON CONFLICT (citizen_id) DO UPDATE SET status = 'online', last_seen = EXCLUDED.last_seen",
+    )
+    .bind(&citizen_id)
+    .bind(now_ts)
+    .execute(&state.db)
+    .await;
+
+    tracing::info!(
+        citizen_id = %citizen_id,
+        role = %applied.as_str(),
+        vpn_session_id = %session,
+        "VPN activated: citizen active + role applied"
+    );
+
+    Json(ApiResponse::success(serde_json::json!({
+        "status": "active",
+        "role": role_ru,
+        "role_code": applied.as_str(),
+        "access": access,
+        "idempotent": false,
+        "vpn_session_id": session,
+        "message": "ВПН включён — роль принята, доступ к экономике открыт",
+    })))
+    .into_response()
 }
 
 #[cfg(test)]

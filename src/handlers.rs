@@ -363,9 +363,33 @@ pub async fn online_handler(
     .execute(&state.db)
     .await;
 
+    // Lifecycle: passport holders become citizens.status=online (presence on the node).
+    // Do not demote active / suspended / revoked.
+    let updated = sqlx::query(
+        "UPDATE citizens SET status = 'online'
+         WHERE id = $1
+           AND passport_issued = TRUE
+           AND status IN ('pending', 'online')",
+    )
+    .bind(citizen_id)
+    .execute(&state.db)
+    .await
+    .ok();
+
+    let lifecycle: Option<String> =
+        sqlx::query_scalar("SELECT status FROM citizens WHERE id = $1")
+            .bind(citizen_id)
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten();
+
     Json(ApiResponse::success(serde_json::json!({
         "citizen_id": citizen_id,
-        "message": "Citizen marked as online"
+        "presence": "online",
+        "status": lifecycle,
+        "lifecycle_updated": updated.map(|r| r.rows_affected() > 0).unwrap_or(false),
+        "message": "Citizen marked as online (network connect). Enable VPN to become active.",
     })))
     .into_response()
 }

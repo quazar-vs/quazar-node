@@ -43,6 +43,8 @@ pub enum CitizenStatus {
     Applicant,
     /// Registered / awaiting passport.
     Pending,
+    /// Passport issued; connected to the node, not yet economically active (needs VPN).
+    Online,
     Active,
     Suspended,
     Revoked,
@@ -53,6 +55,7 @@ impl CitizenStatus {
         match self {
             CitizenStatus::Applicant => "applicant",
             CitizenStatus::Pending => "pending",
+            CitizenStatus::Online => "online",
             CitizenStatus::Active => "active",
             CitizenStatus::Suspended => "suspended",
             CitizenStatus::Revoked => "revoked",
@@ -63,6 +66,7 @@ impl CitizenStatus {
         match s.to_lowercase().as_str() {
             "applicant" => Some(CitizenStatus::Applicant),
             "pending" => Some(CitizenStatus::Pending),
+            "online" => Some(CitizenStatus::Online),
             "active" => Some(CitizenStatus::Active),
             "suspended" => Some(CitizenStatus::Suspended),
             "revoked" => Some(CitizenStatus::Revoked),
@@ -2348,7 +2352,7 @@ pub async fn approve_citizen(
         "#,
     )
     .bind(Role::Citizen.as_str())
-    .bind(CitizenStatus::Active.as_str())
+    .bind(CitizenStatus::Online.as_str())
     .bind(expires_at)
     .bind(&citizen.id)
     .execute(&state.db)
@@ -2420,7 +2424,7 @@ pub async fn approve_citizen(
     let _ = submit_pending_event(state.clone(), role_event).await;
 
     citizen.role = Role::Citizen;
-    citizen.status = CitizenStatus::Active;
+    citizen.status = CitizenStatus::Online;
     citizen.passport_issued = true;
     citizen.passport_expires = Some(expires_at);
     citizen.candidate_type = None;
@@ -2431,7 +2435,7 @@ pub async fn approve_citizen(
         Json(ApiResponse::success(ApproveCitizenResponse {
             citizen: CitizenResponse::from(citizen),
             passport_id,
-            message: "Судья утвердил гражданство. Паспорт выдан.".to_string(),
+            message: "Судья утвердил гражданство. Паспорт выдан. Подключитесь к сети, затем включите ВПН для активации роли.".to_string(),
         })),
     )
 }
@@ -2504,6 +2508,11 @@ mod status_tests {
         assert_eq!(
             CitizenStatus::from_str("Applicant"),
             Some(CitizenStatus::Applicant)
+        );
+        assert_eq!(CitizenStatus::Online.as_str(), "online");
+        assert_eq!(
+            CitizenStatus::from_str("online"),
+            Some(CitizenStatus::Online)
         );
     }
 

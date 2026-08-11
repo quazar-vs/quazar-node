@@ -107,7 +107,7 @@ pub async fn login_handler(
         );
     }
 
-    if citizen.status != "active" {
+    if citizen.status != "active" && citizen.status != "online" {
         let message = if citizen.status == "pending" {
             "Вход недоступен: паспорт ещё не выдан (статус pending). Обратитесь к регистратору."
         } else {

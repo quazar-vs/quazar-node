@@ -227,9 +227,24 @@ fn enforce_path_rbac(path: &str, auth: &AuthContext) -> Option<Response> {
 }
 
 /// Pending citizens may only touch passport endpoints until activated.
+/// Online (passport issued, not yet VPN-active) may use network/VPN activation paths.
 fn allows_pending_citizen(path: &str) -> bool {
     let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
     parts.len() >= 3 && parts[0] == "citizen" && parts[2] == "passport"
+}
+
+fn allows_online_citizen(path: &str) -> bool {
+    path == "/online"
+        || path == "/offline"
+        || path == "/api/vpn/key"
+        || path == "/api/vpn/status"
+        || path == "/api/vpn/revoke"
+        || path == "/api/citizen/activate_vpn"
+        || path == "/auth/check"
+        || path.starts_with("/citizen/") && path.ends_with("/passport")
+        || path == "/svod"
+        || path.starts_with("/law/")
+        || path == "/algonism/identity"
 }
 
 pub async fn rate_limit_middleware(
@@ -359,6 +374,15 @@ pub async fn auth_middleware(
             return response::forbidden(
                 "Доступ запрещён: паспорт ещё не выдан (статус pending). Разрешены только операции с /passport.",
             );
+        }
+        if citizen_status == "online" && !allows_online_citizen(&path) {
+            // Economy (exchange etc.) closed until VPN = role acceptance.
+            if path.starts_with("/exchange") {
+                tracing::warn!(path = %path, citizen = %citizen_name, "online citizen exchange denied");
+                return response::forbidden(
+                    "Доступ к бирже закрыт: включите ВПН (POST /api/citizen/activate_vpn), чтобы принять роль и стать active.",
+                );
+            }
         }
         tracing::debug!(path = %path, citizen = %citizen_name, ?role, "API key accepted");
         let agent_permissions = if role.is_agent() {

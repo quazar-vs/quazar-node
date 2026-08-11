@@ -78,7 +78,8 @@ use tunnel::{
     tunnel_stats_handler, tunnel_status_handler, TunnelRegistry,
 };
 use vpn::{
-    generate_vpn_key_handler, list_vpn_keys_handler, revoke_vpn_key_handler, vpn_status_handler,
+    activate_vpn_handler, generate_vpn_key_handler, list_vpn_keys_handler, revoke_vpn_key_handler,
+    vpn_status_handler,
 };
 use crypto::assert_production_secrets;
 use citizen::*;
@@ -536,6 +537,7 @@ async fn main() {
         .route("/api/vpn/status", get(vpn_status_handler))
         .route("/api/vpn/revoke", post(revoke_vpn_key_handler))
         .route("/api/vpn/keys", get(list_vpn_keys_handler))
+        .route("/api/citizen/activate_vpn", post(activate_vpn_handler))
         .route_layer(middleware::from_fn_with_state(state.clone(), auth_middleware))
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
