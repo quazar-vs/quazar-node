@@ -601,6 +601,16 @@ impl AuthContext {
             && matches!(self.role, Role::Guardian | Role::Founder)
     }
 
+    /// Биржа и агенты СБ: только Страж и выше (КВА / Свод).
+    pub fn can_use_exchange(&self) -> bool {
+        self.has_system_access()
+            && !self.role.is_agent()
+            && matches!(
+                self.role,
+                Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder
+            )
+    }
+
     /// Update citizen status — Founder and Aiya only.
     pub fn can_update_citizen_status(&self) -> bool {
         self.has_system_access()

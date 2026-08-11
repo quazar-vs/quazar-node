@@ -279,6 +279,11 @@ pub async fn create_request(
             "Node credentials cannot create exchange requests".into(),
         ));
     }
+    if !auth.can_use_exchange() {
+        return Err(ExchangeError::Unauthorized(
+            "Биржа доступна только статусу Страж и выше".into(),
+        ));
+    }
     let citizen_id = auth.resolve_account_id(&state.db).await;
     ensure_active_citizen(&state.db, &citizen_id).await?;
 
@@ -779,6 +784,11 @@ pub async fn buy_listing(
 ) -> ExchangeResult<Json<ApiResponse>> {
     if auth.is_node {
         return Err(ExchangeError::Unauthorized("Node cannot buy".into()));
+    }
+    if !auth.can_use_exchange() {
+        return Err(ExchangeError::Unauthorized(
+            "Биржа доступна только статусу Страж и выше".into(),
+        ));
     }
     let buyer_id = auth.resolve_account_id(&state.db).await;
     ensure_active_citizen(&state.db, &buyer_id).await?;
