@@ -347,8 +347,10 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 | `/svod/admin/service/:code` | DELETE | Aiya / Founder (отключить позицию) |
 | `/svod/admin/reward` | POST | Aiya / Founder — обновить ставку (`action`, `reward`, опц. `work_kind`) |
 | `/exchange/listings` | GET | API key — лоты mode=`offers`; `?status=` + `?work_kind=` + `?svod_code=` |
+| `/exchange/needs` | POST | Citizen+ или Agent (Секретарь) — потребность `{svod_code, quantity[, citizen_id]}`; Агент Биржи проверяет резерв Successful и выставляет лот |
+| `/exchange/needs` | GET | свои потребности (Agent/SB — все) |
 | `/exchange/requests` | GET | Citizen — свои заявки; SB — очередь; `?work_kind=` + `?svod_code=` |
-| `/exchange/requests` | POST | Citizen — `{side, svod_code, quantity}` |
+| `/exchange/requests` | POST | Страж+ — `{side, svod_code, quantity}` (путь через СБ) |
 
 ```bash
 # Единый Государственный Свод Вознаграждений
@@ -393,6 +395,8 @@ curl -s -X POST http://localhost:8080/exchange/requests \
 После миграции `004_service_catalog.sql` (внутренняя таблица позиций Свода) доступны seed-данные: категория `IT`, позиция `WEB_DEV` (base_price **100 QZ**). В API/UI это **позиции Свода** (`parts.*.items`), не отдельный реестр.
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
 После миграции `044_exchange_state_mediated.sql` — биржа через государство/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
+После миграции `048_exchange_agent.sql` — встроенный **Агент Биржи**: `POST /exchange/needs` → проверка резерва Successful (`QZ-1`) → лот `is_state_agent` → `POST /exchange/listings/:id/buy` (эскроу) → подтверждение СБ → списание в резерв; лот остаётся `active`. Граждане: витрина/сделка; служебный диалог СБ/Биржа — Страж+.
+После миграции `049_phase_ad_offices_agents.sql` — `node_offices` (Мэр=должность), `algonism_agents` + `agent_messages`; API `/offices/mayor*`, `/city/appoint`, `/agents*`; `POST /exchange/sell-to-state`, `/exchange/reserve/dispose`; treasury = QZ-1.
 После миграции `045_service_work_kind.sql` — `work_kind` на позициях Свода и ставках; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с единым title и `parts`/`sections`; фильтр `?work_kind=` / `?svod_code=` на бирже. UX: `role_view.offers` / `role_view.needs`, позиции из `parts.*.items`.
 После миграции `005_candidacies.sql` доступны таблицы `candidacies` и `candidacy_votes`.
 После миграции `008_initiatives_referendums.sql` доступны таблицы `initiatives`, `initiative_votes`, `referendums`, `referendum_votes`.

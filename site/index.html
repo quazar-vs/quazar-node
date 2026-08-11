@@ -2231,6 +2231,10 @@
               </div>
               <div class="error-msg" id="regConsentError">Необходимо дать согласие</div>
             </div>
+            <div class="form-group" id="registerCaptchaWrap" hidden>
+              <div id="registerRecaptcha"></div>
+              <div class="error-msg" id="regCaptchaError">Пройдите проверку reCAPTCHA</div>
+            </div>
             <div class="register-error" id="registerError" role="alert"></div>
             <button type="submit" class="btn btn-primary register-actions" id="registerSubmitBtn">Получить код подтверждения</button>
           </form>
@@ -3436,6 +3440,7 @@
         document.body.classList.add('modal-open');
         resetRegisterModal();
         updateRegisterLinkLabel();
+        ensureRegisterRecaptcha().catch(function () { /* ignore */ });
         regEmailInput.focus();
       }
 
@@ -3491,7 +3496,19 @@
         };
         savePendingRegistration(pending);
 
-        return quazarApiPost('/auth/register/send-code', { email: email }).then(function () {
+        var captcha_token = getRegisterCaptchaToken();
+        if ((recaptchaRequired || recaptchaSiteKey) && !captcha_token) {
+          var capErr = document.getElementById('regCaptchaError');
+          if (capErr) capErr.classList.add('show');
+          return Promise.reject(new Error('Пройдите проверку reCAPTCHA'));
+        }
+        var capErr2 = document.getElementById('regCaptchaError');
+        if (capErr2) capErr2.classList.remove('show');
+
+        return quazarApiPost('/auth/register/send-code', {
+          email: email,
+          captcha_token: captcha_token || undefined
+        }).then(function () {
           registerEmailDisplay.textContent = email;
           showRegisterStep(2);
           verifyCodeInput.focus();
@@ -3626,7 +3643,10 @@
         resendCodeBtn.disabled = true;
         resendCodeBtn.textContent = '⏳ Отправка...';
 
-        quazarApiPost('/auth/register/send-code', { email: pending.email })
+        quazarApiPost('/auth/register/send-code', {
+          email: pending.email,
+          captcha_token: getRegisterCaptchaToken() || undefined
+        })
           .then(function () {
             pending.expires = Date.now() + CODE_TTL_MS;
             savePendingRegistration(pending);
@@ -4512,6 +4532,7 @@
         : '';
       var recaptchaRequired = false;
       var recaptchaWidgetId = null;
+      var registerRecaptchaWidgetId = null;
 
       async function loadPublicConfig() {
         try {
@@ -4575,6 +4596,38 @@
         if (!recaptchaSiteKey || !window.grecaptcha || recaptchaWidgetId === null) return '';
         try {
           return window.grecaptcha.getResponse(recaptchaWidgetId) || '';
+        } catch (_) {
+          return '';
+        }
+      }
+
+      async function ensureRegisterRecaptcha() {
+        var wrap = document.getElementById('registerCaptchaWrap');
+        var mount = document.getElementById('registerRecaptcha');
+        if (!mount || !recaptchaSiteKey) {
+          if (wrap) wrap.hidden = true;
+          return;
+        }
+        if (wrap) wrap.hidden = false;
+        await loadRecaptchaScript();
+        await new Promise(function (resolve) {
+          window.grecaptcha.ready(function () { resolve(); });
+        });
+        if (registerRecaptchaWidgetId !== null) {
+          try { window.grecaptcha.reset(registerRecaptchaWidgetId); } catch (_) {}
+          return;
+        }
+        mount.innerHTML = '';
+        registerRecaptchaWidgetId = window.grecaptcha.render(mount, {
+          sitekey: recaptchaSiteKey,
+          theme: 'light'
+        });
+      }
+
+      function getRegisterCaptchaToken() {
+        if (!recaptchaSiteKey || !window.grecaptcha || registerRecaptchaWidgetId === null) return '';
+        try {
+          return window.grecaptcha.getResponse(registerRecaptchaWidgetId) || '';
         } catch (_) {
           return '';
         }

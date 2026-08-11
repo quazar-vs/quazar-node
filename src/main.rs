@@ -45,6 +45,8 @@ mod mayor;
 mod models;
 mod node_generator;
 mod nodes;
+mod offices;
+mod agents;
 mod pending;
 mod projection;
 mod referendum;
@@ -157,6 +159,9 @@ async fn main() {
     db::run_migrations(&pool)
         .await
         .expect("Failed to run database migrations");
+    if let Err(e) = agents::ensure_state_agents(&pool).await {
+        tracing::warn!(error = %e, "failed to ensure state Algonism agents");
+    }
     KeyStore::sync_from_env(&pool)
         .await
         .expect("Failed to sync API keys");
@@ -363,8 +368,24 @@ async fn main() {
             "/exchange/requests/:id/sb-verify",
             post(exchange::sb_verify_request),
         )
+        .route("/exchange/needs", post(exchange::create_need))
+        .route("/exchange/needs", get(exchange::list_needs))
         .route("/exchange/listings", get(exchange::list_listings))
         .route("/exchange/listings/:id/buy", post(exchange::buy_listing))
+        .route("/exchange/sell-to-state", post(exchange::sell_to_state))
+        .route("/exchange/reserve/dispose", post(exchange::dispose_reserve))
+        .route("/exchange/transfers", post(exchange::create_lot_transfer))
+        .route(
+            "/exchange/transfers/:id/advance",
+            post(exchange::advance_lot_transfer),
+        )
+        .route("/exchange/exports", post(exchange::create_lot_transfer))
+        .route(
+            "/exchange/exports/:id/advance",
+            post(exchange::advance_lot_transfer),
+        )
+        .route("/exchange/node-lots", get(exchange::list_node_lots))
+        .route("/exchange/node-lots", post(exchange::adjust_node_lot))
         .route("/exchange/deals/:id/cancel", post(exchange::cancel_deal))
         .route(
             "/exchange/security/tasks",
@@ -378,6 +399,19 @@ async fn main() {
         .route("/exchange/inventory", post(exchange::adjust_inventory))
         .route("/exchange/balance", get(exchange::get_balance_handler))
         .route("/exchange/balance/add", post(exchange::add_balance))
+        .route("/offices/mayor", post(offices::appoint_mayor_handler))
+        .route("/offices/mayor/:node_id", get(offices::get_mayor_office))
+        .route(
+            "/offices/mayor/:node_id/leave",
+            post(offices::leave_mayor_handler),
+        )
+        .route("/city/appoint", post(offices::appoint_city_role))
+        .route("/agents", get(agents::list_agents))
+        .route("/agents/messages", post(agents::post_agent_message))
+        .route(
+            "/agents/city/ensure",
+            post(agents::ensure_city_agents_handler),
+        )
         // Temporary Passport compatibility (old P2P paths → listings/requests/deals)
         .route("/exchange/offers", get(exchange::legacy_get_offers))
         .route("/exchange/offer", post(exchange::legacy_create_offer))

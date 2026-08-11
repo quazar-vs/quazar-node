@@ -46,12 +46,13 @@ impl Role {
             Role::Founder => matches!(self, Role::Founder),
             Role::Aiya => matches!(self, Role::Founder | Role::Aiya),
             Role::Mayor => matches!(self, Role::Founder | Role::Aiya | Role::Mayor),
-            Role::Guardian => {
-                matches!(self, Role::Founder | Role::Aiya | Role::Mayor | Role::Guardian)
-            }
+            Role::Guardian => matches!(
+                self,
+                Role::Founder | Role::Aiya | Role::Mayor | Role::Judge | Role::Guardian
+            ),
             Role::Judge => matches!(
                 self,
-                Role::Founder | Role::Aiya | Role::Mayor | Role::Guardian | Role::Judge
+                Role::Founder | Role::Aiya | Role::Mayor | Role::Judge
             ),
             Role::Agent => matches!(
                 self,
@@ -200,6 +201,9 @@ pub enum QuazarEventType {
     ExchangeDeliveryConfirmed,
     ExchangeSettled,
     ExchangeInventoryAdjusted,
+    ExchangeNeedCreated,
+    ExchangeAgentListed,
+    ExchangeAgentDeal,
     SvodServiceCreated,
     SvodServiceUpdated,
     SvodServiceDeactivated,
@@ -279,6 +283,9 @@ impl QuazarEventType {
             "ExchangeDeliveryConfirmed" => Ok(QuazarEventType::ExchangeDeliveryConfirmed),
             "ExchangeSettled" => Ok(QuazarEventType::ExchangeSettled),
             "ExchangeInventoryAdjusted" => Ok(QuazarEventType::ExchangeInventoryAdjusted),
+            "ExchangeNeedCreated" => Ok(QuazarEventType::ExchangeNeedCreated),
+            "ExchangeAgentListed" => Ok(QuazarEventType::ExchangeAgentListed),
+            "ExchangeAgentDeal" => Ok(QuazarEventType::ExchangeAgentDeal),
             "SvodServiceCreated" => Ok(QuazarEventType::SvodServiceCreated),
             "SvodServiceUpdated" => Ok(QuazarEventType::SvodServiceUpdated),
             "SvodServiceDeactivated" => Ok(QuazarEventType::SvodServiceDeactivated),
@@ -306,6 +313,7 @@ impl QuazarEventType {
             "ExchangeRequestCreated","ExchangeRequestVerified","ExchangeRequestRejected",
             "ExchangeListingOpened","ExchangeDealOpened","ExchangeDealCancelled",
             "ExchangeDeliveryConfirmed","ExchangeSettled","ExchangeInventoryAdjusted",
+            "ExchangeNeedCreated","ExchangeAgentListed","ExchangeAgentDeal",
             "SvodServiceCreated","SvodServiceUpdated","SvodServiceDeactivated",
         ]
     }

@@ -530,6 +530,24 @@ impl EventValidator {
                 Self::require_str(data, "svod_code")?;
                 Ok(())
             }
+            QuazarEventType::ExchangeNeedCreated => {
+                Self::require_str(data, "need_id")?;
+                Self::require_str(data, "citizen_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
+            QuazarEventType::ExchangeAgentListed => {
+                Self::require_str(data, "need_id")?;
+                Self::require_str(data, "listing_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
+            QuazarEventType::ExchangeAgentDeal => {
+                Self::require_str(data, "deal_id")?;
+                Self::require_str(data, "listing_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
             QuazarEventType::SvodServiceCreated
             | QuazarEventType::SvodServiceUpdated
             | QuazarEventType::SvodServiceDeactivated => {

@@ -309,6 +309,8 @@ fn client_ip(connect_info: Option<&ConnectInfo<SocketAddr>>) -> String {
 #[derive(Deserialize)]
 pub struct SendCodeRequest {
     pub email: String,
+    /// reCAPTCHA token — required when RECAPTCHA is configured (before email OTP).
+    pub captcha_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -362,6 +364,20 @@ pub async fn send_code_handler(
 
     let email = normalize_email(&req.email);
     let ip = client_ip(connect_info.as_ref());
+
+    // Phase D: reCAPTCHA before email OTP when configured.
+    if crate::applications::recaptcha_required() {
+        let token = req.captcha_token.as_deref().unwrap_or("").trim();
+        if token.is_empty() {
+            return response::bad_request("Пройдите reCAPTCHA перед отправкой кода");
+        }
+        if let Err(msg) =
+            crate::applications::verify_recaptcha_with_ip(token, Some(&ip)).await
+        {
+            tracing::warn!(error = %msg, "recaptcha verify failed on send-code");
+            return response::bad_request(msg);
+        }
+    }
 
     match email_belongs_to_citizen(&state.db, &email).await {
         Ok(true) => return citizen_use_app_forbidden(),

@@ -43,6 +43,9 @@ pub struct ServiceItem {
     pub is_active: bool,
     /// `development` | `implementation`
     pub work_kind: String,
+    /// `global` (Доступ содержит Г) | `local` (только Ст/Сд/М)
+    pub lot_scope: String,
+    pub access_roles: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,9 +126,19 @@ type SvodResult<T> = Result<T, SvodError>;
 // Table `service_catalog` stores Свод exchange positions (items). API never exposes "catalog".
 const SERVICE_SELECT: &str = "SELECT s.id, s.code, s.name, s.description, s.category_id,
     c.code AS category_code, c.name AS category_name,
-    s.base_price, s.min_quantity, s.max_quantity, s.is_active, s.work_kind
+    s.base_price, s.min_quantity, s.max_quantity, s.is_active, s.work_kind,
+    s.lot_scope, s.access_roles
     FROM service_catalog s
     LEFT JOIN service_categories c ON s.category_id = c.id";
+
+/// Lot scope from SVOD «Доступ»: Г → global (Агент СБ); иначе local (живой Страж).
+pub fn lot_scope_from_access(access: &[String]) -> &'static str {
+    if access.iter().any(|a| a == "Гражданин") {
+        "global"
+    } else {
+        "local"
+    }
+}
 
 /// Normalize and validate work_kind query/body values.
 pub fn normalize_work_kind(raw: &str) -> Result<String, SvodError> {
@@ -804,9 +817,16 @@ fn work_kind_from_heading(heading: &str) -> Option<&'static str> {
     }
 }
 
-fn row_is_item(unit: &str) -> bool {
+fn row_is_item(unit: &str, code: &str) -> bool {
     let u = norm_header(unit);
-    u.contains("позиц") || u.contains("бирж")
+    if u.contains("позиц") || u.contains("бирж") {
+        return true;
+    }
+    // Infra lots may use descriptive units (e.g. «1 месяц работы узла»).
+    matches!(
+        code.trim().to_uppercase().as_str(),
+        "NODE_MAINTENANCE"
+    )
 }
 
 /// Case-insensitive remove of a normalized needle; returns (remainder, found).
@@ -876,8 +896,17 @@ fn parse_access_cell(raw: &str) -> Result<(Vec<String>, bool), String> {
     Ok((access, auto_verify))
 }
 
-/// Validate header is exactly 4 columns: Позиция | Ставка (КВАЗИ) | Единица | Доступ.
-fn validate_svod_header(cells: &[String]) -> Result<(), String> {
+/// Column layout of a SVOD.md table.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SvodColLayout {
+    /// Позиция | Ставка (КВАЗИ) | Единица | Доступ
+    Classic,
+    /// Лот / Код | Единица | Цена (КВАЗИ) | Доступ
+    FlatLot,
+}
+
+/// Validate header is exactly 4 columns (classic or flat-lot layout).
+fn validate_svod_header(cells: &[String]) -> Result<SvodColLayout, String> {
     if cells.len() != 4 {
         return Err(format!(
             "SVOD.md table must have exactly 4 columns, got {}: {}",
@@ -889,17 +918,30 @@ fn validate_svod_header(cells: &[String]) -> Result<(), String> {
     let c1 = norm_header(&cells[1]);
     let c2 = norm_header(&cells[2]);
     let c3 = norm_header(&cells[3]);
+    let ok_access =
+        c3.contains("доступ") || c3.contains("access") || c3.contains("статус") || c3.contains("роль");
+
+    // Flat: Лот/Код | Единица | Цена (КВАЗИ) | Доступ
+    let flat0 = c0.contains("лот") || (c0.contains("код") && !c0.contains("позиц"));
+    let flat1 = c1.contains("единиц") || c1 == "unit";
+    let flat2 = c2.contains("цена") || c2.contains("ставк") || c2.contains("квази") || c2.contains("price");
+    if flat0 && flat1 && flat2 && ok_access {
+        return Ok(SvodColLayout::FlatLot);
+    }
+
+    // Classic: Позиция | Ставка | Единица | Доступ
     let ok0 = c0.contains("позиц") || c0.contains("код") || c0 == "code" || c0.contains("действи");
     let ok1 = c1.contains("ставк") || c1.contains("квази") || c1.contains("price") || c1.contains("reward");
     let ok2 = c2.contains("единиц") || c2 == "unit";
-    let ok3 = c3.contains("доступ") || c3.contains("access") || c3.contains("статус") || c3.contains("роль");
-    if !(ok0 && ok1 && ok2 && ok3) {
-        return Err(format!(
-            "SVOD.md expected headers Позиция | Ставка (КВАЗИ) | Единица | Доступ, got: {}",
-            cells.join(" | ")
-        ));
+    if ok0 && ok1 && ok2 && ok_access {
+        return Ok(SvodColLayout::Classic);
     }
-    Ok(())
+
+    Err(format!(
+        "SVOD.md expected 4 columns «Лот/Код | Единица | Цена (КВАЗИ) | Доступ» \
+         or «Позиция | Ставка (КВАЗИ) | Единица | Доступ», got: {}",
+        cells.join(" | ")
+    ))
 }
 
 /// Path for parsed SVOD JSON cache on the node.
@@ -916,12 +958,24 @@ pub fn write_svod_parsed_cache(json: &str) -> Result<(), String> {
     std::fs::write(&path, json).map_err(|e| format!("SVOD cache write {}: {e}", path.display()))
 }
 
-/// Parse `SVOD.md` (section tables × 4 columns) into lean items/rates JSON.
+fn default_work_kind_for_code(code: &str) -> &'static str {
+    let n = code.to_lowercase();
+    if n.contains("creative") || n.contains("idea") || n.contains("промт") || n.contains("concept")
+    {
+        WORK_KIND_DEVELOPMENT
+    } else {
+        WORK_KIND_IMPLEMENTATION
+    }
+}
+
+/// Parse `SVOD.md` (flat or sectioned 4-column tables) into lean items/rates JSON.
 pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
     let mut items: Vec<SvodParsedItem> = Vec::new();
     let mut rates: Vec<SvodParsedRate> = Vec::new();
     let mut current_kind = WORK_KIND_IMPLEMENTATION.to_string();
+    let mut section_sets_kind = false;
     let mut in_table = false;
+    let mut layout = SvodColLayout::Classic;
 
     for raw_line in md.lines() {
         let line = raw_line.trim();
@@ -933,6 +987,7 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
             let heading = rest.trim_start_matches('#').trim();
             if let Some(k) = work_kind_from_heading(heading) {
                 current_kind = k.to_string();
+                section_sets_kind = true;
             }
             in_table = false;
             continue;
@@ -952,7 +1007,7 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
         }
 
         if !in_table {
-            validate_svod_header(&cells)?;
+            layout = validate_svod_header(&cells)?;
             in_table = true;
             continue;
         }
@@ -969,22 +1024,41 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
         if code.is_empty() {
             continue;
         }
-        let amount = parse_amount_cell(&cells[1]).ok_or_else(|| {
-            format!("SVOD.md row `{code}`: missing numeric amount in column Ставка (КВАЗИ)")
-        })?;
-        let unit = cells[2].trim().to_string();
+
+        let (amount, unit) = match layout {
+            SvodColLayout::Classic => {
+                let amount = parse_amount_cell(&cells[1]).ok_or_else(|| {
+                    format!("SVOD.md row `{code}`: missing numeric amount in column Ставка (КВАЗИ)")
+                })?;
+                let unit = cells[2].trim().to_string();
+                (amount, unit)
+            }
+            SvodColLayout::FlatLot => {
+                let unit = cells[1].trim().to_string();
+                let amount = parse_amount_cell(&cells[2]).ok_or_else(|| {
+                    format!("SVOD.md row `{code}`: missing numeric amount in column Цена (КВАЗИ)")
+                })?;
+                (amount, unit)
+            }
+        };
         if unit.is_empty() {
             return Err(format!("SVOD.md row `{code}`: empty Единица"));
         }
         let (access, auto_verify) = parse_access_cell(&cells[3])
             .map_err(|e| format!("SVOD.md row `{code}`: {e}"))?;
 
-        if row_is_item(&unit) {
+        let work_kind = if section_sets_kind {
+            current_kind.clone()
+        } else {
+            default_work_kind_for_code(&code).to_string()
+        };
+
+        if row_is_item(&unit, &code) {
             items.push(SvodParsedItem {
                 code,
                 base_price: amount,
                 unit,
-                work_kind: current_kind.clone(),
+                work_kind,
                 access,
                 auto_verify,
             });
@@ -993,7 +1067,7 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
                 action: code,
                 reward: amount,
                 unit,
-                work_kind: current_kind.clone(),
+                work_kind,
                 access,
                 auto_verify,
             });
@@ -1041,10 +1115,12 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
             .await
             .map_err(|e| e.to_string())?;
 
+        let lot_scope = lot_scope_from_access(&item.access);
         sqlx::query(
             "INSERT INTO service_catalog
-                (code, name, description, category_id, base_price, min_quantity, max_quantity, work_kind, is_active, updated_at)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,TRUE,NOW())
+                (code, name, description, category_id, base_price, min_quantity, max_quantity,
+                 work_kind, lot_scope, access_roles, is_active, updated_at)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,TRUE,NOW())
              ON CONFLICT (code) DO UPDATE SET
                 name = EXCLUDED.name,
                 description = EXCLUDED.description,
@@ -1053,6 +1129,8 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
                 min_quantity = EXCLUDED.min_quantity,
                 max_quantity = EXCLUDED.max_quantity,
                 work_kind = EXCLUDED.work_kind,
+                lot_scope = EXCLUDED.lot_scope,
+                access_roles = EXCLUDED.access_roles,
                 is_active = EXCLUDED.is_active,
                 updated_at = NOW()",
         )
@@ -1064,6 +1142,8 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
         .bind(1_i64)
         .bind(100_i64)
         .bind(&work_kind)
+        .bind(lot_scope)
+        .bind(&item.access)
         .execute(pool)
         .await
         .map_err(|e| format!("svod item {code}: {e}"))?;
@@ -1197,6 +1277,40 @@ mod tests {
     }
 
     #[test]
+    fn parse_svod_flat_lot_table() {
+        let md = r#"
+# ГОСУДАРСТВЕННЫЙ СВОД ВОЗНАГРАЖДЕНИЙ КВАЗАРА
+
+## 2. ТАБЛИЦА ЛОТОВ
+
+| Лот / Код | Единица | Цена (КВАЗИ) | Доступ |
+|-----------|---------|--------------|--------|
+| CREATIVE_CONCEPT | позиция биржи | 80 | Г, Ст, Сд, М |
+| WEB_DEV | позиция биржи | 100 | Г, Ст, Сд, М |
+| idea_submit | 1 идея / тема | 30 | Г, Ст, Сд, М |
+| video_view | 10 просмотров | 10 | Г |
+| node_maintenance | 1 месяц работы узла | 50 | М |
+"#;
+        let json = parse_svod_markdown(md).expect("parse flat");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let items = v["items"].as_array().unwrap();
+        let rates = v["rates"].as_array().unwrap();
+        assert_eq!(items.len(), 3);
+        assert_eq!(rates.len(), 2);
+        assert_eq!(items[0]["code"], "CREATIVE_CONCEPT");
+        assert_eq!(items[0]["base_price"], 80);
+        assert_eq!(items[0]["work_kind"], "development");
+        assert_eq!(items[1]["code"], "WEB_DEV");
+        assert_eq!(items[1]["base_price"], 100);
+        assert_eq!(items[2]["code"], "node_maintenance");
+        assert_eq!(items[2]["base_price"], 50);
+        assert_eq!(rates[0]["action"], "idea_submit");
+        assert_eq!(rates[0]["reward"], 30);
+        assert_eq!(rates[1]["action"], "video_view");
+        assert_eq!(rates[1]["auto_verify"], false);
+    }
+
+    #[test]
     fn parse_svod_rejects_wrong_column_count() {
         let md = r#"
 ## Разработка
@@ -1212,5 +1326,15 @@ mod tests {
     fn parse_svod_rejects_empty_tables() {
         let md = "# Empty\n\nno tables here\n";
         assert!(parse_svod_markdown(md).is_err());
+    }
+
+    #[test]
+    fn lot_scope_from_access_citizen_is_global() {
+        assert_eq!(
+            lot_scope_from_access(&["Гражданин".into(), "Страж".into()]),
+            "global"
+        );
+        assert_eq!(lot_scope_from_access(&["Страж".into(), "Мэр".into()]), "local");
+        assert_eq!(lot_scope_from_access(&["Мэр".into()]), "local");
     }
 }

@@ -601,7 +601,7 @@ impl AuthContext {
             && matches!(self.role, Role::Guardian | Role::Founder)
     }
 
-    /// Биржа и агенты СБ: только Страж и выше (КВА / Свод).
+    /// Биржа (заявки sell/buy через СБ) и агенты СБ: только Страж и выше (КВА / Свод).
     pub fn can_use_exchange(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
@@ -609,6 +609,31 @@ impl AuthContext {
                 self.role,
                 Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder
             )
+    }
+
+    /// Потребность → Агент Биржи: активный гражданин и выше (не агент).
+    pub fn can_express_exchange_need(&self) -> bool {
+        self.has_system_access()
+            && !self.role.is_agent()
+            && matches!(
+                self.role,
+                Role::Citizen
+                    | Role::Guardian
+                    | Role::Judge
+                    | Role::Mayor
+                    | Role::Aiya
+                    | Role::Founder
+            )
+    }
+
+    /// Открыть сделку по лоту Агента Биржи (государство): гражданин и выше.
+    pub fn can_open_state_deal(&self) -> bool {
+        self.can_express_exchange_need()
+    }
+
+    /// Секретарь (Agent) может подать потребность от имени гражданина.
+    pub fn can_submit_need_for_citizen(&self) -> bool {
+        self.has_system_access() && self.role.is_agent()
     }
 
     /// Update citizen status — Founder and Aiya only.
@@ -646,8 +671,10 @@ impl AuthContext {
     }
 
     /// Judge approval: Agent → Citizen + passport.
+    /// Approve Agent → Citizen + passport: Judge or Секретарь (Agent).
     pub fn can_approve_citizen(&self) -> bool {
-        self.has_system_access() && self.role == Role::Judge
+        self.has_system_access()
+            && (self.role == Role::Judge || self.role.is_agent())
     }
 
     pub fn can_change_citizen_role(&self) -> bool {
@@ -974,6 +1001,21 @@ mod tests {
     }
 
     #[test]
+    fn exchange_need_citizen_and_agent_secretary() {
+        assert!(ctx(Role::Citizen).can_express_exchange_need());
+        assert!(ctx(Role::Citizen).can_open_state_deal());
+        assert!(!ctx(Role::Citizen).can_use_exchange());
+        assert!(!ctx(Role::Citizen).can_submit_need_for_citizen());
+
+        assert!(ctx(Role::Guardian).can_express_exchange_need());
+        assert!(ctx(Role::Guardian).can_use_exchange());
+
+        assert!(!ctx(Role::Candidate).can_express_exchange_need());
+        assert!(!ctx(Role::Agent).can_express_exchange_need());
+        assert!(ctx(Role::Agent).can_submit_need_for_citizen());
+    }
+
+    #[test]
     fn can_manage_peers_founder_and_aiya_only() {
         assert!(ctx(Role::Founder).can_manage_peers());
         assert!(ctx(Role::Aiya).can_manage_peers());
@@ -1094,10 +1136,10 @@ mod tests {
         assert!(!ctx(Role::Candidate).can_verify_agent());
 
         assert!(ctx(Role::Judge).can_approve_citizen());
+        assert!(ctx(Role::Agent).can_approve_citizen());
         assert!(!ctx(Role::Founder).can_approve_citizen());
         assert!(!ctx(Role::Guardian).can_approve_citizen());
         assert!(!ctx(Role::Aiya).can_approve_citizen());
-        assert!(!ctx(Role::Agent).can_approve_citizen());
         assert!(!ctx(Role::Citizen).can_approve_citizen());
         assert!(!ctx(Role::Candidate).can_approve_citizen());
     }
