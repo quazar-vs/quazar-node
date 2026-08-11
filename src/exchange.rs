@@ -84,6 +84,28 @@ fn now() -> i64 {
     Utc::now().timestamp()
 }
 
+/// Default listing TTL (30 days) unless `EXCHANGE_DEFAULT_SHELF_LIFE_SECS` is set.
+pub const DEFAULT_SHELF_LIFE_SECS: i64 = 2_592_000;
+
+pub fn default_shelf_life_secs() -> i64 {
+    std::env::var("EXCHANGE_DEFAULT_SHELF_LIFE_SECS")
+        .ok()
+        .and_then(|s| s.parse::<i64>().ok())
+        .filter(|&v| v > 0)
+        .unwrap_or(DEFAULT_SHELF_LIFE_SECS)
+}
+
+fn resolve_expires_at(shelf_life_secs: Option<i64>, from_ts: i64) -> i64 {
+    let secs = shelf_life_secs
+        .filter(|&s| s > 0)
+        .unwrap_or_else(default_shelf_life_secs);
+    from_ts.saturating_add(secs)
+}
+
+fn remaining_shelf_life_secs(expires_at: Option<i64>, now_ts: i64) -> Option<i64> {
+    expires_at.map(|e| (e - now_ts).max(0))
+}
+
 /// Available local stock at a node (qty − reserved).
 async fn node_lot_available(
     pool: &PgPool,
@@ -122,45 +144,77 @@ async fn ensure_node_lot_row(
 
 /// Seed demo export stock so «Экспорт» is visible when local city has 0.
 async fn seed_export_demo_if_needed(pool: &PgPool, local_node: &str) -> ExchangeResult<()> {
+    let peer = "node-export-demo";
+    if peer == local_node {
+        return Ok(());
+    }
     let has_any: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM node_lot_balances WHERE qty > reserved)",
     )
     .fetch_one(pool)
     .await
     .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-    if has_any {
-        return Ok(());
-    }
-    let peer = "node-export-demo";
-    if peer == local_node {
-        return Ok(());
-    }
     let ts = now();
-    for (code, qty) in [("video_create", 3_i64), ("review", 2), ("code_commit", 1)] {
-        sqlx::query(
-            "INSERT INTO node_lot_balances (node_id, svod_code, qty, reserved, updated_at)
-             VALUES ($1, $2, $3, 0, $4)
-             ON CONFLICT (node_id, svod_code) DO UPDATE
-             SET qty = GREATEST(node_lot_balances.qty, EXCLUDED.qty), updated_at = EXCLUDED.updated_at",
-        )
-        .bind(peer)
-        .bind(code)
-        .bind(qty)
-        .bind(ts)
-        .execute(pool)
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-        sqlx::query(
-            "INSERT INTO node_lot_balances (node_id, svod_code, qty, reserved, updated_at)
-             VALUES ($1, $2, 0, 0, $3)
-             ON CONFLICT (node_id, svod_code) DO NOTHING",
-        )
-        .bind(local_node)
-        .bind(code)
-        .bind(ts)
-        .execute(pool)
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+    if !has_any {
+        for (code, qty, price) in [
+            ("video_create", 3_i64, 50_i64),
+            ("review", 2, 20),
+            ("code_commit", 1, 100),
+        ] {
+            sqlx::query(
+                "INSERT INTO node_lot_balances (node_id, svod_code, qty, reserved, updated_at)
+                 VALUES ($1, $2, $3, 0, $4)
+                 ON CONFLICT (node_id, svod_code) DO UPDATE
+                 SET qty = GREATEST(node_lot_balances.qty, EXCLUDED.qty), updated_at = EXCLUDED.updated_at",
+            )
+            .bind(peer)
+            .bind(code)
+            .bind(qty)
+            .bind(ts)
+            .execute(pool)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+            sqlx::query(
+                "INSERT INTO node_lot_balances (node_id, svod_code, qty, reserved, updated_at)
+                 VALUES ($1, $2, 0, 0, $3)
+                 ON CONFLICT (node_id, svod_code) DO NOTHING",
+            )
+            .bind(local_node)
+            .bind(code)
+            .bind(ts)
+            .execute(pool)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+            let _ = upsert_local_city_listing(pool, peer, code, qty, price, None).await?;
+        }
+        return Ok(());
+    }
+
+    // Ensure active listings exist for any peer stock without a live listing.
+    let rows: Vec<(String, String, i64)> = sqlx::query_as(
+        "SELECT b.node_id, b.svod_code, (b.qty - b.reserved)
+         FROM node_lot_balances b
+         JOIN service_catalog s ON s.code = b.svod_code AND s.lot_scope = 'local' AND s.is_active
+         WHERE (b.qty - b.reserved) > 0",
+    )
+    .fetch_all(pool)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+    for (node_id, code, avail) in rows {
+        let has_listing = active_local_listing_meta(pool, &node_id, &code, ts)
+            .await?
+            .is_some();
+        if !has_listing {
+            let price: i64 = sqlx::query_scalar(
+                "SELECT base_price FROM service_catalog WHERE code = $1",
+            )
+            .bind(&code)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+            .unwrap_or(1);
+            let _ = upsert_local_city_listing(pool, &node_id, &code, avail, price, None).await?;
+        }
     }
     Ok(())
 }
@@ -346,6 +400,8 @@ pub struct CreateNeedBody {
     pub citizen_id: Option<String>,
     /// Кто подал: `api` | `secretary` (информативно).
     pub via: Option<String>,
+    /// TTL лота в секундах (Агент Биржи). Иначе дефолт ядра.
+    pub shelf_life_secs: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -396,6 +452,7 @@ async fn exchange_agent_list_need(
     qty: i64,
     unit_svod: i64,
     initiator: &str,
+    shelf_life_secs: Option<i64>,
 ) -> ExchangeResult<(String, i64)> {
     let mut tx = state
         .db
@@ -450,6 +507,7 @@ async fn exchange_agent_list_need(
     let unit_buyer = buyer_unit_price(unit_svod);
     let unit_seller = seller_unit_price(unit_svod);
     let ts = now();
+    let expires_at = resolve_expires_at(shelf_life_secs, ts);
 
     let listing_id = if let Some((lid, rem)) = existing {
         sqlx::query(
@@ -459,14 +517,17 @@ async fn exchange_agent_list_need(
                unit_buyer_price = $2,
                unit_seller_price = $3,
                lot_scope = $4,
-               updated_at = $5
-             WHERE id = $6",
+               updated_at = $5,
+               expires_at = COALESCE(expires_at, $6),
+               status = 'active'
+             WHERE id = $7",
         )
         .bind(qty)
         .bind(unit_buyer)
         .bind(unit_seller)
         .bind(&lot_scope)
         .bind(ts)
+        .bind(expires_at)
         .bind(&lid)
         .execute(&mut *tx)
         .await
@@ -495,8 +556,8 @@ async fn exchange_agent_list_need(
             "INSERT INTO exchange_listings
              (id, request_id, seller_id, svod_code, qty_total, qty_remaining,
               unit_svod, unit_buyer_price, unit_seller_price, status, created_at, updated_at,
-              is_state_agent, lot_scope)
-             VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,'active',$9,$9,TRUE,$10)",
+              is_state_agent, lot_scope, expires_at)
+             VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,'active',$9,$9,TRUE,$10,$11)",
         )
         .bind(&lid)
         .bind(&request_id)
@@ -507,7 +568,8 @@ async fn exchange_agent_list_need(
         .bind(unit_buyer)
         .bind(unit_seller)
         .bind(ts)
-        .bind(lot_scope)
+        .bind(&lot_scope)
+        .bind(expires_at)
         .execute(&mut *tx)
         .await
         .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
@@ -661,6 +723,7 @@ pub async fn create_need(
         qty,
         unit_svod,
         &auth.citizen_name,
+        body.shelf_life_secs,
     )
     .await?;
 
@@ -676,6 +739,8 @@ pub async fn create_need(
         "seller_id": STATE_RESERVE_ID,
         "seller_name": FOUNDER_DISPLAY_NAME,
         "reserve_balance": reserve_balance,
+        "shelf_life_secs": body.shelf_life_secs.unwrap_or_else(default_shelf_life_secs),
+        "expires_at": resolve_expires_at(body.shelf_life_secs, now()),
         "agent": "exchange",
         "next": format!("POST /exchange/listings/{listing_id}/buy"),
         "note": "Сделка завершается после подтверждения Агентом СБ",
@@ -1134,6 +1199,7 @@ pub async fn sb_verify_request(
     .await
     .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
     .unwrap_or_else(|| "global".into());
+    let expires_at = resolve_expires_at(None, ts);
 
     sqlx::query(
         "UPDATE exchange_requests SET status = 'accepted', listing_id = $1, updated_at = $2 WHERE id = $3",
@@ -1148,8 +1214,8 @@ pub async fn sb_verify_request(
     sqlx::query(
         "INSERT INTO exchange_listings
          (id, request_id, seller_id, svod_code, qty_total, qty_remaining, unit_svod,
-          unit_buyer_price, unit_seller_price, status, created_at, updated_at, lot_scope)
-         VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,'active',$9,$9,$10)",
+          unit_buyer_price, unit_seller_price, status, created_at, updated_at, lot_scope, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,'active',$9,$9,$10,$11)",
     )
     .bind(&listing_id)
     .bind(&id)
@@ -1161,6 +1227,7 @@ pub async fn sb_verify_request(
     .bind(unit_seller)
     .bind(ts)
     .bind(&lot_scope)
+    .bind(expires_at)
     .execute(&mut *tx)
     .await
     .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
@@ -1277,6 +1344,7 @@ pub async fn list_listings(
     // Global / state-agent listings (and classic listings).
     let include_global = effective_scope.as_deref() != Some("local");
     let mut listings = Vec::new();
+    let now_ts = now();
     if include_global {
         let rows = sqlx::query_as::<
             _,
@@ -1295,17 +1363,20 @@ pub async fn list_listings(
                 String,
                 bool,
                 String,
+                Option<i64>,
             ),
         >(
             "SELECT l.id, l.request_id, l.seller_id, l.svod_code, l.qty_total, l.qty_remaining,
                     l.unit_svod, l.unit_buyer_price, l.unit_seller_price, l.status, l.created_at,
                     COALESCE(s.work_kind, 'implementation') AS work_kind,
                     l.is_state_agent,
-                    COALESCE(l.lot_scope, 'global') AS lot_scope
+                    COALESCE(l.lot_scope, 'global') AS lot_scope,
+                    l.expires_at
              FROM exchange_listings l
              LEFT JOIN service_catalog s ON s.code = l.svod_code
              WHERE l.status = $1
                AND COALESCE(l.lot_scope, 'global') = 'global'
+               AND (l.expires_at IS NULL OR l.expires_at > $5)
                AND ($2::text IS NULL OR COALESCE(s.work_kind, 'implementation') = $2)
                AND ($3::text IS NULL OR l.svod_code = $3)
                AND ($4::bigint IS NULL OR l.unit_buyer_price <= $4)
@@ -1315,11 +1386,13 @@ pub async fn list_listings(
         .bind(work_kind.as_deref())
         .bind(svod_code.as_deref())
         .bind(max_price)
+        .bind(now_ts)
         .fetch_all(&state.db)
         .await
         .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
 
         for r in rows {
+            let rem = remaining_shelf_life_secs(r.14, now_ts);
             listings.push(json!({
                 "id": r.0,
                 "request_id": r.1,
@@ -1339,6 +1412,8 @@ pub async fn list_listings(
                 "confirm_mode": "agent_sb",
                 "display_status": null,
                 "is_export": false,
+                "expires_at": r.14,
+                "shelf_life_secs": rem,
                 "seller_name": if r.12 { Some(FOUNDER_DISPLAY_NAME) } else { None },
                 "side": "sell",
                 "side_semantics": if r.12 { "state_agent_listing" } else { "state_mediated_listing" },
@@ -1349,7 +1424,8 @@ pub async fn list_listings(
         }
     }
 
-    // Local board: city stock + Export from other cities (Guardian+).
+    // Local board: city stock + Export from other cities (Guardian+ only).
+    // Variant A: only active non-expired listings appear on the board.
     let include_local = can_local && effective_scope.as_deref() != Some("global");
     if include_local {
         let _ = seed_export_demo_if_needed(&state.db, &view_node).await;
@@ -1376,37 +1452,48 @@ pub async fn list_listings(
             let access_short = access_roles_short(&access);
             let local_qty = node_lot_available(&state.db, &view_node, &code).await?;
             if local_qty > 0 {
-                listings.push(json!({
-                    "id": format!("local:{view_node}:{code}"),
-                    "request_id": null,
-                    "seller_id": STATE_RESERVE_ID,
-                    "svod_code": code,
-                    "name": name,
-                    "qty_total": local_qty,
-                    "qty_remaining": local_qty,
-                    "unit_svod": base_price,
-                    "unit_buyer_price": base_price,
-                    "unit_seller_price": base_price,
-                    "status": "active",
-                    "created_at": now(),
-                    "work_kind": wk,
-                    "work_kind_label": svod::work_kind_label(&wk),
-                    "is_state_agent": true,
-                    "lot_scope": "local",
-                    "confirm_mode": "live_guardian",
-                    "display_status": "Локальный",
-                    "is_export": false,
-                    "node_id": view_node,
-                    "owner_node_id": view_node,
-                    "access": access.clone(),
-                    "access_short": access_short.clone(),
-                    "seller_name": FOUNDER_DISPLAY_NAME,
-                    "side": "sell",
-                    "side_semantics": "local_city_stock",
-                    "mode": "offers",
-                    "role_hint": "offers",
-                    "price_note": "Цена Свода (без наценок)",
-                }));
+                if let Some((lid, exp)) =
+                    active_local_listing_meta(&state.db, &view_node, &code, now_ts).await?
+                {
+                    let rem = remaining_shelf_life_secs(exp, now_ts);
+                    let days = rem.map(|s| (s + 86399) / 86400).unwrap_or(0);
+                    listings.push(json!({
+                        "id": lid,
+                        "request_id": null,
+                        "seller_id": STATE_RESERVE_ID,
+                        "svod_code": code,
+                        "name": name,
+                        "qty_total": local_qty,
+                        "qty_remaining": local_qty,
+                        "unit_svod": base_price,
+                        "unit_buyer_price": base_price,
+                        "unit_seller_price": base_price,
+                        "status": "active",
+                        "created_at": now_ts,
+                        "work_kind": wk,
+                        "work_kind_label": svod::work_kind_label(&wk),
+                        "is_state_agent": true,
+                        "lot_scope": "local",
+                        "confirm_mode": "live_guardian",
+                        "display_status": "Локальный",
+                        "is_export": false,
+                        "node_id": view_node,
+                        "owner_node_id": view_node,
+                        "access": access.clone(),
+                        "access_short": access_short.clone(),
+                        "expires_at": exp,
+                        "shelf_life_secs": rem,
+                        "seller_name": FOUNDER_DISPLAY_NAME,
+                        "side": "sell",
+                        "side_semantics": "local_city_stock",
+                        "mode": "offers",
+                        "role_hint": "offers",
+                        "price_note": "Цена Свода (без наценок)",
+                        "ui_line": format!(
+                            "Лот: {code} | Цена: {base_price} КВАЗИ | Доступ: {access_short} | Статус: Локальный | Осталось: {days} дн."
+                        ),
+                    }));
+                }
                 continue;
             }
 
@@ -1423,8 +1510,15 @@ pub async fn list_listings(
             .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
 
             for (owner_node, avail) in owners {
+                let Some((lid, exp)) =
+                    active_local_listing_meta(&state.db, &owner_node, &code, now_ts).await?
+                else {
+                    continue;
+                };
+                let rem = remaining_shelf_life_secs(exp, now_ts);
+                let days = rem.map(|s| (s + 86399) / 86400).unwrap_or(0);
                 listings.push(json!({
-                    "id": format!("export:{owner_node}:{code}"),
+                    "id": lid,
                     "request_id": null,
                     "seller_id": STATE_RESERVE_ID,
                     "svod_code": code.clone(),
@@ -1435,7 +1529,7 @@ pub async fn list_listings(
                     "unit_buyer_price": base_price,
                     "unit_seller_price": base_price,
                     "status": "active",
-                    "created_at": now(),
+                    "created_at": now_ts,
                     "work_kind": wk.clone(),
                     "work_kind_label": svod::work_kind_label(&wk),
                     "is_state_agent": true,
@@ -1448,6 +1542,8 @@ pub async fn list_listings(
                     "owner_city_hint": format!("Город-владелец: {owner_node}"),
                     "access": access.clone(),
                     "access_short": access_short.clone(),
+                    "expires_at": exp,
+                    "shelf_life_secs": rem,
                     "seller_name": FOUNDER_DISPLAY_NAME,
                     "side": "sell",
                     "side_semantics": "export_from_other_city",
@@ -1455,7 +1551,7 @@ pub async fn list_listings(
                     "role_hint": "offers",
                     "price_note": "Цена Свода — без доставки и межгородской комиссии",
                     "ui_line": format!(
-                        "Лот: {code} | Цена: {base_price} КВАЗИ | Доступ: {access_short} | Статус: Экспорт"
+                        "Лот: {code} | Цена: {base_price} КВАЗИ | Доступ: {access_short} | Статус: Экспорт (г. {owner_node}) | Осталось: {days} дн."
                     ),
                 }));
             }
@@ -1463,6 +1559,121 @@ pub async fn list_listings(
     }
 
     Ok(Json(ApiResponse::success(listings)))
+}
+
+async fn active_local_listing_meta(
+    pool: &PgPool,
+    node_id: &str,
+    svod_code: &str,
+    now_ts: i64,
+) -> ExchangeResult<Option<(String, Option<i64>)>> {
+    let row: Option<(String, Option<i64>)> = sqlx::query_as(
+        "SELECT id, expires_at FROM exchange_listings
+         WHERE lot_scope = 'local' AND status = 'active' AND node_id = $1 AND svod_code = $2
+           AND (expires_at IS NULL OR expires_at > $3)
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(node_id)
+    .bind(svod_code)
+    .bind(now_ts)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+    Ok(row)
+}
+
+/// Upsert a city listing for local stock (Variant A: listed → has expires_at).
+async fn upsert_local_city_listing(
+    pool: &PgPool,
+    node_id: &str,
+    svod_code: &str,
+    qty: i64,
+    unit_svod: i64,
+    shelf_life_secs: Option<i64>,
+) -> ExchangeResult<String> {
+    let ts = now();
+    let expires_at = resolve_expires_at(shelf_life_secs, ts);
+    if qty <= 0 {
+        sqlx::query(
+            "UPDATE exchange_listings SET status = 'expired', updated_at = $1
+             WHERE lot_scope = 'local' AND node_id = $2 AND svod_code = $3 AND status = 'active'",
+        )
+        .bind(ts)
+        .bind(node_id)
+        .bind(svod_code)
+        .execute(pool)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        return Ok(String::new());
+    }
+
+    let existing: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM exchange_listings
+         WHERE lot_scope = 'local' AND node_id = $1 AND svod_code = $2 AND status = 'active'
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(node_id)
+    .bind(svod_code)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+    if let Some(lid) = existing {
+        sqlx::query(
+            "UPDATE exchange_listings SET qty_total = $1, qty_remaining = $1,
+             unit_svod = $2, unit_buyer_price = $2, unit_seller_price = $2,
+             updated_at = $3, expires_at = COALESCE(expires_at, $4)
+             WHERE id = $5",
+        )
+        .bind(qty)
+        .bind(unit_svod)
+        .bind(ts)
+        .bind(expires_at)
+        .bind(&lid)
+        .execute(pool)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        return Ok(lid);
+    }
+
+    let request_id = format!("exreq_{}", Uuid::new_v4());
+    let lid = format!("exlist_{}", Uuid::new_v4());
+    sqlx::query(
+        "INSERT INTO exchange_requests
+         (id, citizen_id, side, svod_code, qty_total, qty_remaining, unit_svod, status, listing_id, created_at, updated_at)
+         VALUES ($1,$2,'sell',$3,$4,$4,$5,'accepted',$6,$7,$7)",
+    )
+    .bind(&request_id)
+    .bind(STATE_RESERVE_ID)
+    .bind(svod_code)
+    .bind(qty)
+    .bind(unit_svod)
+    .bind(&lid)
+    .bind(ts)
+    .execute(pool)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+    sqlx::query(
+        "INSERT INTO exchange_listings
+         (id, request_id, seller_id, svod_code, qty_total, qty_remaining,
+          unit_svod, unit_buyer_price, unit_seller_price, status, created_at, updated_at,
+          is_state_agent, lot_scope, node_id, expires_at)
+         VALUES ($1,$2,$3,$4,$5,$5,$6,$6,$6,'active',$7,$7,TRUE,'local',$8,$9)",
+    )
+    .bind(&lid)
+    .bind(&request_id)
+    .bind(STATE_RESERVE_ID)
+    .bind(svod_code)
+    .bind(qty)
+    .bind(unit_svod)
+    .bind(ts)
+    .bind(node_id)
+    .bind(expires_at)
+    .execute(pool)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+    Ok(lid)
 }
 
 fn access_roles_short(access: &[String]) -> String {
@@ -1483,6 +1694,144 @@ fn access_roles_short(access: &[String]) -> String {
         "Ст+".into()
     } else {
         parts.join(", ")
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct ExtendListingBody {
+    pub shelf_life_secs: i64,
+}
+
+/// POST /exchange/listings/:id/extend — продление TTL до истечения (Агент Биржи / Страж+).
+pub async fn extend_listing(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(listing_id): Path<String>,
+    Json(body): Json<ExtendListingBody>,
+) -> ExchangeResult<Json<ApiResponse>> {
+    if !(auth.can_submit_need_for_citizen()
+        || auth.can_exchange_security()
+        || auth.can_add_balance())
+    {
+        return Err(ExchangeError::Unauthorized(
+            "Продление лота — Агент Биржи / Страж / Айя".into(),
+        ));
+    }
+    if body.shelf_life_secs <= 0 {
+        return Err(ExchangeError::BadRequest(
+            "shelf_life_secs must be > 0".into(),
+        ));
+    }
+
+    let row: Option<(String, String, Option<i64>, String)> = sqlx::query_as(
+        "SELECT id, status, expires_at, svod_code FROM exchange_listings WHERE id = $1",
+    )
+    .bind(&listing_id)
+    .fetch_optional(&state.db)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+    let Some((lid, status, expires_at, svod_code)) = row else {
+        return Err(ExchangeError::NotFound("listing not found".into()));
+    };
+    let ts = now();
+    if status != "active" || expires_at.map(|e| e <= ts).unwrap_or(false) {
+        return Err(ExchangeError::BadRequest(
+            "Lot already expired, please re-list".into(),
+        ));
+    }
+    let base = expires_at.unwrap_or(ts).max(ts);
+    let new_exp = base.saturating_add(body.shelf_life_secs);
+    sqlx::query(
+        "UPDATE exchange_listings SET expires_at = $1, updated_at = $2 WHERE id = $3",
+    )
+    .bind(new_exp)
+    .bind(ts)
+    .bind(&lid)
+    .execute(&state.db)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+    emit_event(
+        &state,
+        "HermesExternalAction",
+        &auth.citizen_name,
+        "Listing shelf life extended",
+        format!("{svod_code} +{}s → {new_exp}", body.shelf_life_secs),
+        &format!("evt_extend_{lid}"),
+        json!({
+            "action": "listing_extended",
+            "source": "exchange",
+            "listing_id": lid,
+            "svod_code": svod_code,
+            "shelf_life_secs": body.shelf_life_secs,
+            "expires_at": new_exp,
+        }),
+    )
+    .await?;
+
+    Ok(Json(ApiResponse::success(json!({
+        "listing_id": lid,
+        "expires_at": new_exp,
+        "shelf_life_secs": remaining_shelf_life_secs(Some(new_exp), ts),
+        "status": "active",
+    }))))
+}
+
+/// Expire active listings past expires_at. Does NOT touch node_lot_balances.
+pub async fn expire_due_listings(state: &Arc<AppState>) -> Result<u64, String> {
+    let ts = now();
+    let rows: Vec<(String, String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT id, svod_code, lot_scope, node_id FROM exchange_listings
+         WHERE status = 'active' AND expires_at IS NOT NULL AND expires_at <= $1",
+    )
+    .bind(ts)
+    .fetch_all(&state.db)
+    .await
+    .map_err(|e| e.to_string())?;
+
+    let mut n = 0u64;
+    for (lid, svod_code, lot_scope, node_id) in rows {
+        sqlx::query(
+            "UPDATE exchange_listings SET status = 'expired', updated_at = $1 WHERE id = $2",
+        )
+        .bind(ts)
+        .bind(&lid)
+        .execute(&state.db)
+        .await
+        .map_err(|e| e.to_string())?;
+
+        let _ = emit_event(
+            state,
+            "LotExpired",
+            "exchange_agent",
+            "Lot expired (shelf_life)",
+            format!("{svod_code} listing {lid}"),
+            &format!("evt_lotexp_{lid}"),
+            json!({
+                "listing_id": lid,
+                "svod_code": svod_code,
+                "lot_scope": lot_scope,
+                "node_id": node_id,
+                "expired_at": ts,
+                "node_balances_untouched": true,
+            }),
+        )
+        .await;
+        n += 1;
+    }
+    Ok(n)
+}
+
+/// Background: every 5 minutes expire due listings.
+pub async fn background_listing_expiry(state: Arc<AppState>) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(300));
+    loop {
+        interval.tick().await;
+        match expire_due_listings(&state).await {
+            Ok(0) => {}
+            Ok(n) => tracing::info!(expired = n, "exchange listings expired (shelf_life)"),
+            Err(e) => tracing::warn!(error = %e, "exchange listing expiry failed"),
+        }
     }
 }
 
@@ -1552,6 +1901,22 @@ pub async fn buy_listing(
         return Err(ExchangeError::BadRequest(format!(
             "listing status is {status}"
         )));
+    }
+    // Expiry check (shelf_life)
+    let expires_at: Option<i64> = sqlx::query_scalar(
+        "SELECT expires_at FROM exchange_listings WHERE id = $1",
+    )
+    .bind(&lid)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+    .flatten();
+    if let Some(exp) = expires_at {
+        if exp <= now() {
+            return Err(ExchangeError::BadRequest(
+                "Lot already expired, please re-list".into(),
+            ));
+        }
     }
     if seller_id == buyer_id {
         return Err(ExchangeError::BadRequest("cannot buy own listing".into()));
@@ -2837,6 +3202,7 @@ pub struct NodeLotAdjustBody {
     pub svod_code: String,
     pub quantity: i64,
     pub reason: Option<String>,
+    pub shelf_life_secs: Option<i64>,
 }
 
 /// POST /exchange/node-lots — Страж/Айя выставляет остаток локального лота в городе.
@@ -2878,6 +3244,17 @@ pub async fn adjust_node_lot(
     .await
     .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
 
+    let listing_id = upsert_local_city_listing(
+        &state.db,
+        node_id,
+        &service.code,
+        body.quantity,
+        service.base_price,
+        body.shelf_life_secs,
+    )
+    .await?;
+
+    let actor = auth.resolve_account_id(&state.db).await;
     emit_event(
         &state,
         "ExchangeInventoryAdjusted",
@@ -2886,11 +3263,14 @@ pub async fn adjust_node_lot(
         format!("{} @ {} = {}", service.code, node_id, body.quantity),
         &format!("evt_nodelot_{}", Uuid::new_v4()),
         json!({
+            "citizen_id": actor,
             "node_id": node_id,
             "svod_code": service.code,
             "quantity": body.quantity,
             "reason": body.reason,
             "lot_scope": "local",
+            "listing_id": listing_id,
+            "expires_at": resolve_expires_at(body.shelf_life_secs, ts),
         }),
     )
     .await?;
@@ -2900,6 +3280,9 @@ pub async fn adjust_node_lot(
         "svod_code": service.code,
         "quantity": body.quantity,
         "unit_svod": service.base_price,
+        "listing_id": listing_id,
+        "expires_at": resolve_expires_at(body.shelf_life_secs, ts),
+        "shelf_life_secs": body.shelf_life_secs.unwrap_or_else(default_shelf_life_secs),
     }))))
 }
 

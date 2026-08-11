@@ -204,6 +204,7 @@ pub enum QuazarEventType {
     ExchangeNeedCreated,
     ExchangeAgentListed,
     ExchangeAgentDeal,
+    LotExpired,
     SvodServiceCreated,
     SvodServiceUpdated,
     SvodServiceDeactivated,
@@ -286,6 +287,7 @@ impl QuazarEventType {
             "ExchangeNeedCreated" => Ok(QuazarEventType::ExchangeNeedCreated),
             "ExchangeAgentListed" => Ok(QuazarEventType::ExchangeAgentListed),
             "ExchangeAgentDeal" => Ok(QuazarEventType::ExchangeAgentDeal),
+            "LotExpired" => Ok(QuazarEventType::LotExpired),
             "SvodServiceCreated" => Ok(QuazarEventType::SvodServiceCreated),
             "SvodServiceUpdated" => Ok(QuazarEventType::SvodServiceUpdated),
             "SvodServiceDeactivated" => Ok(QuazarEventType::SvodServiceDeactivated),
@@ -313,7 +315,7 @@ impl QuazarEventType {
             "ExchangeRequestCreated","ExchangeRequestVerified","ExchangeRequestRejected",
             "ExchangeListingOpened","ExchangeDealOpened","ExchangeDealCancelled",
             "ExchangeDeliveryConfirmed","ExchangeSettled","ExchangeInventoryAdjusted",
-            "ExchangeNeedCreated","ExchangeAgentListed","ExchangeAgentDeal",
+            "ExchangeNeedCreated","ExchangeAgentListed","ExchangeAgentDeal","LotExpired",
             "SvodServiceCreated","SvodServiceUpdated","SvodServiceDeactivated",
         ]
     }

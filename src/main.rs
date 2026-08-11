@@ -263,6 +263,11 @@ async fn main() {
         background_vpn_cleanup(state_vpn).await;
     });
 
+    let state_lots = state.clone();
+    tokio::spawn(async move {
+        exchange::background_listing_expiry(state_lots).await;
+    });
+
     let public_routes = Router::new()
         .route("/auth/login", post(login_handler))
         .route("/auth/check", get(check_password_handler))
@@ -372,6 +377,10 @@ async fn main() {
         .route("/exchange/needs", get(exchange::list_needs))
         .route("/exchange/listings", get(exchange::list_listings))
         .route("/exchange/listings/:id/buy", post(exchange::buy_listing))
+        .route(
+            "/exchange/listings/:id/extend",
+            post(exchange::extend_listing),
+        )
         .route("/exchange/sell-to-state", post(exchange::sell_to_state))
         .route("/exchange/reserve/dispose", post(exchange::dispose_reserve))
         .route("/exchange/transfers", post(exchange::create_lot_transfer))

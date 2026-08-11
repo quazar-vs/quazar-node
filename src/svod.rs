@@ -1150,18 +1150,6 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
         active_codes.push(code);
     }
 
-    if !active_codes.is_empty() {
-        sqlx::query(
-            "UPDATE service_catalog
-             SET is_active = FALSE, updated_at = NOW()
-             WHERE is_active = TRUE AND NOT (code = ANY($1))",
-        )
-        .bind(&active_codes)
-        .execute(pool)
-        .await
-        .map_err(|e| format!("svod deactivate missing: {e}"))?;
-    }
-
     for rate in &etalon.rates {
         let action = rate.action.trim();
         if action.is_empty() {
@@ -1184,6 +1172,57 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
         .execute(pool)
         .await
         .map_err(|e| format!("svod rate {action}: {e}"))?;
+
+        // Also mirror rates into service_catalog so local/export board works after DNA reload.
+        let code = normalize_code(action).map_err(|e| e.to_string())?;
+        let lot_scope = lot_scope_from_access(&rate.access);
+        let category_id = resolve_category_id(pool, None, Some("IT"))
+            .await
+            .map_err(|e| e.to_string())?;
+        if rate.reward > 0 {
+            sqlx::query(
+                "INSERT INTO service_catalog
+                    (code, name, description, category_id, base_price, min_quantity, max_quantity,
+                     work_kind, lot_scope, access_roles, is_active, updated_at)
+                 VALUES ($1,$2,$3,$4,$5,1,1000,$6,$7,$8,TRUE,NOW())
+                 ON CONFLICT (code) DO UPDATE SET
+                    name = EXCLUDED.name,
+                    description = EXCLUDED.description,
+                    category_id = EXCLUDED.category_id,
+                    base_price = EXCLUDED.base_price,
+                    work_kind = EXCLUDED.work_kind,
+                    lot_scope = EXCLUDED.lot_scope,
+                    access_roles = EXCLUDED.access_roles,
+                    is_active = TRUE,
+                    updated_at = NOW()",
+            )
+            .bind(&code)
+            .bind(action)
+            .bind(Some(rate.unit.trim()))
+            .bind(category_id)
+            .bind(rate.reward)
+            .bind(&work_kind)
+            .bind(lot_scope)
+            .bind(&rate.access)
+            .execute(pool)
+            .await
+            .map_err(|e| format!("svod rate→catalog {code}: {e}"))?;
+            if !active_codes.contains(&code) {
+                active_codes.push(code);
+            }
+        }
+    }
+
+    if !active_codes.is_empty() {
+        sqlx::query(
+            "UPDATE service_catalog
+             SET is_active = FALSE, updated_at = NOW()
+             WHERE is_active = TRUE AND NOT (code = ANY($1))",
+        )
+        .bind(&active_codes)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("svod deactivate missing (post-rates): {e}"))?;
     }
 
     tracing::info!(

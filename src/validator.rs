@@ -548,6 +548,11 @@ impl EventValidator {
                 Self::require_str(data, "svod_code")?;
                 Ok(())
             }
+            QuazarEventType::LotExpired => {
+                Self::require_str(data, "listing_id")?;
+                Self::require_str(data, "svod_code")?;
+                Ok(())
+            }
             QuazarEventType::SvodServiceCreated
             | QuazarEventType::SvodServiceUpdated
             | QuazarEventType::SvodServiceDeactivated => {
