@@ -715,6 +715,13 @@ pub async fn create_need(
     )
     .await?;
 
+    // Секретарь / Agent: выставляет только global (канон v3).
+    if auth.can_submit_need_for_citizen() && service.lot_scope != "global" {
+        return Err(ExchangeError::BadRequest(
+            "Секретарь через Агента биржи выставляет только глобальные лоты (в Доступе есть Г)".into(),
+        ));
+    }
+
     let (listing_id, reserve_balance) = exchange_agent_list_need(
         &state,
         &need_id,
@@ -1376,6 +1383,7 @@ pub async fn list_listings(
              LEFT JOIN service_catalog s ON s.code = l.svod_code
              WHERE l.status = $1
                AND COALESCE(l.lot_scope, 'global') = 'global'
+               AND l.qty_remaining > 0
                AND (l.expires_at IS NULL OR l.expires_at > $5)
                AND ($2::text IS NULL OR COALESCE(s.work_kind, 'implementation') = $2)
                AND ($3::text IS NULL OR l.svod_code = $3)
@@ -1539,7 +1547,7 @@ pub async fn list_listings(
                     "is_export": true,
                     "node_id": view_node,
                     "owner_node_id": owner_node,
-                    "owner_city_hint": format!("Город-владелец: {owner_node}"),
+                    "owner_city_hint": null,
                     "access": access.clone(),
                     "access_short": access_short.clone(),
                     "expires_at": exp,
@@ -1551,9 +1559,47 @@ pub async fn list_listings(
                     "role_hint": "offers",
                     "price_note": "Цена Свода — без доставки и межгородской комиссии",
                     "ui_line": format!(
-                        "Лот: {code} | Цена: {base_price} КВАЗИ | Доступ: {access_short} | Статус: Экспорт (г. {owner_node}) | Осталось: {days} дн."
+                        "Лот: {code} | Цена: {base_price} КВАЗИ | Доступ: {access_short} | Статус: Экспорт | Осталось: {days} дн."
                     ),
                 }));
+            }
+        }
+    }
+
+    // Фильтр витрины по активной роли vs Доступ лота (канон v3).
+    if !auth.is_node {
+        let catalog = svod::get_svod_items(&state.db, true, None)
+            .await
+            .map_err(|e| ExchangeError::BadRequest(e.to_string()))?;
+        let by_code: std::collections::HashMap<&str, &svod::ServiceItem> =
+            catalog.iter().map(|s| (s.code.as_str(), s)).collect();
+        listings.retain(|item| {
+            let Some(code) = item.get("svod_code").and_then(|v| v.as_str()) else {
+                return true;
+            };
+            match by_code.get(code) {
+                Some(svc) => svod::role_can_access_lot(&auth.role, &svc.access_roles),
+                None => true,
+            }
+        });
+        for item in &mut listings {
+            let Some(code) = item
+                .get("svod_code")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+            else {
+                continue;
+            };
+            if let Some(svc) = by_code.get(code.as_str()) {
+                let level = svod::access_level_from_access(&svc.access_roles);
+                let access = svc.access_roles.clone();
+                let short = access_roles_short(&access);
+                if let Some(o) = item.as_object_mut() {
+                    o.insert("access".into(), json!(access.clone()));
+                    o.insert("access_roles".into(), json!(access));
+                    o.insert("access_level".into(), json!(level.as_str()));
+                    o.insert("access_short".into(), json!(short));
+                }
             }
         }
     }
@@ -1922,9 +1968,26 @@ pub async fn buy_listing(
         return Err(ExchangeError::BadRequest("cannot buy own listing".into()));
     }
 
-    // --- Агент Биржи: эскроу → СБ (агент или живой Страж) ---
+    // --- Агент Биржи: эскроу → СБ по иерархии доступа лота (канон v3) ---
     if is_state_agent {
         let is_global = lot_scope == "global";
+        let access_roles: Vec<String> = sqlx::query_scalar(
+            "SELECT COALESCE(access_roles, ARRAY[]::text[]) FROM service_catalog WHERE code = $1",
+        )
+        .bind(&svod_code)
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+        .unwrap_or_default();
+        let required_level = svod::access_level_from_access(&access_roles);
+        if !svod::role_can_access_lot(&auth.role, &access_roles) {
+            return Err(ExchangeError::Unauthorized(format!(
+                "Лот {} недоступен для роли {} (нужен уровень {})",
+                svod_code,
+                auth.role.as_str(),
+                required_level.as_str()
+            )));
+        }
         if is_global {
             if !auth.can_open_state_deal() {
                 return Err(ExchangeError::Unauthorized(
@@ -1958,14 +2021,12 @@ pub async fn buy_listing(
         let deal_id = format!("exdeal_{}", Uuid::new_v4());
         let task_id = format!("extask_{}", Uuid::new_v4());
         let ts = now();
-        let confirm_mode = if is_global {
-            "agent_sb"
-        } else {
-            "live_guardian"
-        };
-        let deal_status = if is_global { "completed" } else { "escrowed" };
-        let task_status = if is_global { "confirmed" } else { "open" };
-        let confirmed_by: Option<&str> = if is_global {
+        // Авто-СБ, если активная роль заявителя соответствует уровню доступа лота.
+        let auto_sb = auth.role.meets_access_level(&required_level);
+        let confirm_mode = if auto_sb { "agent_sb" } else { "live_guardian" };
+        let deal_status = if auto_sb { "completed" } else { "escrowed" };
+        let task_status = if auto_sb { "confirmed" } else { "open" };
+        let confirmed_by: Option<&str> = if auto_sb {
             Some("agent_sb")
         } else {
             None
@@ -2336,7 +2397,7 @@ pub async fn confirm_delivery(
 ) -> ExchangeResult<Json<ApiResponse>> {
     if !auth.can_exchange_security() {
         return Err(ExchangeError::Unauthorized(
-            "Only Security (Guardian) can confirm delivery".into(),
+            "Подтверждение СБ: только Страж и выше".into(),
         ));
     }
 
@@ -2362,13 +2423,31 @@ pub async fn confirm_delivery(
     };
     if confirm_mode == "agent_sb" {
         return Err(ExchangeError::BadRequest(
-            "Глобальный лот уже подтверждён Агентом СБ; повторное подтверждение не требуется"
+            "Лот уже подтверждён СБ автоматически; повторное подтверждение не требуется"
                 .into(),
         ));
     }
     if tstatus != "open" {
         return Err(ExchangeError::BadRequest(format!(
             "task status is {tstatus}"
+        )));
+    }
+
+    // Иерархия: Страж не подтверждает лот Судьи; Судья может подтвердить лот Стража.
+    let access_roles: Vec<String> = sqlx::query_scalar(
+        "SELECT COALESCE(access_roles, ARRAY[]::text[]) FROM service_catalog WHERE code = $1",
+    )
+    .bind(&svod_code)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+    .unwrap_or_default();
+    let required_level = svod::access_level_from_access(&access_roles);
+    if !auth.can_confirm_lot_access(&required_level) {
+        return Err(ExchangeError::Unauthorized(format!(
+            "Недостаточно уровня для подтверждения: нужен {}, у вас {}",
+            required_level.as_str(),
+            auth.role.as_str()
         )));
     }
 

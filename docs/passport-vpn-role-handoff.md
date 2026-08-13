@@ -15,17 +15,18 @@
      ```json
      { "vpn_session_id": "<id из /api/vpn/key>" }
      ```  
+   - Роль берётся так: уже выставленный статус Guardian+/Founder **или** `target_role` из последней кандидатуры со статусом **`Appointed`** (если в `citizens.role` ещё Citizen/Candidate).  
    - Ответ:  
      ```json
      {
        "status": "active",
-       "role": "Страж",
-       "role_code": "Guardian",
+       "role": "Айя",
+       "role_code": "Aiya",
        "access": ["global_lots", "local_lots", "verify_trades"],
        "idempotent": false
      }
      ```  
-   - Повторный вызов безопасен (`idempotent: true`).
+   - Повторный вызов безопасен (`idempotent: true`), если роль уже совпадает; при расхождении с Appointed — лечит `citizens.role`.
 
 3. **Доступ к лотам** (после `active`):  
    - Гражданин → только глобальные.  

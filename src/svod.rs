@@ -9,7 +9,7 @@ use axum::{
 use serde::{Deserialize, Serialize};
 use sqlx::PgPool;
 
-use crate::auth::AuthContext;
+use crate::auth::{AuthContext, Role};
 use crate::response::ApiResponse;
 use crate::AppState;
 
@@ -132,12 +132,60 @@ const SERVICE_SELECT: &str = "SELECT s.id, s.code, s.name, s.description, s.cate
     LEFT JOIN service_categories c ON s.category_id = c.id";
 
 /// Lot scope from SVOD «Доступ»: Г → global (Агент СБ); иначе local (живой Страж).
+/// Scope лота из доступа: Г ∈ доступ → global, иначе local.
+/// Confirm-ось — не scope, а иерархия ролей (`access_level_from_access`).
 pub fn lot_scope_from_access(access: &[String]) -> &'static str {
     if access.iter().any(|a| a == "Гражданин") {
         "global"
     } else {
         "local"
     }
+}
+
+/// Русская метка доступа Свода → Role.
+pub fn role_from_access_label(label: &str) -> Option<Role> {
+    match label.trim() {
+        "Гражданин" | "Г" => Some(Role::Citizen),
+        "Страж" | "Ст" => Some(Role::Guardian),
+        "Судья" | "Сд" => Some(Role::Judge),
+        "Мэр" | "М" => Some(Role::Mayor),
+        "Айя" => Some(Role::Aiya),
+        other => Role::from_str(other),
+    }
+}
+
+/// Минимальный уровень доступа лота = наименьший ранг среди ролей в «Доступ».
+/// Пустой список → Citizen (fallback).
+pub fn access_level_from_access(access: &[String]) -> Role {
+    let mut min_rank = u8::MAX;
+    let mut min_role = Role::Citizen;
+    for label in access {
+        if let Some(r) = role_from_access_label(label) {
+            let rank = r.access_rank();
+            if rank < min_rank {
+                min_rank = rank;
+                min_role = r;
+            }
+        }
+    }
+    min_role
+}
+
+/// Активная роль видит/может заявлять лот с данным доступом.
+pub fn role_can_access_lot(role: &Role, access: &[String]) -> bool {
+    if access.is_empty() {
+        return matches!(role, Role::Citizen | Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder);
+    }
+    // Лот доступен, если роль ∈ списка ИЛИ ранг роли ≥ мин. уровня (выше видит ниже).
+    let level = access_level_from_access(access);
+    if role.meets_access_level(&level) {
+        // Дополнительно: для local-only (без Г) гражданин не видит.
+        if !access.iter().any(|a| a == "Гражданин") && matches!(role, Role::Citizen) {
+            return false;
+        }
+        return true;
+    }
+    false
 }
 
 /// Normalize and validate work_kind query/body values.
@@ -432,6 +480,7 @@ fn require_aiya(auth: &AuthContext) -> SvodResult<()> {
 }
 
 fn position_with_label(s: &ServiceItem) -> serde_json::Value {
+    let access_level = access_level_from_access(&s.access_roles);
     serde_json::json!({
         "kind": "position",
         "id": s.id,
@@ -445,6 +494,20 @@ fn position_with_label(s: &ServiceItem) -> serde_json::Value {
         "min_quantity": s.min_quantity,
         "max_quantity": s.max_quantity,
         "is_active": s.is_active,
+        "lot_scope": s.lot_scope,
+        "access": s.access_roles,
+        "access_roles": s.access_roles,
+        "access_level": access_level.as_str(),
+        "access_level_ru": match access_level {
+            Role::Citizen => "Гражданин",
+            Role::Guardian => "Страж",
+            Role::Judge => "Судья",
+            Role::Mayor => "Мэр",
+            Role::Aiya => "Айя",
+            Role::Founder => "Основатель",
+            Role::Agent => "Агент",
+            Role::Candidate => "Кандидат",
+        },
         "work_kind": s.work_kind,
         "work_kind_label": work_kind_label(&s.work_kind),
     })
@@ -531,36 +594,38 @@ pub fn build_svod_sections(
 }
 
 fn role_view_payload() -> serde_json::Value {
-    // Passport: filter button near balance (offers/needs + work_kind + optional position);
-    // one «Заявки» entry (active + submit). Positions come only from the Свод (`parts.*.items`).
     serde_json::json!({
         "filter": {
             "ui": "button_near_balance",
             "when_off": "showcase_shows_all; params_chosen_on_submit",
             "mode": ["offers", "needs"],
-            "work_kind": ["development", "implementation"],
-            "svod_code": "optional position code from GET /svod → parts.*.items",
+            "svod_code": "optional position code from GET /svod → lots",
         },
         "offers": {
             "label": "Предложения",
             "mode": "offers",
-            "showcase": "GET /exchange/listings?work_kind=&svod_code=",
-            "submit_svod": "GET /svod?work_kind= → parts.*.items",
-            "submit_side": "sell",
-            "hint": "Витрина: публичные лоты. Подать заявку: позиция из Государственного Свода Вознаграждений → side=sell",
+            "showcase": "GET /exchange/listings (госостаток > 0, по статусу)",
+            "submit_svod": "GET /svod → lots",
+            "submit_side": "application",
+            "hint": "Витрина: лоты с положительным госостатком. Заявка → Агент Биржи → СБ по иерархии доступа.",
         },
         "needs": {
-            "label": "Потребность",
+            "label": "Заявка",
             "mode": "needs",
-            "showcase": "GET /svod?work_kind= → parts.*.items",
-            "submit_svod": "GET /svod?work_kind= → parts.*.items",
-            "submit_side": "buy",
-            "hint": "Витрина: позиции государства из того же Свода. Подать заявку: позиция Свода → side=buy",
+            "showcase": "GET /exchange/listings",
+            "submit_svod": "GET /svod → lots",
+            "submit": "POST /exchange/needs или заявка с витрины",
+            "hint": "Секретарь выставляет только global. Confirm: роль ↔ access_level.",
+        },
+        "confirm": {
+            "hierarchy": "Citizen < Guardian < Judge < Mayor < Aiya",
+            "auto": "активная роль соответствует доступу лота → СБ сразу",
+            "escalate": "роль ниже → подтверждение нужного уровня; выше подтверждает ниже",
         },
     })
 }
 
-/// GET /svod — единый **Государственный Свод Вознаграждений** (две части).
+/// GET /svod — единый цельный Государственный Свод (один список лотов).
 pub async fn get_svod_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SvodQuery>,
@@ -581,19 +646,15 @@ pub async fn get_svod_handler(
         "title": SVOD_TITLE,
         "name": SVOD_TITLE,
         "rewards_title": SVOD_TITLE,
-        "canon": "Единый Государственный Свод Вознаграждений = parts.development + parts.implementation. Позиции биржи = parts.*.items; ставки = parts.*.rates. Отдельного реестра нет.",
-        "note": "Поле services — legacy-алиас items (не UI-имя).",
-        "parts": parts,
-        "sections": sections,
-        "work_kind_labels": {
-            "development": "Разработка",
-            "implementation": "Реализация",
-        },
-        // Flat lists (same filter). items/rates — канон; services/rewards — legacy aliases only.
+        "canon": "Единый Государственный Свод = один список лотов (lots). Scope из Доступа (Г→global). Confirm — иерархия ролей (access_level).",
+        "note": "parts/sections — legacy; клиентам использовать lots/items. services — legacy-алиас items.",
+        "lots": items_json.clone(),
         "items": items_json.clone(),
         "rates": rates_json.clone(),
         "services": items_json,
         "rewards": rates_json,
+        "parts": parts,
+        "sections": sections,
         "role_view": role_view_payload(),
     }))))
 }
@@ -620,18 +681,14 @@ pub async fn get_rewards_handler(
         "title": SVOD_TITLE,
         "name": SVOD_TITLE,
         "rewards_title": SVOD_TITLE,
-        "canon": "Тот же Государственный Свод Вознаграждений; rates — ставки за действия, items — позиции для биржи.",
-        "note": "Поле services — legacy-алиас items (не UI-имя).",
-        "parts": parts,
-        "sections": sections,
-        "work_kind_labels": {
-            "development": "Разработка",
-            "implementation": "Реализация",
-        },
+        "canon": "Тот же Свод: lots/items — позиции биржи, rates — ставки за действия.",
+        "lots": items_json.clone(),
         "items": items_json.clone(),
         "rates": rates_json.clone(),
         "services": items_json,
         "rewards": rates_json,
+        "parts": parts,
+        "sections": sections,
         "role_view": role_view_payload(),
     }))))
 }
@@ -737,7 +794,7 @@ pub async fn disable_service_handler(
     }))))
 }
 
-/// Parsed etalon from `SVOD.md` (exactly 4-column tables).
+/// Parsed etalon from `SVOD.md` (4-column legacy or 7-column canon tables).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvodParsedFile {
     pub items: Vec<SvodParsedItem>,
@@ -747,11 +804,19 @@ pub struct SvodParsedFile {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SvodParsedItem {
     pub code: String,
+    #[serde(default)]
+    pub name: String,
+    #[serde(default)]
+    pub description: String,
+    #[serde(default)]
+    pub number: Option<u32>,
     pub base_price: i64,
     pub unit: String,
     pub work_kind: String,
     pub access: Vec<String>,
     pub auto_verify: bool,
+    #[serde(default)]
+    pub shelf_life_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -903,13 +968,35 @@ enum SvodColLayout {
     Classic,
     /// Лот / Код | Единица | Цена (КВАЗИ) | Доступ
     FlatLot,
+    /// № | Название | Описание | Единица | Цена (КВАЗИ) | Доступ | Срок жизни
+    Canon7,
 }
 
-/// Validate header is exactly 4 columns (classic or flat-lot layout).
+/// Validate header (classic / flat-lot / 7-column canon).
 fn validate_svod_header(cells: &[String]) -> Result<SvodColLayout, String> {
+    if cells.len() == 7 {
+        let c0 = norm_header(&cells[0]);
+        let c1 = norm_header(&cells[1]);
+        let c2 = norm_header(&cells[2]);
+        let c3 = norm_header(&cells[3]);
+        let c4 = norm_header(&cells[4]);
+        let c5 = norm_header(&cells[5]);
+        let c6 = norm_header(&cells[6]);
+        let ok0 = c0 == "№" || c0.contains("номер") || c0 == "n";
+        let ok1 = c1.contains("назван");
+        let ok2 = c2.contains("описан");
+        let ok3 = c3.contains("единиц") || c3 == "unit";
+        let ok4 = c4.contains("цена") || c4.contains("квази") || c4.contains("price");
+        let ok5 = c5.contains("доступ") || c5.contains("access");
+        let ok6 = c6.contains("срок") || c6.contains("жизн") || c6.contains("ttl");
+        if ok0 && ok1 && ok2 && ok3 && ok4 && ok5 && ok6 {
+            return Ok(SvodColLayout::Canon7);
+        }
+    }
+
     if cells.len() != 4 {
         return Err(format!(
-            "SVOD.md table must have exactly 4 columns, got {}: {}",
+            "SVOD.md table must have 4 columns (legacy) or 7 columns (canon), got {}: {}",
             cells.len(),
             cells.join(" | ")
         ));
@@ -938,10 +1025,83 @@ fn validate_svod_header(cells: &[String]) -> Result<SvodColLayout, String> {
     }
 
     Err(format!(
-        "SVOD.md expected 4 columns «Лот/Код | Единица | Цена (КВАЗИ) | Доступ» \
+        "SVOD.md expected 7 columns «№ | Название | Описание | Единица | Цена (КВАЗИ) | Доступ | Срок жизни», \
+         or 4 columns «Лот/Код | Единица | Цена (КВАЗИ) | Доступ» \
          or «Позиция | Ставка (КВАЗИ) | Единица | Доступ», got: {}",
         cells.join(" | ")
     ))
+}
+
+/// Extract machine code from description (`Код: \`idea_submit\``) or fall back to name.
+fn extract_lot_code(description: &str, name: &str) -> Result<String, String> {
+    let desc = description.trim();
+    if let Some(idx) = desc.to_lowercase().find("код:") {
+        let rest = desc[idx + 4..].trim();
+        if let Some(inner) = rest.strip_prefix('`').and_then(|s| s.split('`').next()) {
+            let c = inner.trim();
+            if !c.is_empty() {
+                return Ok(c.to_string());
+            }
+        }
+        let token = rest
+            .split(|c: char| c.is_whitespace() || c == '.' || c == ',')
+            .next()
+            .unwrap_or("")
+            .trim_matches('`')
+            .trim();
+        if !token.is_empty() {
+            return Ok(token.to_string());
+        }
+    }
+    let name = name.trim();
+    if !name.is_empty()
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return Ok(name.to_string());
+    }
+    normalize_code(name).map_err(|e| e.to_string())
+}
+
+/// Parse «30 дней», «24 часа», «7d», «—» → seconds (None = default shelf life).
+fn parse_shelf_life_cell(raw: &str) -> Result<Option<i64>, String> {
+    let t = raw.trim();
+    if t.is_empty() || t == "—" || t == "-" || t == "∞" || norm_header(t) == "бессрочно" {
+        return Ok(None);
+    }
+    let lower = norm_header(t);
+    let mut num = String::new();
+    for ch in lower.chars() {
+        if ch.is_ascii_digit() {
+            num.push(ch);
+        } else if !num.is_empty() {
+            break;
+        }
+    }
+    let n: i64 = num
+        .parse()
+        .map_err(|_| format!("SVOD.md Срок жизни: cannot parse `{raw}`"))?;
+    if n <= 0 {
+        return Err(format!("SVOD.md Срок жизни: must be positive in `{raw}`"));
+    }
+    let secs = if lower.contains("час") || lower.ends_with(" ч") || lower.ends_with("ч") {
+        n.saturating_mul(3600)
+    } else if lower.contains("мин") {
+        n.saturating_mul(60)
+    } else if lower.contains("нед") {
+        n.saturating_mul(604_800)
+    } else if lower.contains("мес") {
+        n.saturating_mul(2_592_000)
+    } else if lower.contains("дн") || lower.ends_with('d') {
+        n.saturating_mul(86_400)
+    } else if lower.ends_with('h') {
+        n.saturating_mul(3600)
+    } else {
+        // Bare number → days (canon tables use «30 дней»; fallback)
+        n.saturating_mul(86_400)
+    };
+    Ok(Some(secs))
 }
 
 /// Path for parsed SVOD JSON cache on the node.
@@ -968,7 +1128,7 @@ fn default_work_kind_for_code(code: &str) -> &'static str {
     }
 }
 
-/// Parse `SVOD.md` (flat or sectioned 4-column tables) into lean items/rates JSON.
+/// Parse `SVOD.md` (7-column canon or legacy 4-column tables) into lean items/rates JSON.
 pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
     let mut items: Vec<SvodParsedItem> = Vec::new();
     let mut rates: Vec<SvodParsedRate> = Vec::new();
@@ -1012,12 +1172,50 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
             continue;
         }
 
-        if cells.len() != 4 {
+        let expected_cols = if layout == SvodColLayout::Canon7 { 7 } else { 4 };
+        if cells.len() != expected_cols {
             return Err(format!(
-                "SVOD.md data row must have exactly 4 columns, got {}: {}",
+                "SVOD.md data row must have exactly {expected_cols} columns, got {}: {}",
                 cells.len(),
                 cells.join(" | ")
             ));
+        }
+
+        if layout == SvodColLayout::Canon7 {
+            let name = cells[1].trim().to_string();
+            let description = cells[2].trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let code = extract_lot_code(&description, &name)?;
+            let unit = cells[3].trim().to_string();
+            if unit.is_empty() {
+                return Err(format!("SVOD.md row `{code}`: empty Единица"));
+            }
+            let amount = parse_amount_cell(&cells[4]).unwrap_or(0);
+            let (access, auto_verify) = parse_access_cell(&cells[5])
+                .map_err(|e| format!("SVOD.md row `{code}`: {e}"))?;
+            let shelf_life_secs = parse_shelf_life_cell(&cells[6])
+                .map_err(|e| format!("SVOD.md row `{code}`: {e}"))?;
+            let number = cells[0]
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .filter(|&n| n > 0);
+            let work_kind = default_work_kind_for_code(&code).to_string();
+            items.push(SvodParsedItem {
+                code,
+                name,
+                description,
+                number,
+                base_price: amount,
+                unit,
+                work_kind,
+                access,
+                auto_verify,
+                shelf_life_secs,
+            });
+            continue;
         }
 
         let code = cells[0].trim().to_string();
@@ -1040,6 +1238,7 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
                 })?;
                 (amount, unit)
             }
+            SvodColLayout::Canon7 => unreachable!(),
         };
         if unit.is_empty() {
             return Err(format!("SVOD.md row `{code}`: empty Единица"));
@@ -1055,12 +1254,16 @@ pub fn parse_svod_markdown(md: &str) -> Result<String, String> {
 
         if row_is_item(&unit, &code) {
             items.push(SvodParsedItem {
-                code,
+                code: code.clone(),
+                name: code.clone(),
+                description: String::new(),
+                number: None,
                 base_price: amount,
                 unit,
                 work_kind,
                 access,
                 auto_verify,
+                shelf_life_secs: None,
             });
         } else {
             rates.push(SvodParsedRate {
@@ -1105,17 +1308,26 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
 
     let mut active_codes: Vec<String> = Vec::new();
     for item in &etalon.items {
-        let display_name = item.code.trim();
-        let code = normalize_code(display_name).map_err(|e| e.to_string())?;
+        let code = normalize_code(item.code.trim()).map_err(|e| e.to_string())?;
+        let display_name = if item.name.trim().is_empty() {
+            code.as_str()
+        } else {
+            item.name.trim()
+        };
         let work_kind = normalize_work_kind(&item.work_kind).map_err(|e| e.to_string())?;
-        if item.base_price <= 0 {
-            return Err(format!("SVOD item {code}: base_price must be > 0"));
+        if item.base_price < 0 {
+            return Err(format!("SVOD item {code}: base_price must be >= 0"));
         }
         let category_id = resolve_category_id(pool, None, Some("IT"))
             .await
             .map_err(|e| e.to_string())?;
 
         let lot_scope = lot_scope_from_access(&item.access);
+        let desc = if item.description.trim().is_empty() {
+            None
+        } else {
+            Some(item.description.as_str())
+        };
         sqlx::query(
             "INSERT INTO service_catalog
                 (code, name, description, category_id, base_price, min_quantity, max_quantity,
@@ -1136,7 +1348,7 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
         )
         .bind(&code)
         .bind(display_name)
-        .bind(Some(item.unit.as_str()))
+        .bind(desc)
         .bind(category_id)
         .bind(item.base_price)
         .bind(1_i64)
@@ -1147,6 +1359,25 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
         .execute(pool)
         .await
         .map_err(|e| format!("svod item {code}: {e}"))?;
+
+        // Mirror canon lots into svod_rewards for action-based payout paths.
+        sqlx::query(
+            "INSERT INTO svod_rewards (action, unit, reward, work_kind, updated_at)
+             VALUES ($1, $2, $3, $4, NOW())
+             ON CONFLICT (action) DO UPDATE SET
+                unit = EXCLUDED.unit,
+                reward = EXCLUDED.reward,
+                work_kind = EXCLUDED.work_kind,
+                updated_at = NOW()",
+        )
+        .bind(&code)
+        .bind(item.unit.trim())
+        .bind(item.base_price)
+        .bind(&work_kind)
+        .execute(pool)
+        .await
+        .map_err(|e| format!("svod item→reward {code}: {e}"))?;
+
         active_codes.push(code);
     }
 
@@ -1179,7 +1410,7 @@ pub async fn apply_svod_etalon_json(pool: &PgPool, raw: &str) -> Result<(), Stri
         let category_id = resolve_category_id(pool, None, Some("IT"))
             .await
             .map_err(|e| e.to_string())?;
-        if rate.reward > 0 {
+        if rate.reward >= 0 {
             sqlx::query(
                 "INSERT INTO service_catalog
                     (code, name, description, category_id, base_price, min_quantity, max_quantity,
@@ -1368,6 +1599,52 @@ mod tests {
     }
 
     #[test]
+    fn parse_svod_canon_seven_columns() {
+        let md = include_str!("../docs/algonism/SVOD.md");
+        let json = parse_svod_markdown(md).expect("parse canon SVOD.md");
+        let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let items = v["items"].as_array().unwrap();
+        assert_eq!(items.len(), 12);
+        assert!(v["rates"].as_array().unwrap().is_empty());
+
+        let nums: Vec<u32> = items
+            .iter()
+            .filter_map(|i| i["number"].as_u64().map(|n| n as u32))
+            .collect();
+        assert_eq!(nums.len(), 12);
+        assert_eq!(nums, (1..=12).collect::<Vec<_>>());
+
+        let order = items.iter().find(|i| i["code"] == "Order").unwrap();
+        assert_eq!(order["base_price"], 0);
+        assert_eq!(order["name"], "Заявка на бирже");
+        assert_eq!(order["shelf_life_secs"], 2_592_000);
+
+        let mayor = items.iter().find(|i| i["code"] == "MayorApplication").unwrap();
+        assert_eq!(mayor["base_price"], 0);
+        assert_eq!(mayor["shelf_life_secs"], 86_400);
+
+        let idea = items.iter().find(|i| i["code"] == "idea_submit").unwrap();
+        assert_eq!(idea["name"], "Подача идеи");
+        assert_eq!(idea["base_price"], 30);
+    }
+
+    #[test]
+    fn parse_shelf_life_variants() {
+        assert_eq!(parse_shelf_life_cell("30 дней").unwrap(), Some(2_592_000));
+        assert_eq!(parse_shelf_life_cell("24 часа").unwrap(), Some(86_400));
+        assert_eq!(parse_shelf_life_cell("—").unwrap(), None);
+    }
+
+    #[test]
+    fn extract_lot_code_from_description() {
+        assert_eq!(
+            extract_lot_code("Код: `idea_submit`. Текст", "Подача идеи").unwrap(),
+            "idea_submit"
+        );
+        assert_eq!(extract_lot_code("", "Order").unwrap(), "Order");
+    }
+
+    #[test]
     fn lot_scope_from_access_citizen_is_global() {
         assert_eq!(
             lot_scope_from_access(&["Гражданин".into(), "Страж".into()]),
@@ -1375,5 +1652,37 @@ mod tests {
         );
         assert_eq!(lot_scope_from_access(&["Страж".into(), "Мэр".into()]), "local");
         assert_eq!(lot_scope_from_access(&["Мэр".into()]), "local");
+    }
+
+    #[test]
+    fn access_level_from_access_min_rank() {
+        assert_eq!(
+            access_level_from_access(&["Страж".into(), "Судья".into()]),
+            Role::Guardian
+        );
+        assert_eq!(
+            access_level_from_access(&["Судья".into(), "Мэр".into()]),
+            Role::Judge
+        );
+        assert_eq!(
+            access_level_from_access(&["Гражданин".into(), "Страж".into()]),
+            Role::Citizen
+        );
+    }
+
+    #[test]
+    fn role_can_access_lot_citizen_local_denied() {
+        assert!(!role_can_access_lot(
+            &Role::Citizen,
+            &["Страж".into(), "Судья".into()]
+        ));
+        assert!(role_can_access_lot(
+            &Role::Guardian,
+            &["Страж".into(), "Судья".into()]
+        ));
+        assert!(role_can_access_lot(
+            &Role::Judge,
+            &["Страж".into()]
+        ));
     }
 }

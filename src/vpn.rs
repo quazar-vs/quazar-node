@@ -170,12 +170,74 @@ fn access_for_role(role: &Role) -> Vec<&'static str> {
     }
 }
 
-/// Resolve the role to apply on VPN activate: keep assigned governance/citizen role.
+/// Fallback when нет назначенной кандидатуры: Candidate/Agent → Citizen.
 fn role_to_apply(raw: &str) -> Role {
     match Role::from_str(raw) {
         Some(Role::Candidate) | Some(Role::Agent) | None => Role::Citizen,
         Some(r) => r,
     }
+}
+
+/// Уже принятый статус (не временный Candidate/Agent) — оставляем как есть.
+fn is_accepted_status_role(role: &Role) -> bool {
+    matches!(
+        role,
+        Role::Citizen
+            | Role::Guardian
+            | Role::Judge
+            | Role::Mayor
+            | Role::Aiya
+            | Role::Founder
+    )
+}
+
+/// Роль из Appointed-кандидатуры (то, что уже назначили через vote→approve→appoint).
+fn role_from_appointed_target(target: &str) -> Option<Role> {
+    match Role::from_str(target.trim()) {
+        Some(r @ (Role::Citizen | Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya)) => {
+            Some(r)
+        }
+        _ => None,
+    }
+}
+
+/// Предпочтение: текущий принятый статус; иначе target из Appointed; иначе fallback.
+fn prefer_vpn_role(current_raw: &str, appointed_target: Option<&str>) -> Role {
+    if let Some(current) = Role::from_str(current_raw) {
+        if is_accepted_status_role(&current) && current != Role::Citizen {
+            // Guardian+ / Founder уже в citizens.role — не затираем.
+            return current;
+        }
+        if current == Role::Citizen {
+            if let Some(appointed) = appointed_target.and_then(role_from_appointed_target) {
+                return appointed;
+            }
+            return Role::Citizen;
+        }
+    }
+    if let Some(appointed) = appointed_target.and_then(role_from_appointed_target) {
+        return appointed;
+    }
+    role_to_apply(current_raw)
+}
+
+async fn latest_appointed_target(pool: &PgPool, citizen_id: &str) -> Option<String> {
+    sqlx::query_scalar(
+        "SELECT target_role FROM candidacies
+         WHERE citizen_id = $1 AND status = 'Appointed'
+         ORDER BY appointed_at DESC NULLS LAST, created_at DESC
+         LIMIT 1",
+    )
+    .bind(citizen_id)
+    .fetch_optional(pool)
+    .await
+    .ok()
+    .flatten()
+}
+
+async fn resolve_vpn_role(pool: &PgPool, citizen_id: &str, role_raw: &str) -> Role {
+    let appointed = latest_appointed_target(pool, citizen_id).await;
+    prefer_vpn_role(role_raw, appointed.as_deref())
 }
 
 fn generate_openssh_keypair(comment: &str) -> Result<(String, String), String> {
@@ -678,7 +740,8 @@ pub struct ActivateVpnBody {
 }
 
 /// POST /api/citizen/activate_vpn — единый акт: ВПН = принятие роли.
-/// Идемпотентно: повторный вызов при status=active не ломает состояние.
+/// Роль: citizens.role (Guardian+) или target из Appointed-кандидатуры.
+/// Идемпотентно при active + уже верной роли; иначе лечит role из Appointed.
 pub async fn activate_vpn_handler(
     Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
@@ -716,11 +779,13 @@ pub async fn activate_vpn_handler(
         return response::bad_request(format!("Статус {status} не допускает активацию ВПН"));
     }
 
-    let applied = role_to_apply(&role_raw);
+    let applied = resolve_vpn_role(&state.db, &citizen_id, &role_raw).await;
     let access = access_for_role(&applied);
     let role_ru = role_display_ru(&applied);
+    let role_already_ok = role_raw == applied.as_str();
+    let was_active = status == "active";
 
-    if status == "active" {
+    if was_active && role_already_ok {
         let _ = sqlx::query(
             "UPDATE vpn_keys SET last_used = NOW()
              WHERE citizen_id = $1 AND is_active = TRUE AND expires_at > NOW()
@@ -799,7 +864,9 @@ pub async fn activate_vpn_handler(
     tracing::info!(
         citizen_id = %citizen_id,
         role = %applied.as_str(),
+        previous_role = %role_raw,
         vpn_session_id = %session,
+        healed = was_active && !role_already_ok,
         "VPN activated: citizen active + role applied"
     );
 
@@ -874,5 +941,26 @@ mod tests {
         assert!(secure_bytes_eq(b"abc", b"abc"));
         assert!(!secure_bytes_eq(b"abc", b"abd"));
         assert!(!secure_bytes_eq(b"abc", b"ab"));
+    }
+
+    #[test]
+    fn prefer_vpn_role_uses_appointed_when_citizen() {
+        assert_eq!(
+            prefer_vpn_role("Citizen", Some("Aiya")),
+            Role::Aiya
+        );
+        assert_eq!(
+            prefer_vpn_role("Candidate", Some("Guardian")),
+            Role::Guardian
+        );
+        assert_eq!(prefer_vpn_role("Citizen", None), Role::Citizen);
+        assert_eq!(prefer_vpn_role("Candidate", None), Role::Citizen);
+    }
+
+    #[test]
+    fn prefer_vpn_role_keeps_existing_governance() {
+        assert_eq!(prefer_vpn_role("Aiya", Some("Guardian")), Role::Aiya);
+        assert_eq!(prefer_vpn_role("Guardian", None), Role::Guardian);
+        assert_eq!(prefer_vpn_role("Founder", Some("Aiya")), Role::Founder);
     }
 }

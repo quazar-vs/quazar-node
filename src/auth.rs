@@ -594,11 +594,20 @@ impl AuthContext {
             && matches!(self.role, Role::Founder | Role::Aiya)
     }
 
-    /// Exchange Security (СБ): verify sell requests and confirm delivery. Not Aiya deal-flow.
+    /// Exchange Security (СБ): verify sell requests and confirm delivery.
+    /// Страж и выше (иерархия доступа лота проверяется отдельно в confirm).
     pub fn can_exchange_security(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
-            && matches!(self.role, Role::Guardian | Role::Founder)
+            && matches!(
+                self.role,
+                Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder
+            )
+    }
+
+    /// Подтвердить сделку СБ: роль ≥ требуемого уровня доступа лота.
+    pub fn can_confirm_lot_access(&self, required: &Role) -> bool {
+        self.can_exchange_security() && self.role.meets_access_level(required)
     }
 
     /// Биржа (заявки sell/buy через СБ) и агенты СБ: только Страж и выше (КВА / Свод).

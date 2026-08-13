@@ -1,5 +1,9 @@
 # HANDOFF: Quazar Passport (Flutter) — Phase A–D
 
+> **Биржа / Свод:** актуальный канон v3 — см. [`passport-exchange-v3-handoff.md`](passport-exchange-v3-handoff.md)  
+> и [`passport-svod-exchange-canon-prompt.md`](passport-svod-exchange-canon-prompt.md).  
+> Секции биржи ниже частично устарели (две части Свода, confirm только по global/local, экспорт с городом).
+
 Скопируй этот промпт локальному агенту Cursor на ПК  
 (репо: `/home/ser/projects/quazar_passport/`).  
 **На VPS Flutter не править и APK не собирать.**

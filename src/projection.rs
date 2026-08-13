@@ -363,6 +363,29 @@ async fn apply_candidate_approved(
     let citizen_id = require_str(&event.data, "citizen_id")?;
     let target_role = require_str(&event.data, "target_role")?;
 
+    // Не откатывать уже назначенных: повторная проекция Approved после Appointed
+    // раньше затирала citizens.role обратно в Candidate.
+    let current_status: Option<String> = sqlx::query_scalar(
+        "SELECT status FROM candidacies WHERE id = $1",
+    )
+    .bind(candidacy_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .map_err(|e| format!("CandidateApproved status lookup failed: {}", e))?;
+
+    if matches!(
+        current_status.as_deref(),
+        Some("Appointed") | Some("Rejected")
+    ) {
+        tracing::info!(
+            candidacy_id = %candidacy_id,
+            status = ?current_status,
+            event_id = %event.event_id,
+            "CandidateApproved skipped: candidacy already finalized"
+        );
+        return Ok(());
+    }
+
     sqlx::query(
         "UPDATE candidacies SET status = 'Approved', approved_at = to_timestamp($1) WHERE id = $2 AND status = 'Active'",
     )

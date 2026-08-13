@@ -97,6 +97,25 @@ impl Role {
     pub fn is_candidate(&self) -> bool {
         matches!(self, Role::Candidate)
     }
+
+    /// Ранг доступа Свода / СБ (канон): Г < Ст < Сд < М < Айя. Founder = верх.
+    pub fn access_rank(&self) -> u8 {
+        match self {
+            Role::Candidate => 0,
+            Role::Citizen => 1,
+            Role::Agent => 1, // не статус Свода; для сравнений как гражданинский пол
+            Role::Guardian => 2,
+            Role::Judge => 3,
+            Role::Mayor => 4,
+            Role::Aiya => 5,
+            Role::Founder => 6,
+        }
+    }
+
+    /// Активная роль достигает требуемого уровня доступа лота (выше подтверждает ниже).
+    pub fn meets_access_level(&self, required: &Role) -> bool {
+        self.access_rank() >= required.access_rank()
+    }
 }
 
 pub fn is_governance_role_str(role: &str) -> bool {
@@ -392,7 +411,9 @@ mod tests {
         assert!(Role::Founder.satisfies(&Role::Aiya));
         assert!(Role::Aiya.satisfies(&Role::Mayor));
         assert!(Role::Mayor.satisfies(&Role::Guardian));
-        assert!(Role::Guardian.satisfies(&Role::Judge));
+        // Judge выше Guardian: Guardian не закрывает требование Judge.
+        assert!(!Role::Guardian.satisfies(&Role::Judge));
+        assert!(Role::Judge.satisfies(&Role::Guardian));
         assert!(Role::Judge.satisfies(&Role::Agent));
         assert!(Role::Agent.satisfies(&Role::Citizen));
         assert!(Role::Citizen.satisfies(&Role::Candidate));
@@ -402,6 +423,16 @@ mod tests {
         assert!(!Role::Citizen.satisfies(&Role::Guardian));
         assert!(Role::Citizen.satisfies(&Role::Citizen));
         assert!(Role::Candidate.satisfies(&Role::Candidate));
+    }
+
+    #[test]
+    fn access_rank_sb_hierarchy() {
+        assert!(Role::Guardian.meets_access_level(&Role::Guardian));
+        assert!(Role::Judge.meets_access_level(&Role::Guardian));
+        assert!(!Role::Guardian.meets_access_level(&Role::Judge));
+        assert!(Role::Citizen.meets_access_level(&Role::Citizen));
+        assert!(!Role::Citizen.meets_access_level(&Role::Guardian));
+        assert!(Role::Aiya.meets_access_level(&Role::Mayor));
     }
 
     #[test]
