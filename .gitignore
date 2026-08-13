@@ -10,3 +10,4 @@ agent/state.json
 *.save
 .cursorrules
 *.tar.gz
+__pycache__/
