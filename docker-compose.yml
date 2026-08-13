@@ -98,6 +98,10 @@ services:
       RUST_LOG: ${CRYPTO_AGENT_RUST_LOG:-info}
 
   hermes:
+    # Deprecated: citizen chat uses quazar-chat-direct → OpenRouter.
+    # YouTube helpers run on host via /var/lib/quazar/venv-youtube.
+    # Enable only for legacy debugging: docker compose --profile hermes up -d hermes
+    profiles: ["hermes"]
     image: nousresearch/hermes-agent:latest
     container_name: hermes-gateway
     env_file:
@@ -109,10 +113,9 @@ services:
     environment:
       API_SERVER_ENABLED: "true"
       API_SERVER_HOST: "0.0.0.0"
-      API_SERVER_KEY: ${HERMES_API_KEY:?HERMES_API_KEY must be set}
+      API_SERVER_KEY: ${HERMES_API_KEY:-}
       HERMES_LOG_LEVEL: info
       HERMES_YOLO_MODE: "1"
-      # Auto-approve dangerous tools for Secretary automation (hardline deny still applies)
     volumes:
       - /root/.hermes:/opt/data
       - /opt/quazar:/opt/quazar:ro

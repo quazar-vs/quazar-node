@@ -20,22 +20,35 @@ import urllib.request
 from datetime import datetime, timezone
 from pathlib import Path
 import sys
-sys.path.insert(0, "/root/.hermes/lib")
+_legacy_lib = Path(os.environ.get("QUAZAR_LEGACY_HERMES_LIB", "/root/.hermes/lib"))
+if _legacy_lib.is_dir():
+    sys.path.insert(0, str(_legacy_lib))
 try:
     import quazar_dialogue as qd
 except Exception as _e:
     qd = None  # type: ignore
 
 CHAT_BASE = os.environ.get("QUAZAR_CHAT_BASE", "http://127.0.0.1:8080")
-KEY_FILE = Path(os.environ.get("QUAZAR_API_KEY_FILE", "/root/.hermes/secrets/quazar-secretary-api-key"))
-OR_KEY_FILE = Path(os.environ.get("OPENROUTER_KEY_FILE", "/root/.hermes/secrets/openrouter-api-key"))
-CONFIG = Path(os.environ.get("HERMES_CONFIG", "/root/.hermes/config.yaml"))
-AGENTS = Path(os.environ.get("HERMES_AGENTS", "/root/.hermes/AGENTS.md"))
-SOUL = Path(os.environ.get("HERMES_SOUL", "/root/.hermes/SOUL.md"))
+KEY_FILE = Path(
+    os.environ.get("QUAZAR_API_KEY_FILE", "/var/lib/quazar/secrets/quazar-secretary-api-key")
+)
+OR_KEY_FILE = Path(
+    os.environ.get("OPENROUTER_KEY_FILE", "/var/lib/quazar/secrets/openrouter-api-key")
+)
+CONFIG = Path(
+    os.environ.get(
+        "QUAZAR_CHAT_CONFIG",
+        os.environ.get("HERMES_CONFIG", "/var/lib/quazar/config/chat-models.yaml"),
+    )
+)
+AGENTS = Path(
+    os.environ.get("QUAZAR_AGENTS", os.environ.get("HERMES_AGENTS", "/var/lib/quazar/config/AGENTS.md"))
+)
+SOUL = Path(os.environ.get("QUAZAR_SOUL", os.environ.get("HERMES_SOUL", "/var/lib/quazar/config/SOUL.md")))
 SEND_BIN = Path(os.environ.get("QUAZAR_CHAT_SEND", "/usr/local/bin/quazar-chat-send"))
 ASK_CURSOR_BIN = Path(os.environ.get("QUAZAR_ASK_CURSOR", "/usr/local/bin/quazar-cursor-direct"))
 STATE_FILE = Path(os.environ.get("QUAZAR_DIRECT_STATE", "/var/lib/quazar-chat-direct/state.json"))
-SECRETARY_ALIASES = {"secretary", "Секретарь Квазар"}
+SECRETARY_ALIASES = {"secretary", "Секретарь Квазар", "Секретарь", "Алгонизм", "Secretary"}
 POLL_SEC = float(os.environ.get("QUAZAR_DIRECT_POLL", "2"))
 CONTEXT_N = int(os.environ.get("QUAZAR_DIRECT_CONTEXT", "8"))
 # Idle keep-alive for dialogue: stay "awake" ≥10 minutes after last activity.
@@ -153,15 +166,17 @@ def models_from_config() -> list[str]:
 
 
 def hermes_agent_system_prompt() -> str:
-    """Pull agent.system_prompt from Hermes config (canonical identity)."""
+    """Optional extra system_prompt from chat config (legacy Hermes field)."""
     try:
         import yaml  # type: ignore
 
+        if not CONFIG.exists():
+            return ""
         cfg = yaml.safe_load(CONFIG.read_text()) or {}
         sp = ((cfg.get("agent") or {}).get("system_prompt") or "").strip()
         return sp
     except Exception as e:
-        log(f"HERMES_SP_WARN {e}")
+        log(f"CHAT_CONFIG_SP_WARN {e}")
         return ""
 
 
@@ -290,7 +305,12 @@ def system_prompt() -> str:
     hermes_sp = hermes_agent_system_prompt()
     if hermes_sp:
         parts.append(hermes_sp[:4000])
-    memory = Path(os.environ.get("HERMES_MEMORY", "/root/.hermes/MEMORY.md"))
+    memory = Path(
+        os.environ.get(
+            "QUAZAR_MEMORY",
+            os.environ.get("HERMES_MEMORY", "/var/lib/quazar/config/MEMORY.md"),
+        )
+    )
     for p in (memory, AGENTS):
         if p.exists():
             try:
@@ -298,7 +318,12 @@ def system_prompt() -> str:
             except Exception:
                 pass
     if _CORE_AWAKEN:
-        identity = Path(os.environ.get("HERMES_IDENTITY", "/root/.hermes/IDENTITY.md"))
+        identity = Path(
+            os.environ.get(
+                "QUAZAR_IDENTITY",
+                os.environ.get("HERMES_IDENTITY", "/var/lib/quazar/config/IDENTITY.md"),
+            )
+        )
         for p in (SOUL, identity):
             if p.exists():
                 try:

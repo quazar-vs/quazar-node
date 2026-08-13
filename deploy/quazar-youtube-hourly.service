@@ -1,0 +1,13 @@
+[Unit]
+Description=Quazar YouTube hourly (likes sync + auto-reply)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=HOME=/root
+Environment=PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin
+Environment=QUAZAR_CHAT_URL=https://quazar.website
+Environment=HERMES_HOME=/var/lib/quazar/youtube
+ExecStart=/usr/local/bin/quazar-youtube-hourly.sh
+Nice=10
