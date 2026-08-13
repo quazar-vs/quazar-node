@@ -47,6 +47,9 @@ AGENTS = Path(
 SOUL = Path(os.environ.get("QUAZAR_SOUL", os.environ.get("HERMES_SOUL", "/var/lib/quazar/config/SOUL.md")))
 SEND_BIN = Path(os.environ.get("QUAZAR_CHAT_SEND", "/usr/local/bin/quazar-chat-send"))
 ASK_CURSOR_BIN = Path(os.environ.get("QUAZAR_ASK_CURSOR", "/usr/local/bin/quazar-cursor-direct"))
+YOUTUBE_AGENT_BIN = Path(
+    os.environ.get("QUAZAR_YOUTUBE_AGENT", "/usr/local/bin/quazar-youtube-agent")
+)
 STATE_FILE = Path(os.environ.get("QUAZAR_DIRECT_STATE", "/var/lib/quazar-chat-direct/state.json"))
 SECRETARY_ALIASES = {"secretary", "Секретарь Квазар", "Секретарь", "Алгонизм", "Secretary"}
 POLL_SEC = float(os.environ.get("QUAZAR_DIRECT_POLL", "2"))
@@ -278,6 +281,8 @@ def system_prompt() -> str:
         "СБ: не «каждая сделка ждёт СБ». Если активная роль соответствует доступу лота — авто-подтверждение; если ниже — эскалация на нужный уровень (выше может ниже).",
         "Рефлексы (RX_*) ≠ лоты Свода. Рефлекс — реакция агента; лот — позиция с ценой. Эталон: REFLEXES.md / awaken DNA.",
         "Магазин узла (фиат) ≠ биржа (КВАЗИ). Гость — только реальная валюта; гражданин выбирает контур. Пока магазин не развёрнут — не выдумывай витрину фиата.",
+        "Hermes/Гермес ВЫВЕДЕН из рабочего контура. Чат: я (Секретарь) → OpenRouter напрямую, без Hermes. YouTube: host-сервис /var/lib/quazar/youtube, не docker Hermes. Не говори, что работаешь «через Гермеса». API /hermes/event* в ядре — только историческое имя журнала внешних событий.",
+        "Агент YouTube: по вопросам канала/ютуб/комментов/лайков/статуса QuazarVS — делегируй агенту YouTube (не выдумывай цифры). Я (Секретарь) могу связаться с ним и вернуть ответ в чат.",
     ]
     if _CORE_AWAKEN:
         dna = (_CORE_AWAKEN.get("dna") or "")[:12000]
@@ -605,6 +610,33 @@ def submit_exchange_need(api_key: str, citizen_id: str, svod_code: str, quantity
         return 0, str(e)
 
 
+def is_hermes_question(text: str) -> bool:
+    """Citizen asks about Hermes / whether Secretary works through it."""
+    low = (text or "").lower().replace("ё", "е")
+    return any(
+        k in low
+        for k in (
+            "гермес",
+            "hermes",
+            "через гермес",
+            "через hermes",
+            "работаешь через гермес",
+            "связан с гермес",
+        )
+    )
+
+
+def hermes_fact_reply() -> str:
+    return (
+        "**Нет.** В citizen-чате я **не** работаю через Hermes.\n\n"
+        "Цепочка сейчас: **Секретарь → OpenRouter → чат** (сервис `quazar-chat-direct`).\n"
+        "YouTube-хелперы вынесены на host (`/var/lib/quazar/youtube`), без контейнера Hermes.\n"
+        "Контейнер `hermes-gateway` остановлен. Путь `/hermes/event*` в API ядра — "
+        "историческое имя журнала внешних событий (`YoutubeIntroPosted` и т.п.), не «протокол Гермеса».\n\n"
+        "Чем конкретно помочь?"
+    )
+
+
 def is_identity_question(text: str) -> bool:
     """Citizen asks who the secretary / Algonism is."""
     low = (text or "").lower().replace("ё", "е").strip()
@@ -817,6 +849,53 @@ def svod_fact_reply(api_key: str = "") -> str:
             "Сейчас live-запрос не удался — не пересказываю захардкоженные ставки/позиции.\n"
             "Отдельного каталога товаров/услуг нет. Повтори вопрос чуть позже."
         )
+
+
+def wants_youtube(text: str) -> bool:
+    """Citizen asks about YouTube channel / comments / likes — delegate to YT agent."""
+    low = (text or "").lower().replace("ё", "е")
+    keys = (
+        "youtube", "ютуб", "you tube", "quazarvs", "квазарвс",
+        "канал youtube", "канал ютуб", "на канале",
+        "подписчик", "просмотр", "мои комментар", "комментари",
+        "лайк", "watchlist", "автоответ", "агент ютуб", "агент youtube",
+        "статус канала", "сколько видео",
+    )
+    return any(k in low for k in keys)
+
+
+def ask_youtube(text: str, citizen: str) -> dict:
+    if not YOUTUBE_AGENT_BIN.exists():
+        return {"ok": False, "error": f"youtube agent missing: {YOUTUBE_AGENT_BIN}"}
+    try:
+        r = subprocess.run(
+            [str(YOUTUBE_AGENT_BIN), "--from", citizen or "citizen", text],
+            capture_output=True,
+            text=True,
+            timeout=320,
+            env={
+                **os.environ,
+                "HERMES_HOME": os.environ.get("HERMES_HOME", "/var/lib/quazar/youtube"),
+                "QUAZAR_YOUTUBE_HOME": os.environ.get(
+                    "QUAZAR_YOUTUBE_HOME", "/var/lib/quazar/youtube"
+                ),
+            },
+        )
+        raw = (r.stdout or "").strip()
+        if not raw:
+            return {"ok": False, "error": (r.stderr or "empty youtube agent")[:300]}
+        line = raw.splitlines()[-1]
+        return json.loads(line)
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def youtube_chat_status(result: dict) -> str:
+    if result.get("reply"):
+        return str(result["reply"]).strip()
+    if result.get("ok"):
+        return "Агент YouTube ответил без текста."
+    return f"Агент YouTube недоступен: {result.get('error') or result}"
 
 
 def wants_cursor(text: str) -> bool:
@@ -1034,6 +1113,42 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
             if qd is not None:
                 qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
             log(f"ANSWERED {mid[:8]} via=identity_fact")
+        else:
+            log("SEND_FAIL")
+        return
+
+    if is_hermes_question(content):
+        log("HERMES_FACT_REPLY")
+        reply = hermes_fact_reply()
+        if qd is not None and not introduced:
+            reply = qd.intro_text("chat") + "\n\n" + reply
+        if send_chat(reply):
+            answered.add(mid)
+            st["answered_ids"] = list(answered)
+            st["last_id"] = mid
+            save_state(st)
+            if qd is not None:
+                qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
+            log(f"ANSWERED {mid[:8]} via=hermes_fact")
+        else:
+            log("SEND_FAIL")
+        return
+
+    if wants_youtube(content):
+        log("YOUTUBE_DELEGATE")
+        result = ask_youtube(content, author)
+        log(f"YOUTUBE_RESULT {json.dumps(result, ensure_ascii=False)[:220]}")
+        reply = youtube_chat_status(result)
+        if qd is not None and not introduced:
+            reply = qd.intro_text("chat") + "\n\n" + reply
+        if send_chat(reply):
+            answered.add(mid)
+            st["answered_ids"] = list(answered)
+            st["last_id"] = mid
+            save_state(st)
+            if qd is not None:
+                qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
+            log(f"ANSWERED {mid[:8]} via=youtube_agent ok={bool(result.get('ok'))}")
         else:
             log("SEND_FAIL")
         return
