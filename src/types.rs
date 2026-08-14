@@ -227,6 +227,7 @@ pub enum QuazarEventType {
     SvodServiceCreated,
     SvodServiceUpdated,
     SvodServiceDeactivated,
+    LawyerAction,
 }
 
 impl std::fmt::Display for QuazarEventType {
@@ -310,6 +311,7 @@ impl QuazarEventType {
             "SvodServiceCreated" => Ok(QuazarEventType::SvodServiceCreated),
             "SvodServiceUpdated" => Ok(QuazarEventType::SvodServiceUpdated),
             "SvodServiceDeactivated" => Ok(QuazarEventType::SvodServiceDeactivated),
+            "LawyerAction" => Ok(QuazarEventType::LawyerAction),
             _ => Err(format!("Unknown event type: {}", s)),
         }
     }
@@ -336,6 +338,7 @@ impl QuazarEventType {
             "ExchangeDeliveryConfirmed","ExchangeSettled","ExchangeInventoryAdjusted",
             "ExchangeNeedCreated","ExchangeAgentListed","ExchangeAgentDeal","LotExpired",
             "SvodServiceCreated","SvodServiceUpdated","SvodServiceDeactivated",
+            "LawyerAction",
         ]
     }
 }
@@ -388,6 +391,11 @@ mod tests {
             QuazarEventType::from_str("ElectionVoteResult").unwrap(),
             QuazarEventType::ElectionVoteResult
         );
+        assert_eq!(
+            QuazarEventType::from_str("LawyerAction").unwrap(),
+            QuazarEventType::LawyerAction
+        );
+        assert!(QuazarEventType::all_type_names().contains(&"LawyerAction"));
     }
 
     #[test]

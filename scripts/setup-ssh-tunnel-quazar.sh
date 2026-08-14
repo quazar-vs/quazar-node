@@ -15,8 +15,13 @@ TUNNEL_HOME="${SSH_TUNNEL_HOME:-/var/lib/quazar/tunnel}"
 AUTHORIZED_KEYS="${VPN_AUTHORIZED_KEYS_PATH:-${TUNNEL_HOME}/authorized_keys}"
 
 GATEWAY_PORTS="${SSH_GATEWAY_PORTS:-yes}"
-KEEPALIVE_INTERVAL="${SSH_KEEPALIVE_INTERVAL:-60}"
-KEEPALIVE_COUNT_MAX="${SSH_KEEPALIVE_COUNT_MAX:-3}"
+# Client (Passport) ServerAlive — returned by API / used in ssh hint.
+KEEPALIVE_INTERVAL="${SSH_KEEPALIVE_INTERVAL:-20}"
+KEEPALIVE_COUNT_MAX="${SSH_KEEPALIVE_COUNT_MAX:-9}"
+# Server sshd ClientAlive — be more patient than the phone (Doze / video / radio).
+# Default: ~15 min of total silence before killing a dead tunnel.
+CLIENT_ALIVE_INTERVAL="${SSH_CLIENT_ALIVE_INTERVAL:-60}"
+CLIENT_ALIVE_COUNT_MAX="${SSH_CLIENT_ALIVE_COUNT_MAX:-15}"
 
 case "${GATEWAY_PORTS,,}" in
   1 | true | yes | on) GATEWAY_PORTS_VALUE="yes" ;;
@@ -60,10 +65,12 @@ fi
 
 cat > "$DROP_IN" <<EOF
 # Managed by Quazar setup-ssh-tunnel-quazar.sh — mobile client SSH tunnels
+# ClientAlive* = server probes (patient). Passport must still send ServerAlive*.
 AllowTcpForwarding yes
 GatewayPorts ${GATEWAY_PORTS_VALUE}
-ClientAliveInterval ${KEEPALIVE_INTERVAL}
-ClientAliveCountMax ${KEEPALIVE_COUNT_MAX}
+TCPKeepAlive yes
+ClientAliveInterval ${CLIENT_ALIVE_INTERVAL}
+ClientAliveCountMax ${CLIENT_ALIVE_COUNT_MAX}
 
 # Match restricted tunnel user only — does not affect root SSH
 Match User ${TUNNEL_USER}
@@ -75,7 +82,7 @@ Match User ${TUNNEL_USER}
     AuthorizedKeysFile ${AUTHORIZED_KEYS}
 EOF
 
-echo "Wrote $DROP_IN:"
+echo "Wrote $DROP_IN (sshd ClientAlive ${CLIENT_ALIVE_INTERVAL}s × ${CLIENT_ALIVE_COUNT_MAX}; client hint ServerAlive ${KEEPALIVE_INTERVAL}s × ${KEEPALIVE_COUNT_MAX}):"
 cat "$DROP_IN"
 echo
 echo "Authorized keys file: $AUTHORIZED_KEYS"

@@ -50,6 +50,16 @@ ASK_CURSOR_BIN = Path(os.environ.get("QUAZAR_ASK_CURSOR", "/usr/local/bin/quazar
 YOUTUBE_AGENT_BIN = Path(
     os.environ.get("QUAZAR_YOUTUBE_AGENT", "/usr/local/bin/quazar-youtube-agent")
 )
+# Always run agent with venv that has google-api (shebang alone is fragile under systemd).
+YOUTUBE_AGENT_PY = Path(
+    os.environ.get(
+        "QUAZAR_YOUTUBE_PYTHON",
+        "/var/lib/quazar/venv-youtube/bin/python3",
+    )
+)
+LAWYER_AGENT_BIN = Path(
+    os.environ.get("QUAZAR_LAWYER_AGENT", "/usr/local/bin/quazar-lawyer-agent")
+)
 STATE_FILE = Path(os.environ.get("QUAZAR_DIRECT_STATE", "/var/lib/quazar-chat-direct/state.json"))
 SECRETARY_ALIASES = {"secretary", "Секретарь Квазар", "Секретарь", "Алгонизм", "Secretary"}
 POLL_SEC = float(os.environ.get("QUAZAR_DIRECT_POLL", "2"))
@@ -864,12 +874,84 @@ def wants_youtube(text: str) -> bool:
     return any(k in low for k in keys)
 
 
+def wants_lawyer(text: str) -> bool:
+    """Legal question → Lawyer agent (cite / boundary / drift)."""
+    low = (text or "").lower().replace("ё", "е")
+    keys = (
+        "закон", "юрист", "статья", "конституц", "кодекс", "ква ",
+        "по закону", "что говорит закон", "норма ", "правов",
+        "кгпс", "кбо", "этическ", "разрешено ли", "запрещено ли",
+        "можно ли по закону", "агент юрист", "drift закон",
+        "расхождение закон", "границы алгонизм",
+    )
+    # avoid stealing pure YouTube / catalog chats
+    if wants_youtube(low) and "закон" not in low and "юрист" not in low:
+        return False
+    return any(k in low for k in keys)
+
+
+def ask_lawyer(text: str, citizen: str) -> dict:
+    if not LAWYER_AGENT_BIN.exists():
+        return {"ok": False, "error": f"lawyer agent missing: {LAWYER_AGENT_BIN}"}
+    low = (text or "").lower().replace("ё", "е")
+    if "drift" in low or "расхожд" in low:
+        argv = ["--cmd", "drift"]
+    elif any(
+        k in low
+        for k in (
+            "измени конституц",
+            "поменяй закон",
+            "вынеси приговор",
+            "проголосуй",
+        )
+    ):
+        argv = ["--cmd", "boundary", "--text", text]
+    else:
+        argv = ["--cmd", "cite", "--text", text, "--from", citizen or "citizen"]
+    try:
+        r = subprocess.run(
+            [str(LAWYER_AGENT_BIN), *argv],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            env={
+                **os.environ,
+                "QUAZAR_API_BASE": os.environ.get("QUAZAR_API_BASE", CHAT_BASE),
+                "QUAZAR_API_KEY_FILE": os.environ.get(
+                    "QUAZAR_API_KEY_FILE",
+                    str(KEY_FILE),
+                ),
+            },
+        )
+        raw = (r.stdout or "").strip()
+        if not raw:
+            return {"ok": False, "error": (r.stderr or "empty lawyer agent")[:300]}
+        return json.loads(raw.splitlines()[-1])
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def lawyer_chat_status(result: dict) -> str:
+    if result.get("reply"):
+        return str(result["reply"]).strip()
+    if result.get("ok") and result.get("citations"):
+        return "Юрист ответил с цитатами закона (см. детали у агента)."
+    return f"Юрист: ошибка — {result.get('error') or 'нет ответа'}"
+
+
+def _youtube_agent_argv(*args: str) -> list[str]:
+    """Prefer venv python so google-api is available even if shebang is wrong."""
+    if YOUTUBE_AGENT_PY.is_file():
+        return [str(YOUTUBE_AGENT_PY), str(YOUTUBE_AGENT_BIN), *args]
+    return [str(YOUTUBE_AGENT_BIN), *args]
+
+
 def ask_youtube(text: str, citizen: str) -> dict:
     if not YOUTUBE_AGENT_BIN.exists():
         return {"ok": False, "error": f"youtube agent missing: {YOUTUBE_AGENT_BIN}"}
     try:
         r = subprocess.run(
-            [str(YOUTUBE_AGENT_BIN), "--from", citizen or "citizen", text],
+            _youtube_agent_argv("--from", citizen or "citizen", text),
             capture_output=True,
             text=True,
             timeout=320,
@@ -888,6 +970,171 @@ def ask_youtube(text: str, citizen: str) -> dict:
         return json.loads(line)
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
+
+
+def youtube_agent_cmd(args: list[str], timeout: int = 320) -> dict:
+    if not YOUTUBE_AGENT_BIN.exists():
+        return {"ok": False, "error": f"youtube agent missing: {YOUTUBE_AGENT_BIN}"}
+    try:
+        r = subprocess.run(
+            _youtube_agent_argv(*args),
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            env={
+                **os.environ,
+                "HERMES_HOME": os.environ.get("HERMES_HOME", "/var/lib/quazar/youtube"),
+                "QUAZAR_YOUTUBE_HOME": os.environ.get(
+                    "QUAZAR_YOUTUBE_HOME", "/var/lib/quazar/youtube"
+                ),
+                "OPENROUTER_KEY_FILE": os.environ.get(
+                    "OPENROUTER_KEY_FILE", "/var/lib/quazar/secrets/openrouter-api-key"
+                ),
+            },
+        )
+        raw = (r.stdout or "").strip()
+        if not raw:
+            return {"ok": False, "error": (r.stderr or "empty")[:300]}
+        return json.loads(raw.splitlines()[-1])
+    except Exception as e:
+        return {"ok": False, "error": str(e)[:300]}
+
+
+def compose_youtube_reply(or_key: str, models: list[str], item: dict) -> tuple[str, bool]:
+    """Secretary brain: draft YouTube reply. Returns (text, first_intro)."""
+    author = item.get("author") or "зритель"
+    peer = (item.get("authorChannelId") or "").strip()
+    text = (item.get("text") or "").strip()
+    kind = item.get("kind") or "top"
+    introduced = False
+    if qd is not None and peer:
+        introduced = bool(qd.is_introduced("youtube", peer))
+
+    if qd is not None:
+        policy = qd.dialogue_instructions("youtube", introduced)
+    elif introduced:
+        policy = (
+            "Уже знакомился с этим зрителем — не представляйся снова. "
+            "Продолжи беседу в комментариях по делу."
+        )
+    else:
+        site = os.environ.get("QUAZAR_CHAT_URL", "https://quazar.website")
+        policy = (
+            "С этим зрителем ещё не знакомься. Представься Секретарём Квазар, "
+            "пригласи продолжить диалог в комментариях и на сайт проекта "
+            f"{site}, затем кратко ответь по смыслу."
+        )
+
+    prompt = (
+        "Ты Секретарь Квазар / голос Алгонизма на YouTube-канале QuazarVS.\n"
+        + policy
+    )
+    user = (
+        f"Вид: {kind}\nАвтор: {author}\n"
+        f"peerChannelId: {peer or 'unknown'}\n"
+        f"Уже знакомы: {'да' if introduced else 'нет'}\n"
+        f"videoId: {item.get('videoId')}\nКомментарий:\n{text}"
+    )
+    reply = generate_reply(or_key, models, [], user, policy_extra=prompt)
+    reply = (reply or "").strip()
+    first_intro = not introduced
+    if not reply:
+        if qd is not None and first_intro:
+            reply = qd.intro_text("youtube") + " Напиши ещё здесь — продолжим."
+        elif first_intro:
+            site = os.environ.get("QUAZAR_CHAT_URL", "https://quazar.website")
+            reply = (
+                f"{author}, я Секретарь Квазар. Можем говорить в комментариях; "
+                f"проект — на {site}."
+            )
+        else:
+            reply = f"{author}, принял. Продолжаем."
+    elif first_intro and qd is not None:
+        # Ensure intro + site invitation landed even if model skipped them.
+        low = reply.lower()
+        intro = qd.intro_text("youtube")
+        site = os.environ.get("QUAZAR_CHAT_URL", "https://quazar.website")
+        if "секретар" not in low and "алгонизм" not in low and "квазар" not in low:
+            reply = intro + " " + reply
+        elif site.split("//")[-1].split("/")[0] not in low and "quazar.website" not in low:
+            reply = reply.rstrip() + f" Сайт проекта: {site}"
+    return reply[:900], first_intro
+
+
+def process_youtube_events(st: dict, or_key: str, models: list[str]) -> None:
+    """Pull events from YouTube agent and react immediately (reply on channel via agent)."""
+    now_ts = time.time()
+    last = float(st.get("youtube_poll_ts") or 0)
+    interval = float(os.environ.get("QUAZAR_YOUTUBE_POLL_SEC", "60"))
+    if now_ts - last < interval:
+        return
+    st["youtube_poll_ts"] = now_ts
+    save_state(st)
+
+    result = youtube_agent_cmd(["--cmd", "pending"], timeout=300)
+    if not result.get("ok"):
+        log(f"YOUTUBE_PENDING_FAIL {result.get('error')}")
+        return
+    data = result.get("data") if isinstance(result.get("data"), dict) else result
+    pending = data.get("pending") if isinstance(data, dict) else None
+    if not isinstance(pending, list):
+        pending = result.get("pending") if isinstance(result.get("pending"), list) else []
+    if not pending:
+        return
+
+    max_n = int(os.environ.get("QUAZAR_YOUTUBE_REACT_MAX", "3"))
+    for item in pending[:max_n]:
+        if not isinstance(item, dict) or not item.get("commentId"):
+            continue
+        peer = (item.get("authorChannelId") or "").strip()
+        introduced_before = bool(qd and peer and qd.is_introduced("youtube", peer))
+        log(
+            f"YOUTUBE_EVENT {item.get('event')} id={str(item.get('commentId'))[:18]} "
+            f"author={item.get('author')} introduced={introduced_before}"
+        )
+        draft, first_intro = compose_youtube_reply(or_key, models, item)
+        parent = item.get("parentIdForInsert") or item.get("commentId")
+        posted = youtube_agent_cmd(
+            [
+                "--cmd",
+                "reply",
+                "--parent",
+                str(parent),
+                "--text",
+                draft,
+                "--source-comment",
+                str(item.get("commentId")),
+            ],
+            timeout=120,
+        )
+        ok = bool(posted.get("ok"))
+        log(
+            f"YOUTUBE_SECRETARY_REPLY ok={ok} first_intro={first_intro} "
+            f"parent={str(parent)[:18]}"
+        )
+        if ok and qd is not None and peer:
+            qd.mark_introduced(
+                "youtube",
+                peer,
+                display_name=item.get("author"),
+                meta={
+                    "lastCommentId": item.get("commentId"),
+                    "lastReplyId": (posted.get("data") or {}).get("replyId")
+                    if isinstance(posted.get("data"), dict)
+                    else posted.get("replyId"),
+                    "videoId": item.get("videoId"),
+                    "via": "secretary-bridge",
+                },
+            )
+        notice = (
+            f"YouTube: {'познакомился и ' if first_intro else ''}"
+            f"ответил @{item.get('author') or 'зритель'} "
+            f"на канале ({item.get('kind')})."
+        )
+        if ok:
+            send_chat(notice)
+        else:
+            log(f"YOUTUBE_REPLY_FAIL {posted.get('error')}")
 
 
 def youtube_chat_status(result: dict) -> str:
@@ -1134,6 +1381,25 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
             log("SEND_FAIL")
         return
 
+    if wants_lawyer(content):
+        log("LAWYER_DELEGATE")
+        result = ask_lawyer(content, author)
+        log(f"LAWYER_RESULT {json.dumps(result, ensure_ascii=False)[:220]}")
+        reply = lawyer_chat_status(result)
+        if qd is not None and not introduced:
+            reply = qd.intro_text("chat") + "\n\n" + reply
+        if send_chat(reply):
+            answered.add(mid)
+            st["answered_ids"] = list(answered)
+            st["last_id"] = mid
+            save_state(st)
+            if qd is not None:
+                qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
+            log(f"ANSWERED {mid[:8]} via=lawyer_agent ok={bool(result.get('ok'))}")
+        else:
+            log("SEND_FAIL")
+        return
+
     if wants_youtube(content):
         log("YOUTUBE_DELEGATE")
         result = ask_youtube(content, author)
@@ -1273,11 +1539,20 @@ def main() -> None:
     st["answered_ids"] = list(answered)
     save_state(st)
     log(f"SEEDED answered={len(answered)}")
+    log(
+        "YOUTUBE_BRIDGE poll_sec="
+        + os.environ.get("QUAZAR_YOUTUBE_POLL_SEC", "60")
+        + " via=youtube-agent pending→secretary→reply"
+    )
     while True:
         try:
             process_once(st, chat_key, or_key, models)
         except Exception as e:
             log(f"LOOP_ERR {e}")
+        try:
+            process_youtube_events(st, or_key, models)
+        except Exception as e:
+            log(f"YOUTUBE_LOOP_ERR {e}")
         time.sleep(POLL_SEC)
 
 

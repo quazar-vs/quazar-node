@@ -232,8 +232,8 @@ fn host_from_node_url() -> Option<String> {
 fn load_settings() -> Settings {
     let enabled = env_bool("SSH_TUNNEL_ENABLED", false);
     let gateway_ports = env_bool("SSH_GATEWAY_PORTS", true);
-    let keepalive_interval_secs = env_u64("SSH_KEEPALIVE_INTERVAL", 60);
-    let keepalive_count_max = env_u64("SSH_KEEPALIVE_COUNT_MAX", 3);
+    let keepalive_interval_secs = env_u64("SSH_KEEPALIVE_INTERVAL", 20);
+    let keepalive_count_max = env_u64("SSH_KEEPALIVE_COUNT_MAX", 9);
 
     let ssh_host = std::env::var("SSH_TUNNEL_HOST")
         .ok()

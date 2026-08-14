@@ -418,6 +418,7 @@ async fn main() {
         .route("/city/appoint", post(offices::appoint_city_role))
         .route("/agents", get(agents::list_agents))
         .route("/agents/messages", post(agents::post_agent_message))
+        .route("/agents/lawyer/impulse", post(agents::post_lawyer_impulse))
         .route(
             "/agents/city/ensure",
             post(agents::ensure_city_agents_handler),

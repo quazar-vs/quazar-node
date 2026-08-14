@@ -559,6 +559,12 @@ impl EventValidator {
                 Self::require_str(data, "code")?;
                 Ok(())
             }
+            QuazarEventType::LawyerAction => {
+                Self::require_str(data, "action")?;
+                Self::require_str(data, "source")?;
+                Self::require_str(data, "reflex")?;
+                Ok(())
+            }
         }
     }
 

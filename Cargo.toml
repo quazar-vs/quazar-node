@@ -9,6 +9,10 @@ name = "quazar_registry"
 path = "src/main.rs"
 
 [[bin]]
+name = "quazar_lawyer_agent"
+path = "src/bin/lawyer_agent.rs"
+
+[[bin]]
 name = "quazar_crypto_agent"
 path = "src/bin/crypto_agent.rs"
 

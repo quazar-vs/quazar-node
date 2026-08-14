@@ -58,6 +58,7 @@ pub async fn ensure_state_agents(pool: &PgPool) -> Result<(), sqlx::Error> {
     // use QZ-1 as holder for state sb/exchange agent rows (no vote).
     upsert_agent(pool, "QZ-1", "sb", "state", None, None).await?;
     upsert_agent(pool, "QZ-1", "exchange", "state", None, None).await?;
+    upsert_agent(pool, "QZ-1", "lawyer", "state", None, None).await?;
     Ok(())
 }
 
@@ -247,6 +248,91 @@ pub async fn post_agent_message(
         "id": id,
         "from_agent_id": body.from_agent_id,
         "to_agent_id": body.to_agent_id,
+    }))))
+}
+
+#[derive(Debug, Deserialize)]
+pub struct LawyerImpulseBody {
+    pub action: String,
+    pub reflex: String,
+    #[serde(default)]
+    pub query: Option<String>,
+    #[serde(default)]
+    pub citizen: Option<String>,
+    #[serde(default)]
+    pub summary: Option<String>,
+    #[serde(default)]
+    pub extra: Option<serde_json::Value>,
+}
+
+/// POST /agents/lawyer/impulse — Lawyer cite/drift/boundary → реестр (LawyerAction).
+pub async fn post_lawyer_impulse(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Json(body): Json<LawyerImpulseBody>,
+) -> R<Json<ApiResponse>> {
+    if !(auth.role.is_agent()
+        || auth.can_exchange_security()
+        || auth.can_add_balance()
+        || auth.can_submit_need_for_citizen())
+    {
+        return Err(AgentApiError::Forbidden(
+            "Only agents or Страж+ may log Lawyer impulses".into(),
+        ));
+    }
+    let action = body.action.trim().to_string();
+    let reflex = body.reflex.trim().to_string();
+    if action.is_empty() || reflex.is_empty() {
+        return Err(AgentApiError::Bad("action and reflex required".into()));
+    }
+    let query = body
+        .query
+        .as_deref()
+        .unwrap_or("")
+        .chars()
+        .take(300)
+        .collect::<String>();
+    let summary = body
+        .summary
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+        .map(|s| s.chars().take(400).collect::<String>())
+        .unwrap_or_else(|| format!("Lawyer {action} ({reflex})"));
+    let evt_id = format!("evt_lawyer_{}", Uuid::new_v4());
+    let mut data = json!({
+        "action": action,
+        "source": "lawyer_agent",
+        "reflex": reflex,
+        "logged_by": auth.citizen_name,
+    });
+    if let Some(obj) = data.as_object_mut() {
+        if !query.is_empty() {
+            obj.insert("query".into(), json!(query));
+        }
+        if let Some(c) = body.citizen.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            obj.insert("citizen".into(), json!(c));
+        }
+        if let Some(extra) = body.extra {
+            obj.insert("extra".into(), extra);
+        }
+    }
+    chain_events::emit_signed_event(
+        &state,
+        "LawyerAction",
+        &auth.citizen_name,
+        "Lawyer action",
+        &summary,
+        Some(&evt_id),
+        data,
+    )
+    .await
+    .map_err(AgentApiError::Bad)?;
+    Ok(Json(ApiResponse::success(json!({
+        "event_id": evt_id,
+        "event_type": "LawyerAction",
+        "action": action,
+        "reflex": reflex,
+        "status": "inserted",
     }))))
 }
 

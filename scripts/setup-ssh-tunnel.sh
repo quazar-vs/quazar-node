@@ -7,8 +7,10 @@
 #
 # Env (optional):
 #   SSH_GATEWAY_PORTS=yes
-#   SSH_KEEPALIVE_INTERVAL=60
-#   SSH_KEEPALIVE_COUNT_MAX=3
+#   SSH_KEEPALIVE_INTERVAL=20
+#   SSH_KEEPALIVE_COUNT_MAX=9
+#   SSH_CLIENT_ALIVE_INTERVAL=60
+#   SSH_CLIENT_ALIVE_COUNT_MAX=15
 #   SSH_TUNNEL_USER=quazar-tunnel
 #   SSH_NAT_IFACE=   # auto-detect if empty; fallback eth0
 set -euo pipefail
