@@ -43,12 +43,15 @@ const DEFAULT_POLL_SECS: u64 = 120;
 
 /// Fixed mapping: GitHub filename → short awaken key.
 const LAW_KEY_FILES: &[(&str, &str)] = &[
+    ("adk", "ADK.md"),
     ("constitution", "CONSTITUTION_QUAZAR.md"),
     ("ek", "EK.md"),
     ("ethical", "ETHICAL.md"),
+    ("izk", "IZK.md"),
     ("kbo", "KBO.md"),
     ("kgps", "KGPS.md"),
     ("kva", "KVA.md"),
+    ("spk", "SPK.md"),
     ("svod", "SVOD.md"),
 ];
 
@@ -798,6 +801,9 @@ mod tests {
         assert_eq!(filename_to_law_key("CONSTITUTION_QUAZAR.md"), Some("constitution"));
         assert_eq!(filename_to_law_key("KVA.md"), Some("kva"));
         assert_eq!(filename_to_law_key("ETHICAL.md"), Some("ethical"));
+        assert_eq!(filename_to_law_key("ADK.md"), Some("adk"));
+        assert_eq!(filename_to_law_key("IZK.md"), Some("izk"));
+        assert_eq!(filename_to_law_key("SPK.md"), Some("spk"));
         assert_eq!(filename_to_law_key("SVOD.md"), Some("svod"));
         assert_eq!(filename_to_law_key("README.md"), None);
     }

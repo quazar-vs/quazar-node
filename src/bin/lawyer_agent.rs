@@ -70,12 +70,15 @@ fn api_key() -> Option<String> {
 
 fn law_filename(key: &str) -> &'static str {
     match key {
+        "adk" => "ADK.md",
         "constitution" => "CONSTITUTION_QUAZAR.md",
         "ek" => "EK.md",
         "ethical" => "ETHICAL.md",
+        "izk" => "IZK.md",
         "kbo" => "KBO.md",
         "kgps" => "KGPS.md",
         "kva" => "KVA.md",
+        "spk" => "SPK.md",
         "svod" => "SVOD.md",
         _ => "UNKNOWN.md",
     }

@@ -37,7 +37,7 @@
 В пакете:
 
 - `dna` / `dna_sha` — генетическая память (узел загрузил эталон с GitHub в свой кэш);
-- `laws` — короткие ключи: `constitution`, `kva`, `kgps`, `kbo`, `ek`, `ethical`;
+- `laws` — короткие ключи: `constitution`, `kva`, `kgps`, `kbo`, `ek`, `ethical`, `adk`, `izk`, `spk`, `svod`;
 - `laws_sha` — целостность пакета законов;
 - `state.last_block` — `{number, hash}`; `active_citizens`, `active_nodes`;
 - `source` — `github` | `cache`; `timestamp` — unix UTC сборки пакета.
