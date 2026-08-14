@@ -4,6 +4,7 @@ mod bot;
 mod config;
 mod error;
 mod exchange;
+mod scanner;
 mod strategy;
 
 use crate::bot::Bot;
@@ -32,6 +33,7 @@ async fn main() -> Result<()> {
         lot_step_coeff = config.lot_step_coeff,
         max_lot = config.max_lot,
         tp_sl_percent = config.tp_sl_percent,
+        auto_market = config.auto_market,
         leverage = config.leverage,
         "configuration loaded (working min lot = exchange_min × LOT_COEFF after meta)"
     );

@@ -66,6 +66,16 @@ pub struct BotConfig {
     pub ws_url: String,
     pub quote_ccy: String,
     pub base_ccy: String,
+    /// If true, pick a volatile tight-spread USDT pair before each new cycle.
+    pub auto_market: bool,
+    /// 24h turnover floor in quote (USDT) for scanner candidates.
+    pub min_turnover_usdt: f64,
+    /// Max bid/ask spread percent for scanner (e.g. 0.5 = 0.5%).
+    pub max_spread_pct: f64,
+    /// Markets the scanner must skip.
+    pub market_blacklist: Vec<String>,
+    /// Quote suffix the scanner keeps (usually USDT).
+    pub scanner_quote: String,
 }
 
 impl BotConfig {
@@ -154,6 +164,31 @@ impl BotConfig {
         };
         let ws_url = env::var("COINEX_WS_URL").unwrap_or_else(|_| default_ws.to_string());
 
+        let auto_market = matches!(
+            env::var("AUTO_MARKET")
+                .unwrap_or_else(|_| "false".to_string())
+                .to_ascii_lowercase()
+                .as_str(),
+            "1" | "true" | "yes" | "on"
+        );
+        let min_turnover_usdt: f64 = env::var("MIN_TURNOVER_USDT")
+            .unwrap_or_else(|_| "50000".to_string())
+            .parse()
+            .context("MIN_TURNOVER_USDT must be a number")?;
+        let max_spread_pct: f64 = env::var("MAX_SPREAD_PCT")
+            .unwrap_or_else(|_| "0.5".to_string())
+            .parse()
+            .context("MAX_SPREAD_PCT must be a number")?;
+        let market_blacklist = env::var("MARKET_BLACKLIST")
+            .unwrap_or_else(|_| "USDCUSDT,DAIUSDT,TUSDUSDT,FDUSDUSDT,BUSDUSDT".to_string())
+            .split(',')
+            .map(|s| s.trim().to_ascii_uppercase())
+            .filter(|s| !s.is_empty())
+            .collect::<Vec<_>>();
+        let scanner_quote = env::var("SCANNER_QUOTE")
+            .unwrap_or_else(|_| "USDT".to_string())
+            .to_ascii_uppercase();
+
         // Infer base/quote from market name when possible (e.g. BTCUSDT, SOLUSDT).
         let (base_ccy, quote_ccy) = split_market(&market);
 
@@ -192,6 +227,11 @@ impl BotConfig {
             ws_url,
             quote_ccy,
             base_ccy,
+            auto_market,
+            min_turnover_usdt,
+            max_spread_pct,
+            market_blacklist,
+            scanner_quote,
         })
     }
 
@@ -235,11 +275,18 @@ impl BotConfig {
 
     /// How many soft-SL steps are in `lot` vs working min lot (`LOT_STEP_COEFF`).
     pub fn soft_sl_steps_from_lot(&self, lot: f64) -> u32 {
+        self.soft_sl_steps_for(lot, self.initial_lot)
+    }
+
+    /// Same as `soft_sl_steps_from_lot`, but uses an explicit working min lot.
+    /// Needed at restore: `client.config().initial_lot` stays 0 until meta is applied
+    /// onto BotState / LiveMarket, not onto the frozen client config.
+    pub fn soft_sl_steps_for(&self, lot: f64, initial_lot: f64) -> u32 {
         let m = self.lot_step_coeff;
-        if self.initial_lot <= 0.0 || lot <= 0.0 || m <= 1.0 {
+        if initial_lot <= 0.0 || lot <= 0.0 || m <= 1.0 {
             return 0;
         }
-        let ratio = lot / self.initial_lot;
+        let ratio = lot / initial_lot;
         if ratio + f64::EPSILON < (1.0 + m) / 2.0 {
             return 0;
         }
@@ -284,7 +331,7 @@ impl BotConfig {
     }
 }
 
-fn split_market(market: &str) -> (String, String) {
+pub fn split_market(market: &str) -> (String, String) {
     for quote in ["USDT", "USDC", "BTC", "ETH", "CET"] {
         if let Some(base) = market.strip_suffix(quote) {
             if !base.is_empty() {

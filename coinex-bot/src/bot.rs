@@ -2,20 +2,21 @@
 //! Start: botB_tp → restore (first open from client_id; TP untouched); else NEW at exchange_min × LOT_COEFF.
 //! New cycle: min lot; TP/SL = ±% of first fill.
 //! Soft SL: × LOT_STEP_COEFF via modify; TP and SL each shift by another TP_SL_PERCENT of **first entry** (not add fill).
-//! If TP fills mid-add — reopen at min lot. If USDT short — freeze.
-//! Idle ensure: if memory has no position and no bot TP on the book → open one new cycle (retry on fail).
+//! After TP / idle with no order: optional AUTO_MARKET scanner picks a volatile tight-spread USDT pair.
 
-use crate::config::BotConfig;
+use crate::config::{split_market, BotConfig};
 use crate::error::BotError;
 use crate::exchange::{
-    ceil_amount, is_bot_tp_client_id, make_bot_tp_client_id, parse_open_from_bot_tp_client_id,
-    round_amount, round_price, side_prefix, CoinExClient, ExchangePosition, MarketMeta, WsEvent,
+    ceil_amount_to_min, is_bot_tp_client_id, make_bot_tp_client_id, parse_open_from_bot_tp_client_id,
+    round_amount, round_price, side_prefix, snap_amount_to_min, CoinExClient, ExchangePosition,
+    MarketMeta, WsEvent,
 };
+use crate::scanner;
 use crate::strategy::{BotState, CloseReason, Position, Side};
 use anyhow::{Context, Result};
 use serde_json::Value;
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex as StdMutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, Mutex};
 use tracing::{debug, error, info, warn};
@@ -23,7 +24,7 @@ use tracing::{debug, error, info, warn};
 pub struct Bot {
     client: Arc<CoinExClient>,
     state: Arc<Mutex<BotState>>,
-    meta: MarketMeta,
+    market_meta: StdMutex<MarketMeta>,
     handled_closes: Arc<Mutex<HashSet<String>>>,
     closing: Arc<Mutex<bool>>,
     /// TP fill seen while soft-SL/reopen holds `closing` (otherwise WS fill is ignored).
@@ -54,16 +55,25 @@ impl Bot {
             max_lot = config.max_lot,
             "loaded market metadata — min lot = exchange_min × LOT_COEFF"
         );
+        client.set_working_min_lot(config.initial_lot);
         Ok(Self {
             client,
             state: Arc::new(Mutex::new(BotState::new(config))),
-            meta,
+            market_meta: StdMutex::new(meta),
             handled_closes: Arc::new(Mutex::new(HashSet::new())),
             closing: Arc::new(Mutex::new(false)),
             tp_filled_during_busy: Arc::new(Mutex::new(None)),
             watched_tp_order_id: Arc::new(Mutex::new(None)),
             tp_guard_until: Arc::new(Mutex::new(Instant::now())),
         })
+    }
+
+    fn meta(&self) -> MarketMeta {
+        *self.market_meta.lock().expect("meta lock")
+    }
+
+    fn set_meta(&self, meta: MarketMeta) {
+        *self.market_meta.lock().expect("meta lock") = meta;
     }
 
     async fn watch_tp(&self, order_id: Option<&str>) {
@@ -251,10 +261,27 @@ impl Bot {
         let limits = self.client.get_pending_orders().await.unwrap_or_default();
         info!(limits = limits.len(), "fetched spot pending limits");
 
-        // If several bot TP — keep the first, cancel only duplicate bot TP.
         self.dedupe_bot_tp_limits(&limits, &side).await;
 
-        let limits = self.client.get_pending_orders().await.unwrap_or_default();
+        let mut limits = self.client.get_pending_orders().await.unwrap_or_default();
+        if self.try_restore_from_tp_limit(side.clone(), &limits).is_none()
+            && self.client.config().auto_market
+        {
+            if let Ok(all) = self.client.get_all_pending_orders().await {
+                if let Some((item, _)) = find_by_client_id(&all, &bot_tp_client_id_base_for(&side)) {
+                    if let Some(mkt) = item.get("market").and_then(|v| v.as_str()) {
+                        if !mkt.eq_ignore_ascii_case(&self.client.market()) {
+                            info!(market = %mkt, "start: found bot TP on another market — switching");
+                            if let Err(e) = self.apply_live_market(mkt).await {
+                                warn!(error = %e, market = %mkt, "start: switch to TP market failed");
+                            } else {
+                                limits = self.client.get_pending_orders().await.unwrap_or_default();
+                            }
+                        }
+                    }
+                }
+            }
+        }
         if let Some(mut pos) = self.try_restore_from_tp_limit(side.clone(), &limits) {
             // Restore from pending botB_tp: open/SL inferred from TP order price.
             // If free+frozen base is clearly larger than TP amount, enlarge the order
@@ -279,11 +306,23 @@ impl Bot {
             drop(st);
             self.arm_tp_guard().await;
         } else {
-            // No our open order → NEW cycle always at working min lot (exchange_min × LOT_COEFF).
+            // Last-chance: a bot TP on any market must never be followed by a second entry.
+            let tp_cid = bot_tp_client_id_base_for(&side);
+            if let Ok(all) = self.client.get_all_pending_orders().await {
+                if find_by_client_id(&all, &tp_cid).is_some() {
+                    warn!(
+                        "start: bot TP still on book but restore failed — refusing new entry"
+                    );
+                    self.log_state_ready().await;
+                    return Ok(());
+                }
+            }
+            self.select_market_if_idle().await;
             let lot = self.state.lock().await.initial_lot;
             info!(
                 side = side.label(),
                 lot,
+                market = %self.client.market(),
                 "start: no bot TP — open_position at working min lot"
             );
             self.open_position(side, lot).await?;
@@ -292,14 +331,92 @@ impl Bot {
         Ok(())
     }
 
-    /// If inventory (available+frozen) exceeds TP amount by ≥ min_amount, enlarge
-    /// the resting TP via modify — keeps order amount in sync with real KOMA.
+    async fn apply_live_market(&self, market: &str) -> Result<()> {
+        let current = self.client.market();
+        if current.eq_ignore_ascii_case(market) {
+            return Ok(());
+        }
+        let (base, quote) = split_market(market);
+        self.client.set_live_market(market, &base, &quote);
+        let meta = match self.client.get_market_meta().await {
+            Ok(m) => m,
+            Err(e) => {
+                let (b, q) = split_market(&current);
+                self.client.set_live_market(&current, &b, &q);
+                return Err(e).context("load meta for scanned market");
+            }
+        };
+        {
+            let mut st = self.state.lock().await;
+            if meta.min_amount > st.max_lot + f64::EPSILON {
+                let (b, q) = split_market(&current);
+                self.client.set_live_market(&current, &b, &q);
+                anyhow::bail!(
+                    "scanner skip {}: min_amount {} > max_lot {}",
+                    market,
+                    meta.min_amount,
+                    st.max_lot
+                );
+            }
+            st.config.market = market.to_string();
+            st.config.base_ccy = base.clone();
+            st.config.quote_ccy = quote.clone();
+            if let Err(e) = st
+                .config
+                .apply_exchange_min_lot(meta.min_amount, |a| round_amount(a, &meta))
+            {
+                let (b, q) = split_market(&current);
+                self.client.set_live_market(&current, &b, &q);
+                return Err(e);
+            }
+            st.initial_lot = st.config.initial_lot;
+            st.current_lot = st.config.initial_lot;
+            self.client.set_working_min_lot(st.config.initial_lot);
+        }
+        self.set_meta(meta);
+        info!(
+            from = %current,
+            to = %market,
+            base = %base,
+            min_amount = meta.min_amount,
+            working_min_lot = self.state.lock().await.initial_lot,
+            "switched live spot market"
+        );
+        Ok(())
+    }
+
+    async fn select_market_if_idle(&self) {
+        if !self.client.config().auto_market || !self.client.config().is_spot() {
+            return;
+        }
+        let cfg = self.state.lock().await.config.clone();
+        match scanner::select_spot_market(&self.client, &cfg).await {
+            Ok(Some(pick)) => {
+                if let Err(e) = self.apply_live_market(&pick.market).await {
+                    warn!(
+                        error = %e,
+                        market = %pick.market,
+                        "scanner apply failed — keep current market"
+                    );
+                }
+            }
+            Ok(None) => warn!("scanner found nothing — keep current market"),
+            Err(e) => warn!(error = %e, "scanner failed — keep current market"),
+        }
+    }
+
+    /// If free+frozen base exceeds the TP amount, enlarge the resting TP.
+    /// Dust below min_amount used to sit unused; now it goes into the same TP.
     async fn align_tp_amount_to_inventory(&self, pos: &mut Position) -> Result<()> {
-        let base = self.client.config().base_ccy.clone();
+        let base = self.client.base_ccy().clone();
         let (available, frozen) = self.client.get_balance_parts(&base).await?;
-        let inventory = round_amount(available + frozen, &self.meta);
+        let inventory = round_amount(available + frozen, &self.meta());
         let gap = inventory - pos.lot;
-        if gap + f64::EPSILON < self.meta.min_amount {
+        let amt_tick = 10f64.powi(-(self.meta().amount_precision as i32)).max(1e-12);
+        if gap + f64::EPSILON < amt_tick {
+            return Ok(());
+        }
+        if inventory + f64::EPSILON < self.meta().min_amount {
             return Ok(());
         }
         let new_lot = inventory;
@@ -317,7 +434,7 @@ impl Bot {
         );
         let new_id = self
             .client
-            .ensure_spot_tp_order(oid.as_deref(), &exit_side, new_lot, tp_price, &cid, &self.meta)
+            .ensure_spot_tp_order(oid.as_deref(), &exit_side, new_lot, tp_price, &cid, &self.meta())
             .await
             .context("align TP amount to inventory failed")?;
         pos.lot = new_lot;
@@ -358,7 +475,7 @@ impl Bot {
         if lot <= 0.0 {
             return None;
         }
-        let lot = round_amount(lot, &self.meta);
+        let lot = round_amount(lot, &self.meta());
         let cfg = self.client.config();
         let buy = matches!(side, Side::Buy);
         let live_cid = tp_obj
@@ -368,11 +485,19 @@ impl Bot {
         // Prefer first-entry encoded in client_id — TP price alone is wrong after soft-SL shifts.
         let open_price = parse_open_from_bot_tp_client_id(live_cid)
             .unwrap_or_else(|| cfg.infer_open_from_tp(buy, tp_price));
-        let steps = cfg.soft_sl_steps_from_lot(lot);
+        // Working min lot lives on BotState / LiveMarket, not client.config().
+        let initial_lot = self
+            .state
+            .try_lock()
+            .ok()
+            .map(|st| st.initial_lot)
+            .filter(|v| *v > 0.0)
+            .unwrap_or_else(|| self.client.working_min_lot());
+        let steps = cfg.soft_sl_steps_for(lot, initial_lot);
         let (_, sl_price) = cfg.calc_tp_sl_at_step(buy, open_price, steps);
-        let open_rounded = round_price(open_price, &self.meta);
-        let sl_rounded = round_price(sl_price, &self.meta);
-        let tp_rounded = round_price(tp_price, &self.meta);
+        let open_rounded = round_price(open_price, &self.meta());
+        let sl_rounded = round_price(sl_price, &self.meta());
+        let tp_rounded = round_price(tp_price, &self.meta());
         let order_id = id_from(tp_obj, "order_id");
         info!(
             order_id = %order_id,
@@ -413,15 +538,15 @@ impl Bot {
 
     async fn exchange_to_position(&self, side: Side, p: &ExchangePosition) -> Result<Position> {
         let open_price: f64 = p.avg_entry_price.parse().unwrap_or(0.0);
-        let lot = round_amount(p.open_interest.parse().unwrap_or(0.0), &self.meta);
+        let lot = round_amount(p.open_interest.parse().unwrap_or(0.0), &self.meta());
         let (default_tp, default_sl) = {
             let st = self.state.lock().await;
             st.calc_tp_sl(&side, open_price)
         };
         let had_tp = parse_optional_price(&p.take_profit_price);
         let had_sl = parse_optional_price(&p.stop_loss_price);
-        let tp_price = round_price(had_tp.unwrap_or(default_tp), &self.meta);
-        let sl_price = round_price(had_sl.unwrap_or(default_sl), &self.meta);
+        let tp_price = round_price(had_tp.unwrap_or(default_tp), &self.meta());
+        let sl_price = round_price(had_sl.unwrap_or(default_sl), &self.meta());
         if had_tp.is_none() {
             self.client.set_take_profit(&side, tp_price).await?;
         }
@@ -451,7 +576,7 @@ impl Bot {
             return Ok(());
         }
         warn!(
-            market = %self.client.config().market,
+            market = %self.client.market(),
             limits = limits.len(),
             stops = stops.len(),
             "open orders present — blocking new entry"
@@ -460,7 +585,7 @@ impl Bot {
             "refusing to open: {} pending limit and {} pending stop order(s) on {}",
             limits.len(),
             stops.len(),
-            self.client.config().market
+            self.client.market()
         ))
     }
 
@@ -516,9 +641,9 @@ impl Bot {
     /// Open a **new** cycle at min lot: shortage buy if needed, one limit TP.
     /// Spot: always forces `initial_lot` — step sizing is soft-SL modify only.
     async fn open_position(&self, side: Side, lot: f64) -> Result<()> {
-        let mut lot = round_amount(lot, &self.meta);
+        let mut lot = round_amount(lot, &self.meta());
         if self.client.config().is_spot() {
-            let initial = round_amount(self.state.lock().await.initial_lot, &self.meta);
+            let initial = round_amount(self.state.lock().await.initial_lot, &self.meta());
             if (lot - initial).abs() > f64::EPSILON {
                 warn!(
                     requested = lot,
@@ -545,11 +670,11 @@ impl Bot {
         if self.client.config().is_spot() && matches!(side, Side::Buy) {
             let available_base = self
                 .client
-                .get_available_balance(&self.client.config().base_ccy)
+                .get_available_balance(&self.client.base_ccy())
                 .await?;
             let need = (lot - available_base).max(0.0);
-            let need_rounded = round_amount(need, &self.meta);
-            if need_rounded >= self.meta.min_amount {
+            let need_rounded = round_amount(need, &self.meta());
+            if need_rounded >= self.meta().min_amount {
                 info!(
                     available_base,
                     lot,
@@ -564,7 +689,7 @@ impl Bot {
                 info!(
                     available_base,
                     lot,
-                    base = %self.client.config().base_ccy,
+                    base = %self.client.base_ccy(),
                     "open: free base covers lot — limit TP only"
                 );
             } else {
@@ -589,7 +714,7 @@ impl Bot {
 
         let mut position = self
             .client
-            .open_position_with_tp_sl(&side, lot, tp, sl, &self.meta)
+            .open_position_with_tp_sl(&side, lot, tp, sl, &self.meta())
             .await?;
 
         // Futures: refresh exchange TP/SL around actual fill if needed.
@@ -598,9 +723,9 @@ impl Bot {
                 let st = self.state.lock().await;
                 st.calc_tp_sl(&side, position.open_price)
             };
-            let tp2 = round_price(tp2, &self.meta);
-            let sl2 = round_price(sl2, &self.meta);
-            let tick = self.meta.tick_size.max(1e-12);
+            let tp2 = round_price(tp2, &self.meta());
+            let sl2 = round_price(sl2, &self.meta());
+            let tick = self.meta().tick_size.max(1e-12);
             if (tp2 - position.tp_price).abs() > tick / 2.0
                 || (sl2 - position.sl_price).abs() > tick / 2.0
             {
@@ -708,10 +833,12 @@ impl Bot {
         }
 
         *self.closing.lock().await = true;
+        self.select_market_if_idle().await;
         let lot = self.state.lock().await.initial_lot;
         info!(
             side = side.label(),
             lot,
+            market = %self.client.market(),
             "idle ensure: no position and no bot TP — opening new cycle"
         );
         let result = self.open_position(side.clone(), lot).await;
@@ -865,9 +992,9 @@ impl Bot {
 
         // Pending API can briefly omit an order while KOMA is still frozen in it —
         // do not treat that as a fill (would buy a second lot and break the invariant).
-        let base = self.client.config().base_ccy.clone();
+        let base = self.client.base_ccy().clone();
         if let Ok((available, frozen)) = self.client.get_balance_parts(&base).await {
-            if frozen + f64::EPSILON >= self.meta.min_amount.min(lot * 0.5) {
+            if frozen + f64::EPSILON >= self.meta().min_amount.min(lot * 0.5) {
                 warn!(
                     %oid,
                     available,
@@ -903,8 +1030,9 @@ impl Bot {
     ) -> Result<()> {
         let target_lot = {
             let mut st = self.state.lock().await;
-            match st.next_lot_after_sl_add(current_lot) {
-                Ok(lot) => lot,
+            let stepped_from = snap_amount_to_min(current_lot, &self.meta());
+            match st.next_lot_after_sl_add(stepped_from) {
+                Ok(lot) => snap_amount_to_min(lot, &self.meta()),
                 Err(BotError::LotExceedsMax { lot, max_lot }) => {
                     warn!(
                         current_lot,
@@ -918,8 +1046,8 @@ impl Bot {
                 Err(e) => return Err(e.into()),
             }
         };
-        let theoretical_add = round_amount(target_lot - current_lot, &self.meta);
-        if theoretical_add < self.meta.min_amount {
+        let theoretical_add = round_amount(target_lot - current_lot, &self.meta());
+        if theoretical_add < self.meta().min_amount {
             warn!(
                 current_lot,
                 target_lot,
@@ -941,13 +1069,13 @@ impl Bot {
         self.clear_busy_tp_fill().await;
 
         let price = self.client.get_last_price().await.unwrap_or(last);
-        let base = self.client.config().base_ccy.clone();
+        let base = self.client.base_ccy().clone();
         let (available, frozen) = self.client.get_balance_parts(&base).await?;
         let inventory = available + frozen;
         // Shortage only: never market-buy the whole target_lot when base is already held
         // (including amount frozen in the resting TP).
         let need = (target_lot - inventory).max(0.0);
-        let buy_qty = ceil_amount(need * 1.004, &self.meta);
+        let buy_qty = ceil_amount_to_min(need, &self.meta());
 
         info!(
             available,
@@ -963,7 +1091,7 @@ impl Bot {
         let mut filled_add = 0.0;
         let mut add_price = price;
         let mut did_buy = false;
-        if buy_qty >= self.meta.min_amount {
+        if buy_qty >= self.meta().min_amount {
             if let Err(e) = self
                 .client
                 .ensure_balance_for_lot(&side, buy_qty, price)
@@ -988,11 +1116,11 @@ impl Bot {
                         price
                     };
                     filled_add = if add.filled_amount > 0.0 {
-                        round_amount(add.filled_amount, &self.meta)
+                        round_amount(add.filled_amount, &self.meta())
                     } else {
                         buy_qty
                     };
-                    if filled_add + f64::EPSILON < self.meta.min_amount {
+                    if filled_add + f64::EPSILON < self.meta().min_amount {
                         error!(
                             filled_add,
                             buy_qty,
@@ -1083,7 +1211,7 @@ impl Bot {
         let new_avg = BotState::average_after_add(open_price, current_lot, add_price, filled_add);
         // After this add, lot is × LOT_STEP_COEFF → one more soft-SL step. Levels shift by % of
         // **first entry**, never by the add-fill / last price.
-        let open_rounded = round_price(open_price, &self.meta);
+        let open_rounded = round_price(open_price, &self.meta());
         let steps_after = {
             let st = self.state.lock().await;
             st.soft_sl_steps_from_lot(target_lot)
@@ -1092,8 +1220,8 @@ impl Bot {
             let st = self.state.lock().await;
             st.calc_tp_sl_at_step(&side, open_rounded, steps_after)
         };
-        let tp_price = round_price(raw_tp, &self.meta);
-        let sl_price = round_price(raw_sl, &self.meta);
+        let tp_price = round_price(raw_tp, &self.meta());
+        let sl_price = round_price(raw_sl, &self.meta());
         info!(
             did_buy,
             add_price,
@@ -1106,13 +1234,13 @@ impl Bot {
 
         let prefix = side_prefix(&side);
         let exit_side = side.opposite();
-        let sellable = round_amount(avail_now + frozen_now, &self.meta);
+        let sellable = round_amount(avail_now + frozen_now, &self.meta());
 
-        // Only allow tiny fee shortfall clamp; large gap → freeze, do NOT modify.
+        // TP everything we hold so leftover dust is not left free on the wallet.
         let mut new_lot = target_lot;
         if sellable + f64::EPSILON < target_lot {
             let shortfall = target_lot - sellable;
-            if shortfall <= target_lot * 0.01 || shortfall < self.meta.min_amount {
+            if shortfall <= target_lot * 0.01 || shortfall < self.meta().min_amount {
                 warn!(
                     target = target_lot,
                     sellable,
@@ -1130,6 +1258,13 @@ impl Bot {
                 st.set_position(position);
                 return Ok(());
             }
+        } else if sellable > target_lot + f64::EPSILON {
+            info!(
+                target = target_lot,
+                sellable,
+                "soft SL: TP amount = full inventory (absorb leftover dust)"
+            );
+            new_lot = sellable;
         }
 
         // Final pre-modify check: KOMA >= new_lot (no credit).
@@ -1155,7 +1290,7 @@ impl Bot {
                 // Modify ONLY after shortage buy (if any) + KOMA >= new_lot verified.
                 // client_id keeps first-entry open price (not add fill).
                 &make_bot_tp_client_id(prefix, open_rounded),
-                &self.meta,
+                &self.meta(),
             )
             .await
         {
@@ -1227,7 +1362,7 @@ impl Bot {
             add_price,
             old_lot = current_lot,
             new_lot,
-            avg_entry = round_price(new_avg, &self.meta),
+            avg_entry = round_price(new_avg, &self.meta()),
             first_entry = open_rounded,
             tp = tp_price,
             sl = sl_price,
@@ -1410,28 +1545,6 @@ impl Bot {
             "position closed"
         );
 
-        // Spot: any reopen after TP is a NEW order → always INITIAL min lot.
-        // Futures StopLoss may still double via close-and-reopen.
-        let next_lot = {
-            let st = self.state.lock().await;
-            if self.client.config().is_spot() {
-                info!(
-                    reason = reason.as_str(),
-                    closed_lot = position.lot,
-                    next_lot = st.initial_lot,
-                    "spot reopen: NEW cycle at working min lot (exchange_min × LOT_COEFF)"
-                );
-                st.initial_lot
-            } else {
-                st.next_lot_after_close(position.lot, reason)?
-            }
-        };
-        {
-            let mut st = self.state.lock().await;
-            st.current_lot = next_lot;
-            st.sl_frozen = false;
-        }
-
         match self.wait_until_ready_to_reopen(&position.side).await {
             Ok(()) => {}
             Err(e) => {
@@ -1466,18 +1579,40 @@ impl Bot {
             }
         }
 
-        // After TP: sell any leftover base so the next cycle starts clean at initial_lot.
-        // Never treat a KOMA tail as inventory for a martingale ×2 buy.
+        // After TP: sell leftover base of the CLOSED market, then maybe switch pair.
         if self.client.config().is_spot() && matches!(reason, CloseReason::TakeProfit) {
-            if let Err(e) = self.client.drain_spot_base_tail(&self.meta).await {
+            if let Err(e) = self.client.drain_spot_base_tail(&self.meta()).await {
                 warn!(error = %e, "drain base tail after TP failed");
             }
+            self.select_market_if_idle().await;
+        }
+
+        let next_lot = {
+            let st = self.state.lock().await;
+            if self.client.config().is_spot() {
+                info!(
+                    reason = reason.as_str(),
+                    closed_lot = position.lot,
+                    next_lot = st.initial_lot,
+                    market = %self.client.market(),
+                    "spot reopen: NEW cycle at working min lot (exchange_min × LOT_COEFF)"
+                );
+                st.initial_lot
+            } else {
+                st.next_lot_after_close(position.lot, reason)?
+            }
+        };
+        {
+            let mut st = self.state.lock().await;
+            st.current_lot = next_lot;
+            st.sl_frozen = false;
         }
 
         info!(
             side = position.side.label(),
             reason = reason.as_str(),
             next_lot,
+            market = %self.client.market(),
             "reopening one-sided martingale entry"
         );
         self.open_position(position.side, next_lot).await?;

@@ -12,6 +12,7 @@ use serde::Deserialize;
 use serde_json::{json, Value};
 use sha2::Sha256;
 use std::io::Read;
+use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -71,9 +72,17 @@ pub enum WsEvent {
     Disconnected,
 }
 
+struct LiveMarket {
+    market: String,
+    base_ccy: String,
+    quote_ccy: String,
+    working_min_lot: f64,
+}
+
 pub struct CoinExClient {
     http: Client,
     config: BotConfig,
+    live: Mutex<LiveMarket>,
 }
 
 impl CoinExClient {
@@ -82,11 +91,48 @@ impl CoinExClient {
             .timeout(Duration::from_secs(30))
             .build()
             .context("failed to build HTTP client")?;
-        Ok(Self { http, config })
+        let live = LiveMarket {
+            market: config.market.clone(),
+            base_ccy: config.base_ccy.clone(),
+            quote_ccy: config.quote_ccy.clone(),
+            working_min_lot: 0.0,
+        };
+        Ok(Self {
+            http,
+            config,
+            live: Mutex::new(live),
+        })
     }
 
     pub fn config(&self) -> &BotConfig {
         &self.config
+    }
+
+    pub fn market(&self) -> String {
+        self.live.lock().expect("live market lock").market.clone()
+    }
+
+    pub fn base_ccy(&self) -> String {
+        self.live.lock().expect("live market lock").base_ccy.clone()
+    }
+
+    pub fn quote_ccy(&self) -> String {
+        self.live.lock().expect("live market lock").quote_ccy.clone()
+    }
+
+    pub fn set_live_market(&self, market: &str, base: &str, quote: &str) {
+        let mut g = self.live.lock().expect("live market lock");
+        g.market = market.to_string();
+        g.base_ccy = base.to_string();
+        g.quote_ccy = quote.to_string();
+    }
+
+    pub fn set_working_min_lot(&self, lot: f64) {
+        self.live.lock().expect("live market lock").working_min_lot = lot;
+    }
+
+    pub fn working_min_lot(&self) -> f64 {
+        self.live.lock().expect("live market lock").working_min_lot
     }
 
     fn api_market_type(&self) -> &'static str {
@@ -181,11 +227,11 @@ impl CoinExClient {
             MarketKind::Futures => "/futures/market",
             MarketKind::Spot => "/spot/market",
         };
-        let query = format!("market={}", self.config.market);
+        let query = format!("market={}", self.market());
         let data: Vec<Value> = self.request("GET", path, Some(&query), None).await?;
         let first = data
             .first()
-            .ok_or_else(|| anyhow!("market {} not found", self.config.market))?;
+            .ok_or_else(|| anyhow!("market {} not found", self.market()))?;
         let amount_precision = first
             .get("base_ccy_precision")
             .and_then(|v| v.as_u64())
@@ -213,12 +259,41 @@ impl CoinExClient {
         })
     }
 
+    pub async fn get_spot_tickers(&self) -> Result<Vec<Value>> {
+        self.request("GET", "/spot/ticker", None, None).await
+    }
+
+    pub async fn get_spot_depth(&self, market: &str) -> Result<Value> {
+        let query = format!("market={market}&limit=5&interval=0");
+        self.request("GET", "/spot/depth", Some(&query), None).await
+    }
+
+    pub async fn get_all_pending_orders(&self) -> Result<Vec<Value>> {
+        let path = if self.config.is_spot() {
+            "/spot/pending-order"
+        } else {
+            "/futures/pending-order"
+        };
+        let query = format!(
+            "market_type={}&page=1&limit=100",
+            self.api_market_type()
+        );
+        let data: Value = self.request("GET", path, Some(&query), None).await?;
+        if let Some(arr) = data.as_array() {
+            return Ok(arr.clone());
+        }
+        if let Some(arr) = data.get("records").and_then(|v| v.as_array()) {
+            return Ok(arr.clone());
+        }
+        Ok(Vec::new())
+    }
+
     pub async fn get_last_price(&self) -> Result<f64> {
         let path = match self.config.market_kind {
             MarketKind::Futures => "/futures/ticker",
             MarketKind::Spot => "/spot/ticker",
         };
-        let query = format!("market={}", self.config.market);
+        let query = format!("market={}", self.market());
         let data: Vec<Value> = self.request("GET", path, Some(&query), None).await?;
         let last = data
             .first()
@@ -302,7 +377,7 @@ impl CoinExClient {
         }
         let query = format!(
             "market={}&market_type=FUTURES&page=1&limit=100",
-            self.config.market
+            self.market()
         );
         let data: Vec<ExchangePosition> = self
             .request("GET", "/futures/pending-position", Some(&query), None)
@@ -310,7 +385,7 @@ impl CoinExClient {
         Ok(data
             .into_iter()
             .filter(|p| {
-                p.market.eq_ignore_ascii_case(&self.config.market)
+                p.market.eq_ignore_ascii_case(&self.market())
                     && p.open_interest.parse::<f64>().unwrap_or(0.0) > 0.0
             })
             .collect())
@@ -324,7 +399,7 @@ impl CoinExClient {
         };
         let query = format!(
             "market={}&market_type={}&page=1&limit=100",
-            self.config.market,
+            self.market(),
             self.api_market_type()
         );
         self.request("GET", path, Some(&query), None).await
@@ -336,7 +411,7 @@ impl CoinExClient {
         }
         let query = format!(
             "market={}&market_type=SPOT&page=1&limit=100",
-            self.config.market
+            self.market()
         );
         self.request("GET", "/spot/pending-stop-order", Some(&query), None)
             .await
@@ -348,19 +423,19 @@ impl CoinExClient {
             (
                 "/spot/order",
                 json!({
-                    "market": self.config.market,
+                    "market": self.market(),
                     "market_type": "SPOT",
                     "side": side.as_order_side(),
                     "type": "market",
                     "amount": amount_str,
-                    "ccy": self.config.base_ccy,
+                    "ccy": self.base_ccy(),
                 }),
             )
         } else {
             (
                 "/futures/order",
                 json!({
-                    "market": self.config.market,
+                    "market": self.market(),
                     "market_type": "FUTURES",
                     "side": side.as_order_side(),
                     "type": "market",
@@ -371,7 +446,7 @@ impl CoinExClient {
         info!(
             side = side.label(),
             amount = %amount_str,
-            market = %self.config.market,
+            market = %self.market(),
             mode = self.config.market_kind.label(),
             "placing market order"
         );
@@ -387,7 +462,7 @@ impl CoinExClient {
         client_id: &str,
     ) -> Result<String> {
         let body = json!({
-            "market": self.config.market,
+            "market": self.market(),
             "market_type": "SPOT",
             "side": side.as_order_side(),
             "type": "limit",
@@ -400,7 +475,7 @@ impl CoinExClient {
             side = side.label(),
             amount,
             price,
-            market = %self.config.market,
+            market = %self.market(),
             "placing spot limit order"
         );
         let data: Value = self.request("POST", "/spot/order", None, Some(body)).await?;
@@ -455,7 +530,7 @@ impl CoinExClient {
             .parse()
             .with_context(|| format!("invalid spot order_id for modify: {order_id}"))?;
         let body = json!({
-            "market": self.config.market,
+            "market": self.market(),
             "market_type": "SPOT",
             "order_id": order_id_num,
             "amount": format_amount(amount),
@@ -465,7 +540,7 @@ impl CoinExClient {
             %order_id,
             amount,
             price,
-            market = %self.config.market,
+            market = %self.market(),
             "modifying spot limit order in place"
         );
         let data: Value = self
@@ -494,7 +569,7 @@ impl CoinExClient {
 
     /// Wait until `available + frozen` covers `need` (post market-buy settlement).
     pub async fn wait_spot_base_cover(&self, need: f64, attempts: u32) -> Result<(f64, f64)> {
-        let base = self.config.base_ccy.clone();
+        let base = self.base_ccy().clone();
         let mut last = (0.0_f64, 0.0_f64);
         for i in 1..=attempts.max(1) {
             last = self.get_balance_parts(&base).await?;
@@ -712,7 +787,7 @@ impl CoinExClient {
 
     /// Sell all free (available) base ≥ min_amount without touching a frozen TP.
     pub async fn sell_spot_available_excess(&self, meta: &MarketMeta) -> Result<()> {
-        let base = &self.config.base_ccy;
+        let base = &self.base_ccy();
         let available = self.get_available_balance(base).await?;
         let sell_qty = round_amount(available, meta);
         if sell_qty >= meta.min_amount {
@@ -741,12 +816,12 @@ impl CoinExClient {
         client_id: &str,
     ) -> Result<String> {
         let body = json!({
-            "market": self.config.market,
+            "market": self.market(),
             "market_type": "SPOT",
             "side": side.as_order_side(),
             "type": "market",
             "amount": format_amount(amount),
-            "ccy": self.config.base_ccy,
+            "ccy": self.base_ccy(),
             "trigger_price": format_price(trigger_price),
             "client_id": client_id,
         });
@@ -758,7 +833,7 @@ impl CoinExClient {
 
     pub async fn cancel_order(&self, order_id: &str) -> Result<()> {
         let body = json!({
-            "market": self.config.market,
+            "market": self.market(),
             "market_type": self.api_market_type(),
             "order_id": order_id.parse::<i64>().unwrap_or(0),
         });
@@ -773,7 +848,7 @@ impl CoinExClient {
 
     pub async fn cancel_stop_order(&self, stop_id: &str) -> Result<()> {
         let body = json!({
-            "market": self.config.market,
+            "market": self.market(),
             "market_type": "SPOT",
             "stop_id": stop_id.parse::<i64>().unwrap_or(0),
         });
@@ -788,7 +863,7 @@ impl CoinExClient {
             bail!("set_take_profit is futures-only");
         }
         let body = json!({
-            "market": self.config.market,
+            "market": self.market(),
             "market_type": "FUTURES",
             "side": side.as_position_side(),
             "take_profit_type": self.config.tp_sl_trigger,
@@ -802,7 +877,7 @@ impl CoinExClient {
             Err(e) => {
                 warn!(error = %e, "set TP with side failed, retrying without side");
                 let body = json!({
-                    "market": self.config.market,
+                    "market": self.market(),
                     "market_type": "FUTURES",
                     "take_profit_type": self.config.tp_sl_trigger,
                     "take_profit_price": format_price(price),
@@ -819,7 +894,7 @@ impl CoinExClient {
             bail!("set_stop_loss is futures-only");
         }
         let body = json!({
-            "market": self.config.market,
+            "market": self.market(),
             "market_type": "FUTURES",
             "side": side.as_position_side(),
             "stop_loss_type": self.config.tp_sl_trigger,
@@ -833,7 +908,7 @@ impl CoinExClient {
             Err(e) => {
                 warn!(error = %e, "set SL with side failed, retrying without side");
                 let body = json!({
-                    "market": self.config.market,
+                    "market": self.market(),
                     "market_type": "FUTURES",
                     "stop_loss_type": self.config.tp_sl_trigger,
                     "stop_loss_price": format_price(price),
@@ -904,8 +979,8 @@ impl CoinExClient {
         })
     }
 
-    /// Spot BUY: ensure free base ≥ `lot` by market-buying only the shortage
-    /// (fee-padded). Does NOT sell excess — leftover KOMA stays free.
+    /// Spot BUY: ensure free base ≥ `lot` by market-buying only the shortage,
+    /// snapped up to a whole `min_amount` (no fee-pad fractions).
     /// Returns `(available_after, buy_fill_price)` — `buy_fill_price` is `Some` only
     /// when a shortage market buy actually executed (use as TP/SL anchor).
     pub async fn ensure_spot_base_for_lot(
@@ -914,7 +989,7 @@ impl CoinExClient {
         meta: &MarketMeta,
     ) -> Result<(f64, Option<f64>)> {
         let lot = round_amount(lot, meta);
-        let base = &self.config.base_ccy;
+        let base = &self.base_ccy();
         let available = self.get_available_balance(base).await?;
         if available + f64::EPSILON >= lot {
             info!(
@@ -926,7 +1001,7 @@ impl CoinExClient {
             return Ok((available, None));
         }
         let need = lot - available;
-        let buy_qty = ceil_amount(need * 1.004, meta);
+        let buy_qty = ceil_amount_to_min(need, meta);
         if buy_qty < meta.min_amount {
             info!(
                 available,
@@ -942,7 +1017,7 @@ impl CoinExClient {
             need,
             buy_qty,
             base = %base,
-            "spot open: market-buying shortage (fee-padded)"
+            "spot open: market-buying shortage (whole min_amount steps)"
         );
         let order = self.place_market_order(&Side::Buy, buy_qty).await?;
         let fill = if order.filled_price > 0.0 {
@@ -960,7 +1035,7 @@ impl CoinExClient {
 
     /// Sell all free base (≥ min_amount). Used after TP so no KOMA tail remains.
     pub async fn drain_spot_base_tail(&self, meta: &MarketMeta) -> Result<()> {
-        let base = &self.config.base_ccy;
+        let base = &self.base_ccy();
         let available = self.get_available_balance(base).await?;
         let sell_qty = round_amount(available, meta);
         if sell_qty >= meta.min_amount {
@@ -1015,10 +1090,16 @@ impl CoinExClient {
                         meta.min_amount
                     );
                 }
-                // Working lot = requested size, not the whole wallet.
-                lot = sellable.min(requested);
+                // TP the whole free balance so leftover dust is not left hanging.
+                lot = sellable;
                 if lot + f64::EPSILON < requested {
                     warn!(requested, lot, "TP amount clamped to available after fees");
+                } else if lot > requested + f64::EPSILON {
+                    info!(
+                        requested,
+                        lot,
+                        "spot open: TP includes leftover dust on balance"
+                    );
                 }
                 if let Some(fp) = buy_fill.filter(|p| *p > 0.0) {
                     fill_anchor = fp;
@@ -1166,13 +1247,13 @@ impl CoinExClient {
             match side {
                 Side::Buy => {
                     let required = lot * price * 1.05;
-                    let available = self.get_available_balance(&self.config.quote_ccy).await?;
+                    let available = self.get_available_balance(&self.quote_ccy()).await?;
                     if available < required {
                         return Err(BotError::InsufficientBalance { lot, available }.into());
                     }
                 }
                 Side::Sell => {
-                    let available = self.get_available_balance(&self.config.base_ccy).await?;
+                    let available = self.get_available_balance(&self.base_ccy()).await?;
                     if available < lot {
                         return Err(BotError::InsufficientBalance { lot, available }.into());
                     }
@@ -1239,12 +1320,17 @@ impl CoinExClient {
             ))
             .await
             .context("send auth")?;
+        let order_markets = if self.config.auto_market {
+            json!([])
+        } else {
+            json!([self.market()])
+        };
         write
             .send(Message::Text(
                 json!({
                     "id": 2,
                     "method": "order.subscribe",
-                    "params": { "market_list": [self.config.market] }
+                    "params": { "market_list": order_markets }
                 })
                 .to_string()
                 .into(),
@@ -1258,7 +1344,7 @@ impl CoinExClient {
                     json!({
                         "id": 3,
                         "method": "state.subscribe",
-                        "params": { "market_list": [self.config.market] }
+                        "params": { "market_list": [self.market()] }
                     })
                     .to_string()
                     .into(),
@@ -1271,7 +1357,7 @@ impl CoinExClient {
                     json!({
                         "id": 3,
                         "method": "position.subscribe",
-                        "params": { "market_list": [self.config.market] }
+                        "params": { "market_list": [self.market()] }
                     })
                     .to_string()
                     .into(),
@@ -1341,7 +1427,7 @@ impl CoinExClient {
                     }
                 }
                 "state.update" => {
-                    if let Some(event) = parse_state_update(&value, &self.config.market) {
+                    if let Some(event) = parse_state_update(&value, &self.market()) {
                         let _ = tx.send(event).await;
                     }
                 }
@@ -1536,6 +1622,24 @@ pub fn round_amount(amount: f64, meta: &MarketMeta) -> f64 {
 pub fn ceil_amount(amount: f64, meta: &MarketMeta) -> f64 {
     let factor = 10f64.powi(meta.amount_precision as i32);
     (amount * factor).ceil() / factor
+}
+
+/// Smallest whole `min_amount` that covers `amount` (500, 1000, … — no 502.20 tails).
+pub fn ceil_amount_to_min(amount: f64, meta: &MarketMeta) -> f64 {
+    if amount <= 0.0 || meta.min_amount <= 0.0 {
+        return 0.0;
+    }
+    let steps = (amount / meta.min_amount).ceil().max(1.0);
+    round_amount(steps * meta.min_amount, meta)
+}
+
+/// Nearest whole `min_amount` (at least one step). Used to keep martingale lots round.
+pub fn snap_amount_to_min(amount: f64, meta: &MarketMeta) -> f64 {
+    if amount <= 0.0 || meta.min_amount <= 0.0 {
+        return round_amount(amount.max(0.0), meta);
+    }
+    let steps = (amount / meta.min_amount).round().max(1.0);
+    round_amount(steps * meta.min_amount, meta)
 }
 
 pub fn round_price(price: f64, meta: &MarketMeta) -> f64 {

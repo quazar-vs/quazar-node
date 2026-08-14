@@ -245,6 +245,11 @@ mod tests {
             ws_url: "wss://socket.coinex.com/v2/spot".into(),
             quote_ccy: "USDT".into(),
             base_ccy: "KOMA".into(),
+            auto_market: false,
+            min_turnover_usdt: 50_000.0,
+            max_spread_pct: 0.5,
+            market_blacklist: vec![],
+            scanner_quote: "USDT".into(),
         }
     }
 
