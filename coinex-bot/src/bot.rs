@@ -1,7 +1,7 @@
 //! Spot BUY martingale: always exactly one limit TP.
 //! Start: botB_tp → restore (first open from client_id; TP untouched); else NEW at exchange_min × LOT_COEFF.
 //! New cycle: min lot; TP/SL = ±% of first fill.
-//! Soft SL: ×2 via modify; TP and SL each shift by another sl% of **first entry** (not add fill).
+//! Soft SL: × LOT_STEP_COEFF via modify; TP and SL each shift by another TP_SL_PERCENT of **first entry** (not add fill).
 //! If TP fills mid-add — reopen at min lot. If USDT short — freeze.
 //! Idle ensure: if memory has no position and no bot TP on the book → open one new cycle (retry on fail).
 
@@ -368,14 +368,7 @@ impl Bot {
         // Prefer first-entry encoded in client_id — TP price alone is wrong after soft-SL shifts.
         let open_price = parse_open_from_bot_tp_client_id(live_cid)
             .unwrap_or_else(|| cfg.infer_open_from_tp(buy, tp_price));
-        let steps = {
-            let initial = cfg.initial_lot;
-            if initial > 0.0 && lot / initial >= 1.5 {
-                ((lot / initial).ln() / std::f64::consts::LN_2).round().max(0.0) as u32
-            } else {
-                0
-            }
-        };
+        let steps = cfg.soft_sl_steps_from_lot(lot);
         let (_, sl_price) = cfg.calc_tp_sl_at_step(buy, open_price, steps);
         let open_rounded = round_price(open_price, &self.meta);
         let sl_rounded = round_price(sl_price, &self.meta);
@@ -521,7 +514,7 @@ impl Bot {
     }
 
     /// Open a **new** cycle at min lot: shortage buy if needed, one limit TP.
-    /// Spot: always forces `initial_lot` — ×2 sizing is soft-SL modify only.
+    /// Spot: always forces `initial_lot` — step sizing is soft-SL modify only.
     async fn open_position(&self, side: Side, lot: f64) -> Result<()> {
         let mut lot = round_amount(lot, &self.meta);
         if self.client.config().is_spot() {
@@ -530,7 +523,7 @@ impl Bot {
                 warn!(
                     requested = lot,
                     initial,
-                    "new spot cycle forced to working min lot (×2 only via soft-SL modify)"
+                    "new spot cycle forced to working min lot (lot step only via soft-SL modify)"
                 );
                 lot = initial;
             }
@@ -896,10 +889,10 @@ impl Bot {
         self.on_spot_tp_fill(oid, last, "").await
     }
 
-    /// Spot soft SL: market-buy only shortage to ×2 lot while TP stays on the book,
+    /// Spot soft SL: market-buy only shortage to next lot (× LOT_STEP_COEFF) while TP stays on the book,
     /// then amend the existing limit TP (price+amount) via `/spot/modify-order`.
     /// If TP fills during the add — abort soft SL and reopen at INITIAL (never leave
-    /// stranded KOMA without a single TP, never buy a fresh full ×2 from zero).
+    /// stranded KOMA without a single TP, never buy a fresh full stepped lot from zero).
     async fn on_spot_soft_sl_add(
         &self,
         id: String,
@@ -917,7 +910,7 @@ impl Bot {
                         current_lot,
                         next_lot = lot,
                         max_lot,
-                        "soft SL: ×2 exceeds max_lot — freezing TP until fill"
+                        "soft SL: next lot exceeds max_lot — freezing TP until fill"
                     );
                     st.sl_frozen = true;
                     return Ok(());
@@ -1040,7 +1033,7 @@ impl Bot {
                 target_lot,
                 available,
                 frozen,
-                "soft SL: inventory already covers ×2 target — no market buy"
+                "soft SL: inventory already covers stepped target — no market buy"
             );
         }
 
@@ -1067,7 +1060,7 @@ impl Bot {
                 .await;
         }
 
-        // Market buy may settle asynchronously — wait until inventory covers ×2
+        // Market buy may settle asynchronously — wait until inventory covers the stepped lot
         // before asking CoinEx to enlarge the resting sell TP.
         let (avail_now, frozen_now) = match self
             .client
@@ -1088,7 +1081,7 @@ impl Bot {
         };
 
         let new_avg = BotState::average_after_add(open_price, current_lot, add_price, filled_add);
-        // After this add, lot is ×2 → one more soft-SL step. Levels shift by sl% of
+        // After this add, lot is × LOT_STEP_COEFF → one more soft-SL step. Levels shift by % of
         // **first entry**, never by the add-fill / last price.
         let open_rounded = round_price(open_price, &self.meta);
         let steps_after = {
@@ -1130,7 +1123,7 @@ impl Bot {
                 warn!(
                     target = target_lot,
                     sellable,
-                    "soft SL: KOMA still < ×2 after buy — freeze, TP untouched"
+                    "soft SL: KOMA still below stepped lot after buy — freeze, TP untouched"
                 );
                 let mut st = self.state.lock().await;
                 st.sl_frozen = true;
@@ -1192,14 +1185,14 @@ impl Bot {
                     error = %e,
                     target = new_lot,
                     tp = tp_price,
-                    "soft SL: ensure TP failed — state NOT updated to ×2 (no silent success)"
+                    "soft SL: ensure TP failed — state NOT updated to stepped lot (no silent success)"
                 );
                 self.state.lock().await.set_position(position);
                 return Err(e).context("soft SL failed to ensure limit TP — cycle not complete");
             }
         };
 
-        // Final gate: live book amount must be ×2 before we commit memory.
+        // Final gate: live book amount must match the stepped lot before we commit memory.
         if let Err(e) = self
             .client
             .confirm_pending_order_size(&tp_order_id, new_lot, tp_price)

@@ -1,8 +1,8 @@
 //! One-sided martingale strategy state and lot sizing.
 //!
 //! Spot start: restore botB_tp (open from client_id; TP untouched), else NEW at exchange_min × LOT_COEFF.
-//! New cycle: min lot; TP/SL = ±% from first entry.
-//! Soft SL: ×2 lot; TP and SL each shift by another −/+ sl% of first entry (never from add fill).
+//! New cycle: min lot; TP/SL = ±TP_SL_PERCENT from first entry.
+//! Soft SL: lot × LOT_STEP_COEFF; TP and SL each shift by another −/+ % of first entry (never from add fill).
 
 use crate::config::{BotConfig, TradeSide};
 use crate::error::BotError;
@@ -100,7 +100,7 @@ pub struct BotState {
     pub max_lot: f64,
     pub trade_side: Side,
     pub is_running: bool,
-    /// Soft SL frozen: not enough USDT to ×2 — keep TP as-is until it fills.
+    /// Soft SL frozen: not enough USDT to step the lot — keep TP as-is until it fills.
     pub sl_frozen: bool,
 }
 
@@ -140,16 +140,9 @@ impl BotState {
             .calc_tp_sl_at_step(matches!(side, Side::Buy), first_open, soft_sl_steps)
     }
 
-    /// How many soft-SL doubles are reflected in `lot` vs working min lot (100→0, 200→1, 400→2).
+    /// How many soft-SL steps are reflected in `lot` vs working min lot.
     pub fn soft_sl_steps_from_lot(&self, lot: f64) -> u32 {
-        if self.initial_lot <= 0.0 || lot <= 0.0 {
-            return 0;
-        }
-        let ratio = lot / self.initial_lot;
-        if ratio < 1.5 {
-            return 0;
-        }
-        (ratio.ln() / std::f64::consts::LN_2).round().max(0.0) as u32
+        self.config.soft_sl_steps_from_lot(lot)
     }
 
     pub fn detect_close_reason(position: &Position, close_price: f64) -> CloseReason {
@@ -178,7 +171,7 @@ impl BotState {
         let next = match reason {
             CloseReason::TakeProfit | CloseReason::Unknown => self.initial_lot,
             // Futures still close-and-reopen ×2 on SL. Spot uses `next_lot_after_sl_add`.
-            CloseReason::StopLoss => self.doubled_lot(closed_lot)?,
+            CloseReason::StopLoss => self.next_step_lot(closed_lot)?,
         };
         info!(
             reason = reason.as_str(),
@@ -189,27 +182,28 @@ impl BotState {
         Ok(next)
     }
 
-    /// Target lot after a spot soft-SL add (double current, hard-capped by max_lot).
+    /// Target lot after a spot soft-SL add (× LOT_STEP_COEFF, hard-capped by max_lot).
     pub fn next_lot_after_sl_add(&self, current_lot: f64) -> Result<f64, BotError> {
-        let next = self.doubled_lot(current_lot)?;
+        let next = self.next_step_lot(current_lot)?;
         info!(
             current_lot,
             next_lot = next,
             add_qty = next - current_lot,
+            lot_step_coeff = self.config.lot_step_coeff,
             "spot SL add: next lot"
         );
         Ok(next)
     }
 
-    fn doubled_lot(&self, lot: f64) -> Result<f64, BotError> {
-        let doubled = lot * 2.0;
-        if doubled > self.max_lot + f64::EPSILON {
+    fn next_step_lot(&self, lot: f64) -> Result<f64, BotError> {
+        let next = lot * self.config.lot_step_coeff;
+        if next > self.max_lot + f64::EPSILON {
             return Err(BotError::LotExceedsMax {
-                lot: doubled,
+                lot: next,
                 max_lot: self.max_lot,
             });
         }
-        Ok(doubled.min(self.max_lot))
+        Ok(next.min(self.max_lot))
     }
 
     /// Volume-weighted average entry after adding `add_qty` at `add_price`.
@@ -240,10 +234,10 @@ mod tests {
             market_kind: MarketKind::Spot,
             trade_side: TradeSide::Buy,
             lot_coeff: 2.0,
+            lot_step_coeff: 2.0,
             initial_lot: 100.0,
             max_lot: 800.0,
-            tp_percent: 10.0,
-            sl_percent: 10.0,
+            tp_sl_percent: 10.0,
             leverage: 10,
             margin_mode: "cross".into(),
             tp_sl_trigger: "latest_price".into(),
@@ -291,6 +285,13 @@ mod tests {
         assert_eq!(state.soft_sl_steps_from_lot(100.0), 0);
         assert_eq!(state.soft_sl_steps_from_lot(200.0), 1);
         assert_eq!(state.soft_sl_steps_from_lot(400.0), 2);
+        let mut cfg = sample_config();
+        cfg.lot_step_coeff = 1.5;
+        let stepped = BotState::new(cfg);
+        assert_eq!(stepped.soft_sl_steps_from_lot(100.0), 0);
+        assert_eq!(stepped.soft_sl_steps_from_lot(150.0), 1);
+        assert_eq!(stepped.soft_sl_steps_from_lot(225.0), 2);
+        assert!((stepped.next_lot_after_sl_add(100.0).unwrap() - 150.0).abs() < 1e-9);
     }
 
     #[test]

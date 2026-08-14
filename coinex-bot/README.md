@@ -8,7 +8,7 @@
 2. Ставит один limit TP; soft SL хранится в памяти.
 3. При закрытии:
    - **TP** → новый цикл снова с min lot (exchange_min × LOT_COEFF);
-   - **SL** → докупка shortage до ×2 + modify того же TP (не выше `MAX_LOT` / `MAX_LOT_SPOT`).
+   - **SL** → докупка shortage до `current × LOT_STEP_COEFF` + modify того же TP (не выше `MAX_LOT` / `MAX_LOT_SPOT`).
 4. Вторую сторону **не открывает** (не хедж).
 5. При старте: есть `botB_tp` → restore; нет → процедура открытия.
 
@@ -21,11 +21,11 @@
 - Вход: market
 - TP/SL: через position take-profit / stop-loss API
 
-### TP / SL (проценты от last)
+### TP / SL (один процент от первой сделки)
 
-- `BUY`: `TP = last × (1 + TP_PERCENT/100)`, `SL = last × (1 − SL_PERCENT/100)`
+- `BUY`: `TP = open × (1 + TP_SL_PERCENT/100)`, `SL = open × (1 − TP_SL_PERCENT/100)`
 - `SELL`: зеркально
-- После soft SL уровни тоже от **текущего last** в тех же единицах
+- После soft SL оба уровня сдвигаются ещё на тот же % от **первой** сделки
 
 ## Запуск
 
@@ -35,9 +35,9 @@ cp .env.example .env
 # MARKET_TYPE=spot
 # TRADE_SIDE=buy
 # LOT_COEFF=1
+# LOT_STEP_COEFF=2
 # MAX_LOT_SPOT=6400
-# TP_PERCENT=10
-# SL_PERCENT=10
+# TP_SL_PERCENT=10
 
 cargo run --release
 ```

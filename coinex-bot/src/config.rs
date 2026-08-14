@@ -50,14 +50,15 @@ pub struct BotConfig {
     /// Multiplier applied to exchange `min_amount` → working min lot.
     /// Env: `LOT_COEFF` or `LOT_MULTIPLIER` (default 1).
     pub lot_coeff: f64,
+    /// Soft-SL lot multiplier. Env: `LOT_STEP_COEFF` (default 2 → 100→200→400).
+    pub lot_step_coeff: f64,
     /// Working min lot = round(exchange_min × lot_coeff). Filled after market meta load.
     pub initial_lot: f64,
     /// Absolute martingale cap from `MAX_LOT` / `MAX_LOT_SPOT`.
     pub max_lot: f64,
-    /// Take-profit distance as percent of first-entry price (e.g. 10 = +10% for BUY).
-    pub tp_percent: f64,
-    /// Soft stop-loss distance as percent of first-entry price (e.g. 10 = -10% for BUY).
-    pub sl_percent: f64,
+    /// Shared TP and SL distance as percent of first-entry price.
+    /// Env: `TP_SL_PERCENT` (e.g. 5 = +5% TP and −5% SL for BUY).
+    pub tp_sl_percent: f64,
     pub leverage: u32,
     pub margin_mode: String,
     pub tp_sl_trigger: String,
@@ -103,6 +104,11 @@ impl BotConfig {
             .parse()
             .context("LOT_COEFF (or LOT_MULTIPLIER) must be a number")?;
 
+        let lot_step_coeff: f64 = env::var("LOT_STEP_COEFF")
+            .unwrap_or_else(|_| "2".to_string())
+            .parse()
+            .context("LOT_STEP_COEFF must be a number")?;
+
         let futures_max: f64 = env::var("MAX_LOT")
             .unwrap_or_else(|_| "0.064".to_string())
             .parse()
@@ -117,17 +123,15 @@ impl BotConfig {
             MarketKind::Futures => futures_max,
         };
 
-        // Prefer TP_PERCENT / SL_PERCENT; fall back to legacy TP_POINTS / SL_POINTS names.
-        let tp_percent: f64 = env::var("TP_PERCENT")
+        // One percent for both TP and SL. Legacy: TP_PERCENT / SL_PERCENT / TP_POINTS / SL_POINTS.
+        let tp_sl_percent: f64 = env::var("TP_SL_PERCENT")
+            .or_else(|_| env::var("TP_PERCENT"))
+            .or_else(|_| env::var("SL_PERCENT"))
             .or_else(|_| env::var("TP_POINTS"))
-            .unwrap_or_else(|_| "10".to_string())
-            .parse()
-            .context("TP_PERCENT (or TP_POINTS) must be a number")?;
-        let sl_percent: f64 = env::var("SL_PERCENT")
             .or_else(|_| env::var("SL_POINTS"))
             .unwrap_or_else(|_| "10".to_string())
             .parse()
-            .context("SL_PERCENT (or SL_POINTS) must be a number")?;
+            .context("TP_SL_PERCENT must be a number")?;
         let leverage: u32 = env::var("LEVERAGE")
             .unwrap_or_else(|_| "10".to_string())
             .parse()
@@ -156,11 +160,14 @@ impl BotConfig {
         if lot_coeff <= 0.0 {
             bail!("LOT_COEFF must be > 0");
         }
+        if lot_step_coeff <= 1.0 {
+            bail!("LOT_STEP_COEFF must be > 1 (e.g. 2 = double on soft SL)");
+        }
         if max_lot <= 0.0 {
             bail!("MAX_LOT / MAX_LOT_SPOT must be > 0");
         }
-        if tp_percent <= 0.0 || sl_percent <= 0.0 {
-            bail!("TP_PERCENT and SL_PERCENT must be > 0");
+        if tp_sl_percent <= 0.0 {
+            bail!("TP_SL_PERCENT must be > 0");
         }
         if market_kind == MarketKind::Futures && !(1..=100).contains(&leverage) {
             bail!("LEVERAGE must be between 1 and 100");
@@ -173,11 +180,11 @@ impl BotConfig {
             market_kind,
             trade_side,
             lot_coeff,
+            lot_step_coeff,
             // Resolved from exchange min_amount × lot_coeff after meta load.
             initial_lot: 0.0,
             max_lot,
-            tp_percent,
-            sl_percent,
+            tp_sl_percent,
             leverage,
             margin_mode,
             tp_sl_trigger,
@@ -226,27 +233,39 @@ impl BotConfig {
         Ok(())
     }
 
-    /// TP/SL from first entry: percent of that price.
-    /// BUY: TP = entry×(1+tp%), SL = entry×(1−sl%); SELL: mirrored.
+    /// How many soft-SL steps are in `lot` vs working min lot (`LOT_STEP_COEFF`).
+    pub fn soft_sl_steps_from_lot(&self, lot: f64) -> u32 {
+        let m = self.lot_step_coeff;
+        if self.initial_lot <= 0.0 || lot <= 0.0 || m <= 1.0 {
+            return 0;
+        }
+        let ratio = lot / self.initial_lot;
+        if ratio + f64::EPSILON < (1.0 + m) / 2.0 {
+            return 0;
+        }
+        (ratio.ln() / m.ln()).round().max(0.0) as u32
+    }
+
+    /// TP/SL from first entry: same percent both ways.
+    /// BUY: TP = entry×(1+p%), SL = entry×(1−p%); SELL: mirrored.
     pub fn calc_tp_sl(&self, buy: bool, first_open: f64) -> (f64, f64) {
-        let tp_m = self.tp_percent / 100.0;
-        let sl_m = self.sl_percent / 100.0;
+        let m = self.tp_sl_percent / 100.0;
         if buy {
-            (first_open * (1.0 + tp_m), first_open * (1.0 - sl_m))
+            (first_open * (1.0 + m), first_open * (1.0 - m))
         } else {
-            (first_open * (1.0 - tp_m), first_open * (1.0 + sl_m))
+            (first_open * (1.0 - m), first_open * (1.0 + m))
         }
     }
 
-    /// TP/SL after `soft_sl_steps` doubles, still anchored to the **first** entry.
-    /// Each soft-SL shifts both levels by `first_open × sl_percent/100` (adverse direction).
-    /// BUY step1: TP→entry, SL→entry−2×sl%; never uses the add-fill price.
+    /// TP/SL after `soft_sl_steps` lot steps, still anchored to the **first** entry.
+    /// Each soft-SL shifts both levels by `first_open × TP_SL_PERCENT/100` (adverse direction).
+    /// BUY step1 with 10%: TP→entry, SL→entry−20%; never uses the add-fill price.
     pub fn calc_tp_sl_at_step(&self, buy: bool, first_open: f64, soft_sl_steps: u32) -> (f64, f64) {
         let (base_tp, base_sl) = self.calc_tp_sl(buy, first_open);
         if soft_sl_steps == 0 || first_open <= 0.0 {
             return (base_tp, base_sl);
         }
-        let shift = first_open * (self.sl_percent / 100.0) * f64::from(soft_sl_steps);
+        let shift = first_open * (self.tp_sl_percent / 100.0) * f64::from(soft_sl_steps);
         if buy {
             (base_tp - shift, base_sl - shift)
         } else {
@@ -256,7 +275,7 @@ impl BotConfig {
 
     /// Infer approximate open from an existing TP limit price (step 0 only).
     pub fn infer_open_from_tp(&self, buy: bool, tp_price: f64) -> f64 {
-        let tp_m = self.tp_percent / 100.0;
+        let tp_m = self.tp_sl_percent / 100.0;
         if buy {
             tp_price / (1.0 + tp_m)
         } else {

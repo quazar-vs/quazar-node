@@ -29,9 +29,9 @@ async fn main() -> Result<()> {
         mode = config.market_kind.label(),
         side = config.trade_side.as_str(),
         lot_coeff = config.lot_coeff,
+        lot_step_coeff = config.lot_step_coeff,
         max_lot = config.max_lot,
-        tp_percent = config.tp_percent,
-        sl_percent = config.sl_percent,
+        tp_sl_percent = config.tp_sl_percent,
         leverage = config.leverage,
         "configuration loaded (working min lot = exchange_min × LOT_COEFF after meta)"
     );
