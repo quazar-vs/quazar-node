@@ -127,7 +127,7 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 - `/initiative/*` — гражданские инициативы (законопроекты): предложение, голосование, автоматическое принятие при 5% «За»
 - `/referendum/*` — референдумы: объявление Айей, голосование граждан за/против отмены решения
 - `/chat/*` — чат граждан (per-node SQL, без блокчейна)
-- `/svod/*` — **Государственный Свод Вознаграждений** (двучастный реестр позиций + ставки за действия; валюта КВАЗИ / QZ)
+- `/svod/*` — **Республиканский Свод Вознаграждений** (двучастный реестр позиций + ставки за действия; валюта КВАЗИ / QZ)
 - `/exchange/*` — биржа: позиции только из Свода (`parts.*.items` / `svod_code`)
 - `POST /keys`, `GET /keys`, `POST /keys/revoke` — управление API-ключами (Aiya / Founder), хранятся в PostgreSQL
 - `POST /keys/sync` — выровнять `api_keys.role` по реестру `citizens` (Aiya / Founder); возвращает `{ "updated": N }`
@@ -313,9 +313,9 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
   -d '{"vote": "Against"}' | jq .
 ```
 
-### Государственный Свод Вознаграждений (`/svod`)
+### Республиканский Свод Вознаграждений (`/svod`)
 
-Единый реестр государства (управляет роль **Aiya**). На бирже и в Passport используется **только этот Свод** — отдельного реестра товаров/услуг нет.
+Единый реестр республики (управляет роль **Aiya**). На бирже и в Passport используется **только этот Свод** — отдельного реестра товаров/услуг нет.
 
 **Две части:**
 1. **Разработка** (`work_kind=development`) — идеи, темы, креатив (`CREATIVE_CONCEPT`, ставка `idea_submit`, …)
@@ -325,7 +325,7 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 - `items` (алиас `services`) — **позиции для биржи** (`code`, `name`, `base_price`, `work_kind`); `POST /exchange/requests` → `svod_code`
 - `rates` (алиас `rewards`) — ставки КВАЗИ за действия граждан
 
-`GET /svod` и `GET /svod/rewards` отдают один `title` / `name` = **Государственный Свод Вознаграждений**, структуру `parts` / `sections`, плоские `items`/`rates` (+ legacy `services`/`rewards`). Фильтр `?work_kind=` сужает обе части. Биржа: `GET /exchange/listings?work_kind=&svod_code=` и `GET /exchange/requests?work_kind=&svod_code=`.
+`GET /svod` и `GET /svod/rewards` отдают один `title` / `name` = **Республиканский Свод Вознаграждений**, структуру `parts` / `sections`, плоские `items`/`rates` (+ legacy `services`/`rewards`). Фильтр `?work_kind=` сужает обе части. Биржа: `GET /exchange/listings?work_kind=&svod_code=` и `GET /exchange/requests?work_kind=&svod_code=`.
 
 **Passport UX** (`role_view` в `/svod`; кнопка **Фильтр** у баланса, одна кнопка **Заявки**):
 
@@ -353,7 +353,7 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 | `/exchange/requests` | POST | Страж+ — `{side, svod_code, quantity}` (путь через СБ) |
 
 ```bash
-# Единый Государственный Свод Вознаграждений
+# Единый Республиканский Свод Вознаграждений
 curl -s http://localhost:8080/svod \
   -H "Authorization: Bearer $QUAZAR_API_KEY" | jq .
 
@@ -394,7 +394,7 @@ curl -s -X POST http://localhost:8080/exchange/requests \
 
 После миграции `004_service_catalog.sql` (внутренняя таблица позиций Свода) доступны seed-данные: категория `IT`, позиция `WEB_DEV` (base_price **100 QZ**). В API/UI это **позиции Свода** (`parts.*.items`), не отдельный реестр.
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
-После миграции `044_exchange_state_mediated.sql` — биржа через государство/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
+После миграции `044_exchange_state_mediated.sql` — биржа через республика/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
 После миграции `048_exchange_agent.sql` — встроенный **Агент Биржи**: `POST /exchange/needs` → проверка резерва Successful (`QZ-1`) → лот `is_state_agent` → `POST /exchange/listings/:id/buy` (эскроу) → подтверждение СБ → списание в резерв; лот остаётся `active`. Граждане: витрина/сделка; служебный диалог СБ/Биржа — Страж+.
 После миграции `049_phase_ad_offices_agents.sql` — `node_offices` (Мэр=должность), `algonism_agents` + `agent_messages`; API `/offices/mayor*`, `/city/appoint`, `/agents*`; `POST /exchange/sell-to-state`, `/exchange/reserve/dispose`; treasury = QZ-1.
 После миграции `045_service_work_kind.sql` — `work_kind` на позициях Свода и ставках; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с единым title и `parts`/`sections`; фильтр `?work_kind=` / `?svod_code=` на бирже. UX: `role_view.offers` / `role_view.needs`, позиции из `parts.*.items`.

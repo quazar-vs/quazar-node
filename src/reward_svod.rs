@@ -1,4 +1,4 @@
-//! **Государственный Свод Вознаграждений** — единый двучастный реестр.
+//! **Республиканский Свод Вознаграждений** — единый двучастный реестр.
 //!
 //! Таблица `svod_rewards` хранит **ставки за действия** граждан (rates) внутри того же
 //! Свода, что и биржевые позиции (`parts.*.items`). Это не отдельный
@@ -274,7 +274,7 @@ async fn record_ledger(
     Ok(())
 }
 
-/// Award КВАЗИ for an action using current rates from the Государственный Свод Вознаграждений.
+/// Award КВАЗИ for an action using current rates from the Республиканский Свод Вознаграждений.
 pub async fn award_for_action(
     pool: &PgPool,
     citizen_id: &str,
@@ -311,7 +311,7 @@ pub async fn award_for_action(
     Ok((amount, new_balance))
 }
 
-/// POST /svod/admin/reward — Aiya/Founder updates a rate in the Государственный Свод Вознаграждений.
+/// POST /svod/admin/reward — Aiya/Founder updates a rate in the Республиканский Свод Вознаграждений.
 pub async fn update_reward_handler(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -319,12 +319,12 @@ pub async fn update_reward_handler(
 ) -> impl IntoResponse {
     if auth.is_node {
         return response::forbidden(
-            "Node credentials cannot update the Государственный Свод Вознаграждений",
+            "Node credentials cannot update the Республиканский Свод Вознаграждений",
         );
     }
     if !auth.can_manage_svod() {
         return response::forbidden(
-            "Only Aiya / Founder can update the Государственный Свод Вознаграждений",
+            "Only Aiya / Founder can update the Республиканский Свод Вознаграждений",
         );
     }
     let action = req.action.trim();

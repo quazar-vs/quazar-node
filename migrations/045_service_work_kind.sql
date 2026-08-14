@@ -1,5 +1,5 @@
 -- Two-part Svod model: development («Разработка») | implementation («Реализация»).
--- Applies to service_catalog and svod_rewards (Государственный Свод Вознаграждений).
+-- Applies to service_catalog and svod_rewards (Республиканский Свод Вознаграждений).
 
 ALTER TABLE service_catalog
     ADD COLUMN IF NOT EXISTS work_kind TEXT NOT NULL DEFAULT 'implementation';

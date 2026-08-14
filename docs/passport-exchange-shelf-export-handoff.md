@@ -71,7 +71,7 @@ GET /exchange/listings?affordable=true
 - `is_export`, `display_status` (`"Экспорт"` / `"Локальный"` / null)
 - `owner_node_id`, `owner_city_hint`, `access_short`, `ui_line`
 - `expires_at`, `shelf_life_secs`
-- глобальные государства: часто `is_state_agent`, `agent: "exchange"`, цена покупателя может быть **+10%**
+- глобальные республики: часто `is_state_agent`, `agent: "exchange"`, цена покупателя может быть **+10%**
 - экспорт/локальные: цена = Свод (без +10%)
 
 ### Покупка глобального
@@ -81,7 +81,7 @@ POST /exchange/listings/:id/buy  { "quantity": N }
 Глобальный: часто сразу `completed` (`confirm_mode=agent_sb`).  
 Локальный: `escrowed` + `pending_sb` / живой Страж.
 
-### Потребность → лот государства
+### Потребность → лот республики
 ```
 POST /exchange/needs
 { "svod_code": "...", "quantity": N, "shelf_life_secs": 2592000 }  // опционально

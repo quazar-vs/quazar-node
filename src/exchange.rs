@@ -1,6 +1,6 @@
 //! State-mediated exchange (citizen ↔ Quazar treasury via Security).
 //! Встроенный **Агент Биржи**: потребность гражданина → проверка резерва Successful
-//! → лот государства → сделка со списанием КВАЗИ в резерв; лот остаётся active.
+//! → лот республики → сделка со списанием КВАЗИ в резерв; лот остаётся active.
 //! Every mutation emits a chain event immediately in-core.
 
 use axum::{
@@ -433,7 +433,7 @@ pub struct ListQuery {
     pub status: Option<String>,
     /// Filter by Свод work_kind: `development` | `implementation`
     pub work_kind: Option<String>,
-    /// Optional position code from Государственный Свод (`parts.*.items`)
+    /// Optional position code from Республиканский Свод (`parts.*.items`)
     pub svod_code: Option<String>,
     /// If true (default for authenticated Citizen), only lots with unit_buyer_price <= balance
     pub affordable: Option<bool>,
@@ -443,7 +443,7 @@ pub struct ListQuery {
     pub node_id: Option<String>,
 }
 
-/// Встроенный Агент Биржи: проверка резерва Successful и выставление лота государства.
+/// Встроенный Агент Биржи: проверка резерва Successful и выставление лота республики.
 async fn exchange_agent_list_need(
     state: &Arc<AppState>,
     need_id: &str,
@@ -464,7 +464,7 @@ async fn exchange_agent_list_need(
     let reserve_bal = lock_balance(&mut tx, STATE_RESERVE_ID).await?;
     if reserve_bal < reserve_need {
         let reason = format!(
-            "Недостаточный резерв государства ({FOUNDER_DISPLAY_NAME}): нужно {reserve_need} КВАЗИ, доступно {reserve_bal}"
+            "Недостаточный резерв республики ({FOUNDER_DISPLAY_NAME}): нужно {reserve_need} КВАЗИ, доступно {reserve_bal}"
         );
         sqlx::query(
             "UPDATE exchange_needs SET status = 'rejected', reason = $1, reserve_balance = $2,
@@ -493,7 +493,7 @@ async fn exchange_agent_list_need(
     .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
     .unwrap_or_else(|| "global".into());
 
-    // Переиспользуем активный лот государства по той же позиции Свода.
+    // Переиспользуем активный лот республики по той же позиции Свода.
     let existing: Option<(String, i64)> = sqlx::query_as(
         "SELECT id, qty_remaining FROM exchange_listings
          WHERE is_state_agent = TRUE AND status = 'active' AND svod_code = $1
@@ -629,7 +629,7 @@ async fn exchange_agent_list_need(
 }
 
 /// POST /exchange/needs — гражданин (или Секретарь от его имени) выражает потребность.
-/// Агент Биржи сразу проверяет резерв Successful и выставляет лот государства.
+/// Агент Биржи сразу проверяет резерв Successful и выставляет лот республики.
 pub async fn create_need(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -3406,7 +3406,7 @@ pub struct SellToStateBody {
     pub quantity: u64,
 }
 
-/// POST /exchange/sell-to-state — гражданин продаёт государству (−10%); ждёт СБ.
+/// POST /exchange/sell-to-state — гражданин продаёт республике (−10%); ждёт СБ.
 pub async fn sell_to_state(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -3417,7 +3417,7 @@ pub async fn sell_to_state(
     }
     if !auth.can_open_state_deal() {
         return Err(ExchangeError::Unauthorized(
-            "Продажа государству доступна гражданам и выше".into(),
+            "Продажа республике доступна гражданам и выше".into(),
         ));
     }
     if body.quantity == 0 {
@@ -3438,7 +3438,7 @@ pub async fn sell_to_state(
     } else {
         service.lot_scope.clone()
     };
-    // Продажа государству всегда ждёт живого Стража (проверка инвентаря).
+    // Продажа республике всегда ждёт живого Стража (проверка инвентаря).
     let confirm_mode = "live_guardian";
 
     let mut tx = state
@@ -3456,7 +3456,7 @@ pub async fn sell_to_state(
     let reserve = lock_balance(&mut tx, STATE_RESERVE_ID).await?;
     if reserve < payout {
         return Err(ExchangeError::BadRequest(
-            "Недостаточный резерв государства для выкупа".into(),
+            "Недостаточный резерв республики для выкупа".into(),
         ));
     }
 

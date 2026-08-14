@@ -635,7 +635,7 @@ impl AuthContext {
             )
     }
 
-    /// Открыть сделку по лоту Агента Биржи (государство): гражданин и выше.
+    /// Открыть сделку по лоту Агента Биржи (республика): гражданин и выше.
     pub fn can_open_state_deal(&self) -> bool {
         self.can_express_exchange_need()
     }

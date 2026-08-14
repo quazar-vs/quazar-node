@@ -29,15 +29,15 @@
 - Экспорт: `POST /exchange/exports` (шаг 1, Страж покупателя) → `POST /exchange/exports/:id/advance {"step":2..9}`.
 - `GET /exchange/listings?node_id=...` — витрина города (глобальные + локальные + экспорт).
 - `GET /exchange/listings?affordable=true` — только то, что можно оплатить.  
-- Потребность: `POST /exchange/needs` `{svod_code, quantity}` → лот государства с **+10%** (глобальные).  
+- Потребность: `POST /exchange/needs` `{svod_code, quantity}` → лот республики с **+10%** (глобальные).  
 - Покупка глобального: `POST /exchange/listings/:id/buy` — часто сразу `completed` (agent_sb).  
 - Локальный/экспорт — живой Страж + протокол.  
-- Продажа государству: `POST /exchange/sell-to-state` (−10%), ждёт СБ.  
+- Продажа республике: `POST /exchange/sell-to-state` (−10%), ждёт СБ.  
 - Страж: `GET /exchange/security/tasks`, `POST /exchange/security/tasks/:id/confirm`.
 
 ### Свод
 - Позиции из `GET /svod`; для **экспорта** цена UI = `unit_svod` / `base_price` (без +10%).
-- Для глобальных лотов государства UI может показывать `unit_buyer_price` (+10%).
+- Для глобальных лотов республики UI может показывать `unit_buyer_price` (+10%).
 
 ### Онбординг
 - Сайт: captcha → email → guest chat → заявка → ссылка на приложение.  
@@ -54,7 +54,7 @@
    - Витрина: `listings?affordable=true` (+ фильтры work_kind/svod_code).  
    - «Потребность»: выбор позиции Свода → `POST /exchange/needs` → показать `listing_id` и CTA «Открыть сделку».  
    - После buy: экран «Ожидает подтверждения СБ», не «сделка завершена».  
-   - «Продать государству»: `sell-to-state` + ожидание СБ.  
+   - «Продать республике»: `sell-to-state` + ожидание СБ.  
    - Страж+: вкладка задач СБ.
 
 3. **Legacy**

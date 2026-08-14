@@ -26,7 +26,7 @@ pub const WORK_KIND_DEVELOPMENT: &str = "development";
 pub const WORK_KIND_IMPLEMENTATION: &str = "implementation";
 
 /// Official display name — one registry for exchange positions and action rates.
-pub const SVOD_TITLE: &str = "Государственный Свод Вознаграждений";
+pub const SVOD_TITLE: &str = "Республиканский Свод Вознаграждений";
 
 #[derive(Debug, Clone, Serialize, sqlx::FromRow)]
 pub struct ServiceItem {
@@ -469,11 +469,11 @@ fn require_aiya(auth: &AuthContext) -> SvodResult<()> {
         Ok(())
     } else if auth.is_node {
         Err(SvodError::Forbidden(
-            "Node credentials cannot manage the Государственный Свод Вознаграждений".to_string(),
+            "Node credentials cannot manage the Республиканский Свод Вознаграждений".to_string(),
         ))
     } else {
         Err(SvodError::Forbidden(
-            "Only Aiya and Founder can manage the Государственный Свод Вознаграждений (Agent: read-only)"
+            "Only Aiya and Founder can manage the Республиканский Свод Вознаграждений (Agent: read-only)"
                 .to_string(),
         ))
     }
@@ -545,7 +545,7 @@ fn build_part(
     })
 }
 
-/// Двучастная структура единого Государственного Свода: Разработка + Реализация.
+/// Двучастная структура единого Республиканского Свода: Разработка + Реализация.
 pub fn build_svod_parts(
     positions: &[ServiceItem],
     rates: &[crate::reward_svod::RewardPublic],
@@ -625,7 +625,7 @@ fn role_view_payload() -> serde_json::Value {
     })
 }
 
-/// GET /svod — единый цельный Государственный Свод (один список лотов).
+/// GET /svod — единый цельный Республиканский Свод (один список лотов).
 pub async fn get_svod_handler(
     State(state): State<Arc<AppState>>,
     Query(q): Query<SvodQuery>,
@@ -646,7 +646,7 @@ pub async fn get_svod_handler(
         "title": SVOD_TITLE,
         "name": SVOD_TITLE,
         "rewards_title": SVOD_TITLE,
-        "canon": "Единый Государственный Свод = один список лотов (lots). Scope из Доступа (Г→global). Confirm — иерархия ролей (access_level).",
+        "canon": "Единый Республиканский Свод = один список лотов (lots). Scope из Доступа (Г→global). Confirm — иерархия ролей (access_level).",
         "note": "parts/sections — legacy; клиентам использовать lots/items. services — legacy-алиас items.",
         "lots": items_json.clone(),
         "items": items_json.clone(),

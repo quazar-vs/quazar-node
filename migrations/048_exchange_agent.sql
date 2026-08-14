@@ -1,4 +1,4 @@
--- Агент Биржи (в ядре): потребность гражданина → лот государства (Successful / QZ-1).
+-- Агент Биржи (в ядре): потребность гражданина → лот республики (Successful / QZ-1).
 
 ALTER TABLE exchange_listings
     ADD COLUMN IF NOT EXISTS is_state_agent BOOLEAN NOT NULL DEFAULT FALSE;

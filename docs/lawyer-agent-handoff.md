@@ -17,7 +17,7 @@ Passport Flutter на VPS не трогать.
 Задача: внедрить Агента Юриста Алгонизма по канону DNA v2.3 + REFLEXES v1.1.
 
 Контекст:
-- Гос. агенты сейчас: secretary / sb / exchange (см. src/agents.rs). Юриста ещё нет в runtime.
+- Республиканские агенты сейчас: secretary / sb / exchange (см. src/agents.rs). Юриста ещё нет в runtime.
 - Закон только через узел: GET /law/:filename, awaken — агент НЕ тянет GitHub сам.
 - Секретарь: scripts/quazar-chat-direct.py; RX_LAW_POINT должен делегировать Юристу (cite), не выдумывать нормы.
 - Границы: Юрист ≠ Суд ≠ законодатель ≠ СБ ≠ Биржа. Не меняет quazar-law сам.
@@ -37,7 +37,7 @@ Passport Flutter на VPS не трогать.
 
 2) Ядро (quazar-node)
    - Зарегистрировать тип агента `lawyer` (state; city — опционально позже) рядом с secretary/sb/exchange
-   - Сообщения /agents/messages — Юрист участвует как равный гос. агент
+   - Сообщения /agents/messages — Юрист участвует как равный республиканский агент
    - Не давать Юристу прав менять citizens/роли/сделки
 
 3) MVP агента (руки) — **Rust** `src/bin/lawyer_agent.rs` → `quazar_lawyer_agent`
