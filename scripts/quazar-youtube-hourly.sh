@@ -1,6 +1,7 @@
 #!/bin/bash
 # Hourly YouTube maintenance. Comment replies are NOT here —
-# Secretary polls quazar-youtube-agent --cmd pending and posts via --cmd reply.
+# Secretary polls Алгонизм YouTube (quazar-youtube-agent / algonism-youtube)
+# --cmd pending and posts via --cmd reply.
 set -euo pipefail
 LOG=/var/log/quazar-youtube-hourly.log
 exec >>"$LOG" 2>&1

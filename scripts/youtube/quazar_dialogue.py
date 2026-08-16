@@ -214,7 +214,8 @@ def youtube_address_aliases(channel_snippet: dict | None = None) -> list[str]:
     """Handles/names that mean a YouTube comment is directed at Quazar."""
     aliases = [
         "algonizmvs",
-        "quazarvs",
+        "quazarvs",  # legacy handle; keep for directed-at-us detection
+        "quazardr",
         "квазар",
         "алгонизм",
         "algonizm",

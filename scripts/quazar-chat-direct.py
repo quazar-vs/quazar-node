@@ -292,7 +292,7 @@ def system_prompt() -> str:
         "Рефлексы (RX_*) ≠ лоты Свода. Рефлекс — реакция агента; лот — позиция с ценой. Эталон: REFLEXES.md / awaken DNA.",
         "Магазин узла (фиат) ≠ биржа (КВАЗИ). Гость — только реальная валюта; гражданин выбирает контур. Пока магазин не развёрнут — не выдумывай витрину фиата.",
         "Hermes/Гермес ВЫВЕДЕН из рабочего контура. Чат: я (Секретарь) → OpenRouter напрямую, без Hermes. YouTube: host-сервис /var/lib/quazar/youtube, не docker Hermes. Не говори, что работаешь «через Гермеса». API /hermes/event* в ядре — только историческое имя журнала внешних событий.",
-        "Агент YouTube: по вопросам канала/ютуб/комментов/лайков/статуса QuazarVS — делегируй агенту YouTube (не выдумывай цифры). Я (Секретарь) могу связаться с ним и вернуть ответ в чат.",
+        "Алгонизм YouTube: по вопросам канала/ютуб/комментов/лайков/статуса YouTube — делегируй Алгонизм YouTube (не выдумывай цифры). Я (Секретарь) могу связаться с ним и вернуть ответ в чат.",
     ]
     if _CORE_AWAKEN:
         dna = (_CORE_AWAKEN.get("dna") or "")[:12000]
@@ -869,9 +869,11 @@ def wants_youtube(text: str) -> bool:
     low = (text or "").lower().replace("ё", "е")
     keys = (
         "youtube", "ютуб", "you tube", "quazarvs", "квазарвс",
+        "алгонизм youtube", "algonism youtube", "algonism-youtube",
         "канал youtube", "канал ютуб", "на канале",
         "подписчик", "просмотр", "мои комментар", "комментари",
         "лайк", "watchlist", "автоответ", "агент ютуб", "агент youtube",
+        "алгонизм ютуб",
         "статус канала", "сколько видео",
     )
     return any(k in low for k in keys)
@@ -1028,8 +1030,15 @@ def compose_youtube_reply(or_key: str, models: list[str], item: dict) -> tuple[s
             f"{site}, затем кратко ответь по смыслу."
         )
 
+    yt_channel = (
+        os.environ.get("YOUTUBE_CHANNEL_TITLE")
+        or os.environ.get("QUAZAR_YOUTUBE_CHANNEL_TITLE")
+        or os.environ.get("YOUTUBE_CHANNEL_ID")
+        or os.environ.get("QUAZAR_YOUTUBE_CHANNEL_ID")
+        or "канале Quazar"
+    )
     prompt = (
-        "Ты Секретарь Квазар / голос Алгонизма на YouTube-канале QuazarVS.\n"
+        f"Ты Секретарь Квазар / голос Алгонизма на YouTube-канале {yt_channel}.\n"
         + policy
     )
     user = (
@@ -1144,8 +1153,8 @@ def youtube_chat_status(result: dict) -> str:
     if result.get("reply"):
         return str(result["reply"]).strip()
     if result.get("ok"):
-        return "Агент YouTube ответил без текста."
-    return f"Агент YouTube недоступен: {result.get('error') or result}"
+        return "Алгонизм YouTube ответил без текста."
+    return f"Алгонизм YouTube недоступен: {result.get('error') or result}"
 
 
 def wants_cursor(text: str) -> bool:

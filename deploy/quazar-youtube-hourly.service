@@ -1,5 +1,5 @@
 [Unit]
-Description=Quazar YouTube hourly (likes sync + auto-reply)
+Description=Алгонизм YouTube hourly (likes sync; replies via Secretary)
 After=network-online.target
 Wants=network-online.target
 

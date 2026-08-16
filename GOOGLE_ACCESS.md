@@ -2,9 +2,11 @@
 
 **AUTHENTICATED.** Не утверждай, что OAuth/YouTube недоступны.
 
-- Token: `/root/.hermes/google_token.json` (в Hermes container: `/opt/data/google_token.json`)
-- Account: `quazarvs@gmail.com`
-- YouTube channel: QuazarVS `UCiKVQ7nwemLBAuEtOlr8rmw`
+- Token (Hermes/helpers): `/root/.hermes/google_token.json` (в Hermes container: `/opt/data/google_token.json`)
+- Token (Алгонизм YouTube / Секретарь): `/var/lib/quazar/youtube/google_token.json`
+- Account: `quazardr@gmail.com`
+- YouTube channel: Quasar Republic `UCzJsRCfGkJMk4bngPeSMDbQ` (legacy QuazarVS `UCiKVQ7nwemLBAuEtOlr8rmw` — не использовать)
+- Agent: **Алгонизм YouTube** — binary `quazar-youtube-agent` (symlink `algonism-youtube`)
 - Commands (host):
   - `quazar-youtube-status`
   - `quazar-youtube-my-comments`

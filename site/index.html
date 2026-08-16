@@ -5,6 +5,9 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="description" content="Квазар — цифровая республика без границ. Стань гражданином и строй будущее вместе с нами.">
   <title>Квазар — Цифровая республика</title>
+  <link rel="icon" type="image/png" sizes="64x64" href="/assets/favicon-64.png">
+  <link rel="icon" type="image/png" sizes="1024x1024" href="/assets/gerb.png">
+  <link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@500;700;800&family=Source+Sans+3:wght@400;500;600;700&display=swap" rel="stylesheet">
@@ -136,22 +139,23 @@
       color: var(--ll-navy);
       letter-spacing: -0.02em;
       display: inline-flex;
-      align-items: baseline;
-      gap: 0.45rem;
+      align-items: center;
+      gap: 0.55rem;
+      min-width: 0;
     }
 
     .logo span {
       color: var(--ll-navy);
+      line-height: 1;
     }
 
-    .logo .mark {
-      display: inline-block;
-      width: 0.65rem;
-      height: 0.65rem;
-      border-radius: 50%;
-      background: var(--ll-yellow);
-      box-shadow: 0 0 0 3px rgba(241, 200, 35, 0.28);
-      transform: translateY(-1px);
+    .logo .crest {
+      width: 2rem;
+      height: 2rem;
+      object-fit: contain;
+      flex-shrink: 0;
+      display: block;
+      border-radius: 2px;
     }
 
     nav { display: flex; gap: 1.75rem; align-items: center; }
@@ -1205,6 +1209,17 @@
       color: var(--ll-yellow);
       font-weight: 700;
       font-size: 1.1rem;
+      display: inline-flex;
+      align-items: center;
+      gap: 0.45rem;
+    }
+
+    .footer-brand .crest {
+      width: 1.35rem;
+      height: 1.35rem;
+      object-fit: contain;
+      flex-shrink: 0;
+      border-radius: 2px;
     }
 
     .footer-links {
@@ -1891,6 +1906,9 @@
 
       .menu-toggle { display: block; }
 
+      .logo { font-size: 1.35rem; gap: 0.45rem; }
+      .logo .crest { width: 1.75rem; height: 1.75rem; }
+
       .cards-3 { grid-template-columns: 1fr; }
       .benefits-list { grid-template-columns: repeat(2, 1fr); }
       .steps { grid-template-columns: 1fr; gap: 2.5rem; }
@@ -1946,7 +1964,7 @@
 
   <header id="header">
     <div class="header-inner">
-      <a href="#" class="logo"><i class="mark" aria-hidden="true"></i><span>Квазар</span></a>
+      <a href="#" class="logo"><img class="crest" src="/assets/gerb.png" width="32" height="32" alt="Герб Квазара"><span>Квазар</span></a>
       <button class="menu-toggle" id="menuToggle" aria-label="Меню">☰</button>
       <nav id="nav">
         <a href="#about">О нас</a>
@@ -2340,7 +2358,7 @@
     <div class="container">
       <div class="footer-inner">
         <div class="footer-brand">
-          <strong>Квазар</strong> — цифровая республика<br>
+          <strong><img class="crest" src="/assets/gerb.png" width="22" height="22" alt="">Квазар</strong> — цифровая республика<br>
           Основано 22 июня 2026 · «Объединяя усилия, создаем будущее»
         </div>
         <div class="footer-links">
@@ -2348,7 +2366,7 @@
           <a href="/constitution.html" class="constitution-link">Конституция</a>
           <a href="/algonism/identity" rel="noopener">алгонизм</a>
           <a href="#apply">Портал заявок</a>
-          <a href="mailto:quazarvs@gmail.com">quazarvs@gmail.com</a>
+          <a href="mailto:quazardr@gmail.com">quazardr@gmail.com</a>
         </div>
       </div>
     </div>
@@ -2363,7 +2381,7 @@
       <div class="constitution-body">
         <div id="registerStep1">
           <div class="register-step-label">Шаг 1 из 2 · Укажите ваш email</div>
-          <p class="register-intro">Подтвердите email для входа. Код подтверждения придёт с <strong>quazarvs@gmail.com</strong>.</p>
+          <p class="register-intro">Подтвердите email для входа. Код подтверждения придёт с <strong>quazardr@gmail.com</strong>.</p>
           <form id="registerForm" novalidate>
             <div class="form-group">
               <label for="regEmail">Ваш email <span class="hint">(куда придёт код)</span></label>
@@ -2388,7 +2406,7 @@
 
         <div id="registerStep2" hidden>
           <div class="register-step-label">Шаг 2 из 2 · Введите код из письма</div>
-          <p class="register-intro">Код отправлен на <strong id="registerEmailDisplay"></strong> с <strong id="registerFromDisplay">quazarvs@gmail.com</strong>. Введите 6-значный код из письма. Код действителен 10 минут.</p>
+          <p class="register-intro">Код отправлен на <strong id="registerEmailDisplay"></strong> с <strong id="registerFromDisplay">quazardr@gmail.com</strong>. Введите 6-значный код из письма. Код действителен 10 минут.</p>
           <form id="verifyForm" novalidate>
             <div class="form-group">
               <label for="verifyCode">Код подтверждения</label>
@@ -3067,7 +3085,7 @@
       var backToEmailBtn = document.getElementById('backToEmail');
       var registerCloseSuccess = document.getElementById('registerCloseSuccess');
 
-      var QUAZAR_EMAIL = 'quazarvs@gmail.com';
+      var QUAZAR_EMAIL = 'quazardr@gmail.com';
 
       function isPrivateLanHost(hostname) {
         return /^192\.168\.\d{1,3}\.\d{1,3}$/.test(hostname) ||
@@ -3708,7 +3726,7 @@
               ? CITIZEN_USE_APP_MSG
               : (err.name === 'AbortError'
                 ? 'Превышено время ожидания. Проверьте соединение и попробуйте снова.'
-                : (err.message || 'Не удалось отправить код. Попробуйте позже или напишите на quazarvs@gmail.com'));
+                : (err.message || 'Не удалось отправить код. Попробуйте позже или напишите на quazardr@gmail.com'));
             showRegisterError(registerError, message);
           })
           .finally(function () {

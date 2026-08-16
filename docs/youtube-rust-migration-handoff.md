@@ -13,20 +13,21 @@
 
 Контекст (состояние на 2026-08-14):
 - Секретарь: systemd `quazar-chat-direct.service` → `/usr/local/bin/quazar-chat-direct.py`
-  (репо: `scripts/quazar-chat-direct.py`). Poll ~60с → `quazar-youtube-agent --cmd pending`
+  (репо: `scripts/quazar-chat-direct.py`). Poll ~60с → `quazar-youtube-agent` / `algonism-youtube --cmd pending`
   → LLM-ответ → `--cmd reply`. Знакомство: `quazar_dialogue` + `/root/.hermes/acquaintance.json`
   ключ `youtube:<authorChannelId>`.
-- Агент YouTube: `/usr/local/bin/quazar-youtube-agent` (репо: `scripts/quazar-youtube-agent.py`),
+- Алгонизм YouTube: `/usr/local/bin/quazar-youtube-agent` (+ symlink `algonism-youtube`;
+  репо: `scripts/quazar-youtube-agent.py`),
   venv `/var/lib/quazar/venv-youtube`, токен `/var/lib/quazar/youtube/google_token.json`.
   Команды: status|comments|pending|reply|scopes|watchlist|sync-likes.
-  Pending: только uploads канала QuazarVS (до 30 видео), чужие комменты/ответы; bootstrap
+  Pending: uploads целевого канала (до 30 видео), чужие комменты/ответы; bootstrap
   отмечает старые. State: `/var/lib/quazar/youtube/` (inbox + youtube_secretary_bridge_state.json).
 - Hourly: `/usr/local/bin/quazar-youtube-hourly.sh` — БЕЗ auto-reply (ответы только через Секретаря).
 - Документация: `docs/youtube-agent.md`, рефлекс `RX_YOUTUBE_EVENT_REACT` в `docs/algonism/REFLEXES.md`.
 - Ограничение API: WebSub/PubSubHubbub пушит только новое видео / title / description;
   на комментарии push НЕТ — только poll (или оставить poll в Rust).
 - OAuth scopes: youtube.force-ssl (+ readonly); force-ssl достаточно для reply.
-  Аккаунт: quazarvs@gmail.com / канал UCiKVQ7nwemLBAuEtOlr8rmw.
+  Аккаунт: quazardr@gmail.com / канал Quasar Republic UCzJsRCfGkJMk4bngPeSMDbQ.
 - Узел: Rust `quazar-node` в `/opt/quazar` — YouTube-модуля пока нет.
 - Passport Flutter на VPS НЕ трогать.
 
@@ -79,7 +80,7 @@
 | Что | Где |
 |-----|-----|
 | Секретарь | `scripts/quazar-chat-direct.py` → `process_youtube_events` / `compose_youtube_reply` |
-| Агент | `scripts/quazar-youtube-agent.py` |
+| Агент | `scripts/quazar-youtube-agent.py` (**Алгонизм YouTube**, alias `algonism-youtube`) |
 | Диалог | `scripts/youtube/quazar_dialogue.py` |
 | Док | `docs/youtube-agent.md` |
 | Токен | `/var/lib/quazar/youtube/google_token.json` |

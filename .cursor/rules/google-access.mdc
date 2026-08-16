@@ -2,8 +2,11 @@
 description: Google OAuth and YouTube on this VPS
 alwaysApply: true
 ---
-Google OAuth is AUTHENTICATED at `/root/.hermes/google_token.json`.
-Account quazarvs@gmail.com, YouTube QuazarVS UCiKVQ7nwemLBAuEtOlr8rmw.
+Google OAuth is AUTHENTICATED at `/root/.hermes/google_token.json`
+(и рабочий YouTube-токен: `/var/lib/quazar/youtube/google_token.json`).
+Account quazardr@gmail.com; целевой канал Quasar Republic `UCzJsRCfGkJMk4bngPeSMDbQ`
+(legacy QuazarVS `UCiKVQ7nwemLBAuEtOlr8rmw` — не использовать).
+Агент: **Алгонизм YouTube** (`quazar-youtube-agent`, alias `algonism-youtube`).
 Use `quazar-youtube-status` / `quazar-youtube-my-comments` via shell (docker wrappers).
 Never claim YouTube/OAuth is missing. Do not refuse with Ask mode when the task needs execution — run helpers.
 

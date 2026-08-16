@@ -410,7 +410,7 @@ pub async fn send_code_handler(
             if message.contains("Не удалось отправить") {
                 tracing::error!(to = %email, error = %message, "failed to send verification email");
                 return response::internal_error(
-                    "Не удалось отправить письмо. Попробуйте позже или напишите на quazarvs@gmail.com",
+                    "Не удалось отправить письмо. Попробуйте позже или напишите на quazardr@gmail.com",
                 );
             }
             response::bad_request(message)
