@@ -1,0 +1,43 @@
+# Quazar citizen SS ACL — server outbound allowlist (YouTube + Telegram).
+# Mode: only listed destinations may be dialed by ssserver; everything else blocked.
+# Syntax: shadowsocks-rust outbound_allow_list.
+
+[outbound_allow_list]
+
+# YouTube / Google video CDN
+(?i)(^|\.)youtube\.com$
+(?i)(^|\.)youtube-nocookie\.com$
+(?i)(^|\.)youtu\.be$
+(?i)(^|\.)ytimg\.com$
+(?i)(^|\.)ggpht\.com$
+(?i)(^|\.)googlevideo\.com$
+(?i)(^|\.)googleapis\.com$
+(?i)(^|\.)gstatic\.com$
+(?i)(^|\.)googleusercontent\.com$
+(?i)(^|\.)yt\.be$
+(?i)(^|\.)youtube\.googleapis\.com$
+
+# Telegram
+(?i)(^|\.)telegram\.org$
+(?i)(^|\.)telegram\.me$
+(?i)(^|\.)t\.me$
+(?i)(^|\.)tdesktop\.com$
+(?i)(^|\.)telegra\.ph$
+(?i)(^|\.)telesco\.pe$
+(?i)(^|\.)cdn-telegram\.org$
+(?i)(^|\.)telegram-cdn\.org$
+
+# Common Telegram DC / CDN IP ranges (approx.)
+91.108.4.0/22
+91.108.8.0/22
+91.108.12.0/22
+91.108.16.0/22
+91.108.20.0/22
+91.108.56.0/22
+149.154.160.0/20
+149.154.164.0/22
+149.154.168.0/22
+149.154.172.0/22
+2001:67c:4e8::/48
+2001:b28:f23d::/48
+2001:b28:f23f::/48

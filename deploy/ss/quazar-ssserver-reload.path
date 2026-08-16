@@ -1,0 +1,9 @@
+[Unit]
+Description=Reload Quazar ssserver when config.json changes
+
+[Path]
+PathModified=/var/lib/quazar/ss/config.json
+Unit=quazar-ssserver-reload.service
+
+[Install]
+WantedBy=multi-user.target

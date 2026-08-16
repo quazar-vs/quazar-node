@@ -1,0 +1,43 @@
+# Overlay / profile entry for external agents (repo root).
+# Prefer: docker compose -f docker-compose.yml -f compose.external-agents.yml --profile external up -d --build
+#
+# Standalone install (no core change):
+#   docker compose -f deploy/external-agents/docker-compose.yml up -d --build
+#   (creates/joins networks quazar + quazar-external)
+
+services:
+  external-agents:
+    profiles: ["external"]
+    build: ./deploy/external-agents
+    image: quazar-external-agents:stub
+    container_name: quazar-external-agents
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8090"
+    environment:
+      EXTERNAL_AGENTS_PORT: "8090"
+      EXTERNAL_AGENTS_NAME: external-agents
+      # Future: point Secretary at these (host or in-network DNS).
+      # SVYAZNOY_URL=http://external-agents:8090
+      # CURSOR_AGENT_URL=http://external-agents:8090
+    networks:
+      - quazar
+      - quazar-external
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  quazar:
+    name: quazar
+  quazar-external:
+    name: quazar-external

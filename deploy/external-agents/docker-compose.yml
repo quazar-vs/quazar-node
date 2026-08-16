@@ -1,0 +1,56 @@
+# External agents contour (Алгонизм-связной keys + Cursor worker + future).
+# Install separately from core:
+#   docker compose -f deploy/external-agents/docker-compose.yml up -d --build
+#
+# Join an already-running core stack on the shared network:
+#   docker network create quazar  # if core has not created it yet
+#   docker compose -f deploy/external-agents/docker-compose.yml up -d --build
+#
+# With core in one command (from repo root):
+#   docker compose -f docker-compose.yml -f compose.external-agents.yml --profile external up -d
+
+name: quazar-external-agents
+
+services:
+  external-agents:
+    build: .
+    image: quazar-external-agents:stub
+    container_name: quazar-external-agents
+    restart: unless-stopped
+    ports:
+      # Host Secretary (systemd) reaches stubs without joining Docker DNS yet.
+      - "127.0.0.1:8090:8090"
+    environment:
+      EXTERNAL_AGENTS_PORT: "8090"
+      EXTERNAL_AGENTS_NAME: external-agents
+      # Reserved for real wiring (not required by stub):
+      # QUAZAR_SVYAZNOY_HOME: /var/lib/quazar/svyaznoy
+      # QUAZAR_YOUTUBE_HOME: /var/lib/quazar/youtube
+    # Keys belong to связной — mount only into this contour, never into core image.
+    # volumes:
+    #   - /var/lib/quazar/svyaznoy:/var/lib/quazar/svyaznoy:ro
+    #   - /var/lib/quazar/youtube:/var/lib/quazar/youtube:ro
+    networks:
+      - quazar
+      - quazar-external
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8090/health', timeout=2)",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+networks:
+  # Shared with core (`docker-compose.yml` / `compose.core.yml`).
+  # First compose that starts creates the named network; peers join by name.
+  quazar:
+    name: quazar
+  # Dedicated label for the external contour (keys / Cursor / future workers).
+  quazar-external:
+    name: quazar-external

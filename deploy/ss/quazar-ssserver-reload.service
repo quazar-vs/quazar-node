@@ -1,0 +1,7 @@
+[Unit]
+Description=Restart Quazar ssserver after config change
+After=quazar-ssserver.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/systemctl restart quazar-ssserver.service

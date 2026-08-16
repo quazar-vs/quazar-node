@@ -531,7 +531,6 @@ async fn candidacy_nomination_vote_approve_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
-        tunnel_registry: Arc::new(crate::tunnel::TunnelRegistry::new()),
         trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
         dna: crate::algonism::DnaMemory::new(),
     });
@@ -755,7 +754,6 @@ async fn chat_send_and_list_messages() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
-        tunnel_registry: Arc::new(crate::tunnel::TunnelRegistry::new()),
         trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
         dna: crate::algonism::DnaMemory::new(),
     });
@@ -861,7 +859,6 @@ async fn chat_gossip_insert_is_idempotent() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
-        tunnel_registry: Arc::new(crate::tunnel::TunnelRegistry::new()),
         trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
         dna: crate::algonism::DnaMemory::new(),
     });
@@ -923,7 +920,6 @@ async fn initiative_propose_and_vote_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
-        tunnel_registry: Arc::new(crate::tunnel::TunnelRegistry::new()),
         trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
         dna: crate::algonism::DnaMemory::new(),
     });
@@ -1001,7 +997,6 @@ async fn referendum_announce_and_vote_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
-        tunnel_registry: Arc::new(crate::tunnel::TunnelRegistry::new()),
         trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
         dna: crate::algonism::DnaMemory::new(),
     });
@@ -1090,7 +1085,6 @@ async fn password_login_flow() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
-        tunnel_registry: Arc::new(crate::tunnel::TunnelRegistry::new()),
         trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
         dna: crate::algonism::DnaMemory::new(),
     });
@@ -1250,7 +1244,6 @@ async fn pending_citizen_login_blocked_until_passport() {
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
         node_id: "TEST-NODE".to_string(),
         channel_hub: Arc::new(crate::channel::ChannelHub::new()),
-        tunnel_registry: Arc::new(crate::tunnel::TunnelRegistry::new()),
         trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
         dna: crate::algonism::DnaMemory::new(),
     });

@@ -47,9 +47,26 @@ AGENTS = Path(
 SOUL = Path(os.environ.get("QUAZAR_SOUL", os.environ.get("HERMES_SOUL", "/var/lib/quazar/config/SOUL.md")))
 SEND_BIN = Path(os.environ.get("QUAZAR_CHAT_SEND", "/usr/local/bin/quazar-chat-send"))
 ASK_CURSOR_BIN = Path(os.environ.get("QUAZAR_ASK_CURSOR", "/usr/local/bin/quazar-cursor-direct"))
-YOUTUBE_AGENT_BIN = Path(
-    os.environ.get("QUAZAR_YOUTUBE_AGENT", "/usr/local/bin/quazar-youtube-agent")
-)
+def _resolve_svyaznoy_bin() -> Path:
+    """Алгонизм-связной CLI only — Secretary never calls Google/IMAP APIs directly."""
+    for key in ("QUAZAR_SVYAZNOY_AGENT", "QUAZAR_YOUTUBE_AGENT"):
+        env = (os.environ.get(key) or "").strip()
+        if env:
+            return Path(env)
+    for candidate in (
+        "/usr/local/bin/algonism-svyaznoy",
+        "/usr/local/bin/quazar-youtube-agent",
+        "/usr/local/bin/algonism-youtube",
+    ):
+        p = Path(candidate)
+        if p.exists():
+            return p
+    return Path("/usr/local/bin/algonism-svyaznoy")
+
+
+# Preferred name: algonism-svyaznoy (aliases → quazar-youtube-agent).
+SVYAZNOY_BIN = _resolve_svyaznoy_bin()
+YOUTUBE_AGENT_BIN = SVYAZNOY_BIN  # legacy alias in this file
 # Always run agent with venv that has google-api (shebang alone is fragile under systemd).
 YOUTUBE_AGENT_PY = Path(
     os.environ.get(
@@ -291,8 +308,16 @@ def system_prompt() -> str:
         "СБ: не «каждая сделка ждёт СБ». Если активная роль соответствует доступу лота — авто-подтверждение; если ниже — эскалация на нужный уровень (выше может ниже).",
         "Рефлексы (RX_*) ≠ лоты Свода. Рефлекс — реакция агента; лот — позиция с ценой. Эталон: REFLEXES.md / awaken DNA.",
         "Магазин узла (фиат) ≠ биржа (КВАЗИ). Гость — только реальная валюта; гражданин выбирает контур. Пока магазин не развёрнут — не выдумывай витрину фиата.",
-        "Hermes/Гермес ВЫВЕДЕН из рабочего контура. Чат: я (Секретарь) → OpenRouter напрямую, без Hermes. YouTube: host-сервис /var/lib/quazar/youtube, не docker Hermes. Не говори, что работаешь «через Гермеса». API /hermes/event* в ядре — только историческое имя журнала внешних событий.",
-        "Алгонизм YouTube: по вопросам канала/ютуб/комментов/лайков/статуса YouTube — делегируй Алгонизм YouTube (не выдумывай цифры). Я (Секретарь) могу связаться с ним и вернуть ответ в чат.",
+        "Hermes/Гермес ВЫВЕДЕН из рабочего контура. Чат: я (Секретарь) → OpenRouter напрямую, без Hermes. Не говори, что работаешь «через Гермеса». API /hermes/event* в ядре — только историческое имя журнала внешних событий.",
+        "Канон внешних действий: Секретарь → Алгонизм-связной (algonism-svyaznoy) → внешний сервис. "
+        "У меня НЕТ прямого доступа к YouTube API, Gmail/IMAP/SMTP агента и иным внешним API. "
+        "Внешние токены и ключи хранит только связной (/var/lib/quazar/svyaznoy/; YouTube OAuth — /var/lib/quazar/youtube/). "
+        "Любое внешнее действие (канал, комменты, лайки, почта/inbox, правки метаданных роликов) — только поручение связному; "
+        "не выдумывай цифры и не утверждай, что сам ходишь во внешние API. "
+        "SMTP в .env узла — системная почта сайта (не мой mailbox).",
+        "YouTube metadata (RX_YOUTUBE_META_TAGS): при правке title/description/tags роликов канала "
+        "QuazarDigitalRepublic (UCTpUCMrMzeSMw50tGyEENlw) всегда включать теги: shorts, reels, top, алгонизм "
+        "(+ смысловые по ролику). Без # в API-tags. Чужой channelId — не трогать.",
     ]
     if _CORE_AWAKEN:
         dna = (_CORE_AWAKEN.get("dna") or "")[:12000]
@@ -640,7 +665,8 @@ def hermes_fact_reply() -> str:
     return (
         "**Нет.** В citizen-чате я **не** работаю через Hermes.\n\n"
         "Цепочка сейчас: **Секретарь → OpenRouter → чат** (сервис `quazar-chat-direct`).\n"
-        "YouTube-хелперы вынесены на host (`/var/lib/quazar/youtube`), без контейнера Hermes.\n"
+        "Внешнее: **Секретарь → Алгонизм-связной → YouTube/почта** "
+        "(ключи у связного, не у меня).\n"
         "Контейнер `hermes-gateway` остановлен. Путь `/hermes/event*` в API ядра — "
         "историческое имя журнала внешних событий (`YoutubeIntroPosted` и т.п.), не «протокол Гермеса».\n\n"
         "Чем конкретно помочь?"
@@ -865,16 +891,30 @@ def svod_fact_reply(api_key: str = "") -> str:
 
 
 def wants_youtube(text: str) -> bool:
-    """Citizen asks about YouTube channel / comments / likes — delegate to YT agent."""
+    """Citizen asks about YouTube — delegate to Алгонизм-связной (not Google API here)."""
     low = (text or "").lower().replace("ё", "е")
     keys = (
         "youtube", "ютуб", "you tube", "quazarvs", "квазарвс",
         "алгонизм youtube", "algonism youtube", "algonism-youtube",
+        "алгонизм-связной", "алгонизм связной", "algonism-svyaznoy",
+        "algonism svyaznoy", "агент связной",
         "канал youtube", "канал ютуб", "на канале",
         "подписчик", "просмотр", "мои комментар", "комментари",
         "лайк", "watchlist", "автоответ", "агент ютуб", "агент youtube",
         "алгонизм ютуб",
         "статус канала", "сколько видео",
+    )
+    return any(k in low for k in keys)
+
+
+def wants_mail(text: str) -> bool:
+    """Citizen asks about mailbox — delegate to svyaznoy mail-* cmds only."""
+    low = (text or "").lower().replace("ё", "е")
+    if wants_youtube(low):
+        return False
+    keys = (
+        "почт", "email", "e-mail", "imap", "inbox", "входящ",
+        "письм", "непрочитан", "ящик", "gmail",
     )
     return any(k in low for k in keys)
 
@@ -945,15 +985,18 @@ def lawyer_chat_status(result: dict) -> str:
 
 
 def _youtube_agent_argv(*args: str) -> list[str]:
-    """Prefer venv python so google-api is available even if shebang is wrong."""
+    """Prefer venv python so google-api is available even if shebang is wrong.
+
+    External I/O stays inside algonism-svyaznoy; Secretary only subprocesses.
+    """
     if YOUTUBE_AGENT_PY.is_file():
-        return [str(YOUTUBE_AGENT_PY), str(YOUTUBE_AGENT_BIN), *args]
-    return [str(YOUTUBE_AGENT_BIN), *args]
+        return [str(YOUTUBE_AGENT_PY), str(SVYAZNOY_BIN), *args]
+    return [str(SVYAZNOY_BIN), *args]
 
 
 def ask_youtube(text: str, citizen: str) -> dict:
-    if not YOUTUBE_AGENT_BIN.exists():
-        return {"ok": False, "error": f"youtube agent missing: {YOUTUBE_AGENT_BIN}"}
+    if not SVYAZNOY_BIN.exists():
+        return {"ok": False, "error": f"svyaznoy agent missing: {SVYAZNOY_BIN}"}
     try:
         r = subprocess.run(
             _youtube_agent_argv("--from", citizen or "citizen", text),
@@ -965,6 +1008,9 @@ def ask_youtube(text: str, citizen: str) -> dict:
                 "HERMES_HOME": os.environ.get("HERMES_HOME", "/var/lib/quazar/youtube"),
                 "QUAZAR_YOUTUBE_HOME": os.environ.get(
                     "QUAZAR_YOUTUBE_HOME", "/var/lib/quazar/youtube"
+                ),
+                "QUAZAR_SVYAZNOY_HOME": os.environ.get(
+                    "QUAZAR_SVYAZNOY_HOME", "/var/lib/quazar/svyaznoy"
                 ),
             },
         )
@@ -978,8 +1024,9 @@ def ask_youtube(text: str, citizen: str) -> dict:
 
 
 def youtube_agent_cmd(args: list[str], timeout: int = 320) -> dict:
-    if not YOUTUBE_AGENT_BIN.exists():
-        return {"ok": False, "error": f"youtube agent missing: {YOUTUBE_AGENT_BIN}"}
+    """Subprocess only → algonism-svyaznoy (no direct Google/IMAP in Secretary)."""
+    if not SVYAZNOY_BIN.exists():
+        return {"ok": False, "error": f"svyaznoy agent missing: {SVYAZNOY_BIN}"}
     try:
         r = subprocess.run(
             _youtube_agent_argv(*args),
@@ -991,6 +1038,9 @@ def youtube_agent_cmd(args: list[str], timeout: int = 320) -> dict:
                 "HERMES_HOME": os.environ.get("HERMES_HOME", "/var/lib/quazar/youtube"),
                 "QUAZAR_YOUTUBE_HOME": os.environ.get(
                     "QUAZAR_YOUTUBE_HOME", "/var/lib/quazar/youtube"
+                ),
+                "QUAZAR_SVYAZNOY_HOME": os.environ.get(
+                    "QUAZAR_SVYAZNOY_HOME", "/var/lib/quazar/svyaznoy"
                 ),
                 "OPENROUTER_KEY_FILE": os.environ.get(
                     "OPENROUTER_KEY_FILE", "/var/lib/quazar/secrets/openrouter-api-key"
@@ -1004,6 +1054,19 @@ def youtube_agent_cmd(args: list[str], timeout: int = 320) -> dict:
     except Exception as e:
         return {"ok": False, "error": str(e)[:300]}
 
+
+def ask_mail(text: str, citizen: str) -> dict:
+    """Delegate mailbox questions to svyaznoy mail-status / mail-inbox."""
+    low = (text or "").lower().replace("ё", "е")
+    if any(k in low for k in ("inbox", "входящ", "письм", "непрочитан", "прочитай")):
+        return youtube_agent_cmd(
+            ["--cmd", "mail-inbox", "--limit", "5", "--from", citizen or "citizen"],
+            timeout=60,
+        )
+    return youtube_agent_cmd(
+        ["--cmd", "mail-status", "--from", citizen or "citizen"],
+        timeout=30,
+    )
 
 def compose_youtube_reply(or_key: str, models: list[str], item: dict) -> tuple[str, bool]:
     """Secretary brain: draft YouTube reply. Returns (text, first_intro)."""
@@ -1153,8 +1216,8 @@ def youtube_chat_status(result: dict) -> str:
     if result.get("reply"):
         return str(result["reply"]).strip()
     if result.get("ok"):
-        return "Алгонизм YouTube ответил без текста."
-    return f"Алгонизм YouTube недоступен: {result.get('error') or result}"
+        return "Алгонизм-связной ответил без текста."
+    return f"Алгонизм-связной недоступен: {result.get('error') or result}"
 
 
 def wants_cursor(text: str) -> bool:
@@ -1412,8 +1475,27 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
             log("SEND_FAIL")
         return
 
+    if wants_mail(content):
+        log("MAIL_DELEGATE via=algonism-svyaznoy")
+        result = ask_mail(content, author)
+        log(f"MAIL_RESULT {json.dumps(result, ensure_ascii=False)[:220]}")
+        reply = youtube_chat_status(result)
+        if qd is not None and not introduced:
+            reply = qd.intro_text("chat") + "\n\n" + reply
+        if send_chat(reply):
+            answered.add(mid)
+            st["answered_ids"] = list(answered)
+            st["last_id"] = mid
+            save_state(st)
+            if qd is not None:
+                qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
+            log(f"ANSWERED {mid[:8]} via=algonism-svyaznoy/mail ok={bool(result.get('ok'))}")
+        else:
+            log("SEND_FAIL")
+        return
+
     if wants_youtube(content):
-        log("YOUTUBE_DELEGATE")
+        log("YOUTUBE_DELEGATE via=algonism-svyaznoy")
         result = ask_youtube(content, author)
         log(f"YOUTUBE_RESULT {json.dumps(result, ensure_ascii=False)[:220]}")
         reply = youtube_chat_status(result)
@@ -1426,7 +1508,7 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
             save_state(st)
             if qd is not None:
                 qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
-            log(f"ANSWERED {mid[:8]} via=youtube_agent ok={bool(result.get('ok'))}")
+            log(f"ANSWERED {mid[:8]} via=algonism-svyaznoy ok={bool(result.get('ok'))}")
         else:
             log("SEND_FAIL")
         return
@@ -1554,7 +1636,7 @@ def main() -> None:
     log(
         "YOUTUBE_BRIDGE poll_sec="
         + os.environ.get("QUAZAR_YOUTUBE_POLL_SEC", "60")
-        + " via=youtube-agent pending→secretary→reply"
+        + " via=algonism-svyaznoy pending→secretary→reply"
     )
     while True:
         try:

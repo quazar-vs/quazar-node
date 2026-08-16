@@ -1,4 +1,6 @@
-use std::path::Path;
+//! Citizen VPN via Shadowsocks (ssserver). SSH tunnel key issuance removed.
+
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,62 +10,89 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
-use rand_core::OsRng;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sqlx::{FromRow, PgPool};
-use ssh_key::{Algorithm, LineEnding, PrivateKey};
 use uuid::Uuid;
 
 use crate::auth::{AuthContext, Role};
 use crate::response::{self, ApiResponse};
-use crate::tunnel;
 use crate::AppState;
 
 const DEFAULT_TTL_HOURS: i64 = 24;
 const MIN_TTL_HOURS: i64 = 1;
-const MAX_TTL_HOURS: i64 = 168; // 7 days
-const IDLE_REVOKE_HOURS: i64 = 24;
+const MAX_TTL_HOURS: i64 = 168;
+const DEFAULT_SS_PORT: u16 = 8388;
+const DEFAULT_SS_METHOD: &str = "chacha20-ietf-poly1305";
+const ACL_PROFILE: &str = "citizen_youtube_telegram";
+const SS_INACTIVE_RETENTION_DAYS: i64 = 7;
 pub const VPN_CLEANUP_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
-/// Admin list row — never includes `private_key`.
 #[derive(Debug, Clone, Serialize, FromRow)]
-pub struct VpnKeyInfo {
+pub struct SsCredentialInfo {
     pub id: String,
     pub citizen_id: String,
-    pub public_key: String,
+    pub method: String,
+    pub port: i32,
+    pub acl_profile: String,
     pub expires_at: DateTime<Utc>,
     pub last_used: Option<DateTime<Utc>>,
     pub is_active: Option<bool>,
     pub created_at: Option<DateTime<Utc>>,
 }
 
-/// Issued key returned once from generate (includes private material).
 #[derive(Debug, Clone, Serialize)]
-pub struct VpnKeyResponse {
-    pub id: String,
-    pub citizen_id: String,
-    pub private_key: String,
-    pub public_key: String,
+pub struct SsCredentialResponse {
+    pub session_id: String,
+    pub server: String,
+    pub host: String,
+    pub port: u16,
+    pub method: String,
+    pub password: String,
+    pub acl_profile: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub suggested_acl: Option<serde_json::Value>,
+    pub ttl_sec: i64,
+    pub transport: &'static str,
     pub expires_at: DateTime<Utc>,
+    pub citizen_id: String,
 }
 
-/// Citizen-facing active-key snapshot.
 #[derive(Debug, Clone, Serialize)]
-pub struct VpnStatus {
+pub struct SsStatus {
     pub is_active: bool,
+    pub session_id: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
     pub last_used: Option<DateTime<Utc>>,
+    pub transport: &'static str,
+    pub server: Option<String>,
+    pub port: Option<u16>,
+    pub method: Option<String>,
+    pub acl_profile: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
-pub struct GenerateVpnKeyRequest {
+pub struct IssueSsCredentialRequest {
+    #[serde(default)]
+    pub citizen_id: Option<String>,
     #[serde(default)]
     pub ttl_hours: Option<i64>,
+    #[serde(default)]
+    pub services: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct RevokeSsCredentialRequest {
+    #[serde(default)]
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub citizen_id: Option<String>,
 }
 
 fn default_ttl_hours() -> i64 {
-    std::env::var("VPN_KEY_TTL_HOURS")
+    std::env::var("SS_TTL_HOURS")
         .ok()
+        .or_else(|| std::env::var("VPN_KEY_TTL_HOURS").ok())
         .and_then(|v| v.trim().parse().ok())
         .filter(|h| *h >= MIN_TTL_HOURS && *h <= MAX_TTL_HOURS)
         .unwrap_or(DEFAULT_TTL_HOURS)
@@ -78,52 +107,58 @@ fn clamp_ttl_hours(ttl: i64) -> Result<i64, String> {
     Ok(ttl)
 }
 
-/// Constant-time-ish equality for stored plaintext private keys (do not log either side).
-fn secure_bytes_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
-
-/// Pure expiry check used by cleanup / status (unit-tested).
-pub fn is_vpn_key_expired(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> bool {
-    expires_at <= now
-}
-
-/// Idle revoke: last_used older than IDLE_REVOKE_HOURS (unused keys keep expires_at only).
-pub fn is_vpn_key_idle(
-    last_used: Option<DateTime<Utc>>,
-    now: DateTime<Utc>,
-    idle_hours: i64,
-) -> bool {
-    match last_used {
-        Some(ts) => ts <= now - ChronoDuration::hours(idle_hours),
-        None => false,
+fn ss_enabled() -> bool {
+    match std::env::var("SS_ENABLED") {
+        Ok(v) => {
+            let t = v.trim().to_ascii_lowercase();
+            !(t == "0" || t == "false" || t == "no" || t == "off")
+        }
+        Err(_) => true,
     }
 }
 
-/// Simulate rotate: previous active keys become inactive when a new key is issued.
-fn deactivate_on_new_key_ids(active_ids: &[String], new_id: &str) -> Vec<String> {
-    let mut out: Vec<String> = active_ids
-        .iter()
-        .filter(|id| id.as_str() != new_id)
-        .cloned()
-        .collect();
-    // After rotate, only the new id remains active.
-    out.clear();
-    out.push(new_id.to_string());
-    out
+fn ss_port() -> u16 {
+    std::env::var("SS_PORT")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .unwrap_or(DEFAULT_SS_PORT)
+}
+
+fn ss_method() -> String {
+    std::env::var("SS_METHOD")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| DEFAULT_SS_METHOD.to_string())
+}
+
+fn ss_public_host() -> String {
+    std::env::var("SS_PUBLIC_HOST")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            std::env::var("QUAZAR_PUBLIC_HOST")
+                .ok()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "quazar.website".to_string())
+}
+
+fn ss_dir() -> PathBuf {
+    std::env::var("SS_CONFIG_DIR")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("/var/lib/quazar/ss"))
 }
 
 fn require_citizen(auth: &AuthContext) -> Option<axum::response::Response> {
     if auth.is_node {
         return Some(response::forbidden(
-            "Node credentials cannot manage VPN keys",
+            "Node credentials cannot manage VPN sessions",
         ));
     }
     if !auth.has_permission(&Role::Citizen) {
@@ -135,12 +170,12 @@ fn require_citizen(auth: &AuthContext) -> Option<axum::response::Response> {
 fn require_aiya_admin(auth: &AuthContext) -> Option<axum::response::Response> {
     if auth.is_node {
         return Some(response::forbidden(
-            "Node credentials cannot list VPN keys",
+            "Node credentials cannot list VPN sessions",
         ));
     }
     if !auth.is_admin() {
         return Some(response::forbidden(
-            "Only Aiya and Founder can list active VPN keys",
+            "Only Aiya and Founder can list active VPN sessions",
         ));
     }
     None
@@ -170,7 +205,6 @@ fn access_for_role(role: &Role) -> Vec<&'static str> {
     }
 }
 
-/// Fallback when нет назначенной кандидатуры: Candidate/Agent → Citizen.
 fn role_to_apply(raw: &str) -> Role {
     match Role::from_str(raw) {
         Some(Role::Candidate) | Some(Role::Agent) | None => Role::Citizen,
@@ -178,7 +212,6 @@ fn role_to_apply(raw: &str) -> Role {
     }
 }
 
-/// Уже принятый статус (не временный Candidate/Agent) — оставляем как есть.
 fn is_accepted_status_role(role: &Role) -> bool {
     matches!(
         role,
@@ -191,7 +224,6 @@ fn is_accepted_status_role(role: &Role) -> bool {
     )
 }
 
-/// Роль из Appointed-кандидатуры (то, что уже назначили через vote→approve→appoint).
 fn role_from_appointed_target(target: &str) -> Option<Role> {
     match Role::from_str(target.trim()) {
         Some(r @ (Role::Citizen | Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya)) => {
@@ -201,11 +233,9 @@ fn role_from_appointed_target(target: &str) -> Option<Role> {
     }
 }
 
-/// Предпочтение: текущий принятый статус; иначе target из Appointed; иначе fallback.
 fn prefer_vpn_role(current_raw: &str, appointed_target: Option<&str>) -> Role {
     if let Some(current) = Role::from_str(current_raw) {
         if is_accepted_status_role(&current) && current != Role::Citizen {
-            // Guardian+ / Founder уже в citizens.role — не затираем.
             return current;
         }
         if current == Role::Citizen {
@@ -240,80 +270,79 @@ async fn resolve_vpn_role(pool: &PgPool, citizen_id: &str, role_raw: &str) -> Ro
     prefer_vpn_role(role_raw, appointed.as_deref())
 }
 
-fn generate_openssh_keypair(comment: &str) -> Result<(String, String), String> {
-    let mut key = PrivateKey::random(&mut OsRng, Algorithm::Ed25519)
-        .map_err(|e| format!("Failed to generate Ed25519 key: {e}"))?;
-    key.set_comment(comment);
-    let private_openssh = key
-        .to_openssh(LineEnding::LF)
-        .map_err(|e| format!("Failed to encode OpenSSH private key: {e}"))?;
-    let public_openssh = key
-        .public_key()
-        .to_openssh()
-        .map_err(|e| format!("Failed to encode OpenSSH public key: {e}"))?;
-    Ok((private_openssh.to_string(), public_openssh))
+fn generate_ss_password() -> String {
+    const CHARSET: &[u8] = b"ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz23456789";
+    let mut rng = rand::thread_rng();
+    (0..24)
+        .map(|_| CHARSET[rng.gen_range(0..CHARSET.len())] as char)
+        .collect()
 }
 
-const VPN_INACTIVE_RETENTION_DAYS: i64 = 7;
-
-fn authorized_keys_path() -> Option<std::path::PathBuf> {
-    let path = std::env::var("VPN_AUTHORIZED_KEYS_PATH").ok()?;
-    let path = path.trim();
-    if path.is_empty() {
-        return None;
-    }
-    Some(Path::new(path).to_path_buf())
-}
-
-/// Rewrite `authorized_keys` from currently active, non-expired public keys only.
-pub async fn rewrite_authorized_keys(pool: &PgPool) {
-    let Some(path) = authorized_keys_path() else {
+/// Scheme: one listen port + one shared server password among currently active sessions.
+/// Classic AEAD (chacha20-ietf-poly1305 / aes-256-gcm) — one password per listener.
+/// On revoke of any session we rotate the password for remaining actives so the revoked
+/// client is cut off; remaining clients should re-request `/api/vpn/ss/credential`.
+pub async fn sync_ssserver_config(pool: &PgPool) {
+    if !ss_enabled() {
         return;
-    };
-    if let Some(parent) = path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            tracing::warn!(error = %e, path = %parent.display(), "VPN authorized_keys parent dir");
-            return;
-        }
+    }
+    let dir = ss_dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(error = %e, path = %dir.display(), "SS config dir create failed");
+        return;
     }
 
-    let keys: Result<Vec<(String,)>, sqlx::Error> = sqlx::query_as(
+    let acl_src = Path::new("/opt/quazar/deploy/ss/citizen.acl");
+    let acl_dst = dir.join("citizen.acl");
+    if acl_src.exists() && !acl_dst.exists() {
+        let _ = std::fs::copy(acl_src, &acl_dst);
+    }
+
+    let active: Result<Vec<(String,)>, sqlx::Error> = sqlx::query_as(
         r#"
-        SELECT public_key
-        FROM vpn_keys
-        WHERE is_active = TRUE
-          AND expires_at > NOW()
+        SELECT password
+        FROM vpn_ss_credentials
+        WHERE is_active = TRUE AND expires_at > NOW()
         ORDER BY created_at ASC
+        LIMIT 1
         "#,
     )
     .fetch_all(pool)
     .await;
 
-    let keys = match keys {
-        Ok(k) => k,
+    let password = match active {
+        Ok(rows) if !rows.is_empty() => rows[0].0.clone(),
+        Ok(_) => generate_ss_password(),
         Err(e) => {
-            tracing::warn!(error = %e, "Failed to load VPN public keys for authorized_keys rewrite");
+            tracing::warn!(error = %e, "SS config: failed to load active passwords");
             return;
         }
     };
 
-    let mut content = String::new();
-    for (public_key,) in &keys {
-        let line = public_key.trim();
-        if line.is_empty() {
-            continue;
-        }
-        content.push_str(line);
-        content.push('\n');
-    }
+    let method = ss_method();
+    let port = ss_port();
+    let acl_path = acl_dst.to_string_lossy().to_string();
+    let config = serde_json::json!({
+        "server": "0.0.0.0",
+        "server_port": port,
+        "method": method,
+        "password": password,
+        "mode": "tcp_and_udp",
+        "timeout": 300,
+        "acl": acl_path,
+    });
 
-    let tmp = path.with_extension("authorized_keys.tmp");
-    if let Err(e) = std::fs::write(&tmp, content.as_bytes()) {
-        tracing::warn!(
-            error = %e,
-            path = %tmp.display(),
-            "Failed to write VPN authorized_keys temp file"
-        );
+    let config_path = dir.join("config.json");
+    let tmp = dir.join("config.json.tmp");
+    let body = match serde_json::to_vec_pretty(&config) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!(error = %e, "SS config serialize failed");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&tmp, &body) {
+        tracing::warn!(error = %e, "SS config temp write failed");
         return;
     }
     #[cfg(unix)]
@@ -321,221 +350,246 @@ pub async fn rewrite_authorized_keys(pool: &PgPool) {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&tmp, std::fs::Permissions::from_mode(0o600));
     }
-    if let Err(e) = std::fs::rename(&tmp, &path) {
-        tracing::warn!(
-            error = %e,
-            path = %path.display(),
-            "Failed to replace VPN authorized_keys"
-        );
+    if let Err(e) = std::fs::rename(&tmp, &config_path) {
+        tracing::warn!(error = %e, "SS config replace failed");
         let _ = std::fs::remove_file(&tmp);
         return;
     }
-    // sshd opens AuthorizedKeysFile as quazar-tunnel — root:root 0600 => Permission denied.
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
-        let owner = std::env::var("VPN_AUTHORIZED_KEYS_OWNER")
-            .unwrap_or_else(|_| "999:987".to_string());
-        let status = std::process::Command::new("chown")
-            .arg(&owner)
-            .arg(&path)
-            .status();
-        match status {
-            Ok(s) if s.success() => {}
-            Ok(s) => tracing::warn!(code = ?s.code(), owner = %owner, "chown authorized_keys failed"),
-            Err(e) => tracing::warn!(error = %e, owner = %owner, "chown authorized_keys failed"),
-        }
-    }
     tracing::info!(
-        path = %path.display(),
-        active_keys = keys.len(),
-        "VPN authorized_keys rewritten from active keys"
+        path = %config_path.display(),
+        port = port,
+        "SS ssserver config rewritten"
     );
 }
 
-/// Delete inactive VPN rows older than retention (private material already stripped).
-pub async fn gc_inactive_vpn_keys(pool: &PgPool) -> Result<u64, String> {
-    let result = sqlx::query(
+async fn current_shared_password(pool: &PgPool) -> Result<Option<String>, String> {
+    sqlx::query_scalar(
         r#"
-        DELETE FROM vpn_keys
-        WHERE COALESCE(is_active, FALSE) = FALSE
-          AND created_at < NOW() - make_interval(days => $1::int)
+        SELECT password
+        FROM vpn_ss_credentials
+        WHERE is_active = TRUE AND expires_at > NOW()
+        ORDER BY created_at ASC
+        LIMIT 1
         "#,
     )
-    .bind(VPN_INACTIVE_RETENTION_DAYS as i32)
-    .execute(pool)
+    .fetch_optional(pool)
     .await
-    .map_err(|e| format!("Failed to GC inactive VPN keys: {e}"))?;
-
-    Ok(result.rows_affected())
+    .map_err(|e| format!("Failed to load shared SS password: {e}"))
 }
 
-/// Generate Ed25519 OpenSSH keypair, deactivate prior active keys, persist, return private once.
-pub async fn generate_vpn_key(
+async fn rotate_remaining_passwords(pool: &PgPool, new_password: &str) -> Result<(), String> {
+    sqlx::query(
+        r#"
+        UPDATE vpn_ss_credentials
+        SET password = $1
+        WHERE is_active = TRUE AND expires_at > NOW()
+        "#,
+    )
+    .bind(new_password)
+    .execute(pool)
+    .await
+    .map_err(|e| format!("Failed to rotate SS passwords: {e}"))?;
+    Ok(())
+}
+
+pub async fn issue_ss_credential(
     pool: &PgPool,
     citizen_id: &str,
     ttl_hours: i64,
-) -> Result<VpnKeyResponse, String> {
+) -> Result<SsCredentialResponse, String> {
     let ttl_hours = clamp_ttl_hours(ttl_hours)?;
     let id = Uuid::new_v4().to_string();
-    let comment = format!("quazar-vpn-{id}");
-    let (private_key, public_key) = generate_openssh_keypair(&comment)?;
     let now = Utc::now();
     let expires_at = now + ChronoDuration::hours(ttl_hours);
+    let method = ss_method();
+    let port = ss_port();
+    let password = match current_shared_password(pool).await? {
+        Some(p) => p,
+        None => generate_ss_password(),
+    };
 
     let mut tx = pool
         .begin()
         .await
-        .map_err(|e| format!("Failed to start VPN key transaction: {e}"))?;
+        .map_err(|e| format!("Failed to start SS credential transaction: {e}"))?;
 
     sqlx::query(
         r#"
-        UPDATE vpn_keys
-        SET is_active = FALSE, private_key = ''
+        UPDATE vpn_ss_credentials
+        SET is_active = FALSE, password = ''
         WHERE citizen_id = $1 AND is_active = TRUE
         "#,
     )
     .bind(citizen_id)
     .execute(&mut *tx)
     .await
-    .map_err(|e| format!("Failed to deactivate previous VPN keys: {e}"))?;
+    .map_err(|e| format!("Failed to deactivate previous SS credentials: {e}"))?;
 
     sqlx::query(
         r#"
-        INSERT INTO vpn_keys (id, citizen_id, private_key, public_key, expires_at, last_used, is_active, created_at)
-        VALUES ($1, $2, $3, $4, $5, NULL, TRUE, $6)
+        INSERT INTO vpn_ss_credentials
+            (id, citizen_id, password, method, port, acl_profile, expires_at, last_used, is_active, created_at)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, NULL, TRUE, $8)
         "#,
     )
     .bind(&id)
     .bind(citizen_id)
-    .bind(&private_key)
-    .bind(&public_key)
+    .bind(&password)
+    .bind(&method)
+    .bind(port as i32)
+    .bind(ACL_PROFILE)
     .bind(expires_at)
     .bind(now)
     .execute(&mut *tx)
     .await
-    .map_err(|e| format!("Failed to store VPN key: {e}"))?;
+    .map_err(|e| format!("Failed to store SS credential: {e}"))?;
 
     tx.commit()
         .await
-        .map_err(|e| format!("Failed to commit VPN key: {e}"))?;
+        .map_err(|e| format!("Failed to commit SS credential: {e}"))?;
 
-    rewrite_authorized_keys(pool).await;
+    sync_ssserver_config(pool).await;
 
-    Ok(VpnKeyResponse {
-        id,
-        citizen_id: citizen_id.to_string(),
-        private_key,
-        public_key,
+    let host = ss_public_host();
+    Ok(SsCredentialResponse {
+        session_id: id,
+        server: host.clone(),
+        host,
+        port,
+        method,
+        password,
+        acl_profile: ACL_PROFILE.to_string(),
+        suggested_acl: None,
+        ttl_sec: ttl_hours * 3600,
+        transport: "shadowsocks",
         expires_at,
+        citizen_id: citizen_id.to_string(),
     })
 }
 
-/// Check that a private key exists, is active, and not expired for this citizen.
-/// Compares stored plaintext with a length-checked XOR fold (never log the key).
-/// Updates `last_used` on success.
-pub async fn validate_vpn_key(
+/// Revoke by session_id and/or all sessions for citizen_id. Idempotent.
+pub async fn revoke_ss_credentials(
     pool: &PgPool,
-    citizen_id: &str,
-    private_key: &str,
-) -> Result<bool, String> {
-    let rows: Vec<(String, String)> = sqlx::query_as(
-        r#"
-        SELECT id, private_key
-        FROM vpn_keys
-        WHERE citizen_id = $1
-          AND is_active = TRUE
-          AND expires_at > NOW()
-        "#,
-    )
-    .bind(citizen_id)
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to validate VPN key: {e}"))?;
-
-    let presented = private_key.as_bytes();
-    for (id, stored) in rows {
-        if secure_bytes_eq(stored.as_bytes(), presented) {
-            let now = Utc::now();
+    citizen_id: Option<&str>,
+    session_id: Option<&str>,
+) -> Result<u64, String> {
+    let result = if let Some(sid) = session_id.filter(|s| !s.is_empty()) {
+        if let Some(cid) = citizen_id.filter(|s| !s.is_empty()) {
             sqlx::query(
                 r#"
-                UPDATE vpn_keys
-                SET last_used = $2
-                WHERE id = $1
+                UPDATE vpn_ss_credentials
+                SET is_active = FALSE, password = ''
+                WHERE id = $1 AND citizen_id = $2 AND is_active = TRUE
                 "#,
             )
-            .bind(&id)
-            .bind(now)
+            .bind(sid)
+            .bind(cid)
             .execute(pool)
             .await
-            .map_err(|e| format!("Failed to update VPN key last_used: {e}"))?;
-            return Ok(true);
+        } else {
+            sqlx::query(
+                r#"
+                UPDATE vpn_ss_credentials
+                SET is_active = FALSE, password = ''
+                WHERE id = $1 AND is_active = TRUE
+                "#,
+            )
+            .bind(sid)
+            .execute(pool)
+            .await
         }
+    } else if let Some(cid) = citizen_id.filter(|s| !s.is_empty()) {
+        sqlx::query(
+            r#"
+            UPDATE vpn_ss_credentials
+            SET is_active = FALSE, password = ''
+            WHERE citizen_id = $1 AND is_active = TRUE
+            "#,
+        )
+        .bind(cid)
+        .execute(pool)
+        .await
+    } else {
+        return Err("session_id or citizen_id is required".into());
     }
-    Ok(false)
+    .map_err(|e| format!("Failed to revoke SS credential: {e}"))?;
+
+    let n = result.rows_affected();
+    if n > 0 {
+        let new_password = generate_ss_password();
+        rotate_remaining_passwords(pool, &new_password).await?;
+        sync_ssserver_config(pool).await;
+    }
+    Ok(n)
 }
 
-/// Active key status for a citizen: `is_active`, `expires_at`, `last_used`.
-pub async fn get_vpn_status(pool: &PgPool, citizen_id: &str) -> Result<VpnStatus, String> {
-    let row: Option<(DateTime<Utc>, Option<DateTime<Utc>>)> = sqlx::query_as(
-        r#"
-        SELECT expires_at, last_used
-        FROM vpn_keys
-        WHERE citizen_id = $1
-          AND is_active = TRUE
-          AND expires_at > NOW()
-        ORDER BY created_at DESC
-        LIMIT 1
-        "#,
-    )
-    .bind(citizen_id)
-    .fetch_optional(pool)
-    .await
-    .map_err(|e| format!("Failed to load VPN status: {e}"))?;
+pub async fn revoke_ss_for_citizen(pool: &PgPool, citizen_id: &str) -> Result<u64, String> {
+    revoke_ss_credentials(pool, Some(citizen_id), None).await
+}
+
+pub async fn get_ss_status(pool: &PgPool, citizen_id: &str) -> Result<SsStatus, String> {
+    let row: Option<(String, DateTime<Utc>, Option<DateTime<Utc>>, String, i32, String)> =
+        sqlx::query_as(
+            r#"
+            SELECT id, expires_at, last_used, method, port, acl_profile
+            FROM vpn_ss_credentials
+            WHERE citizen_id = $1
+              AND is_active = TRUE
+              AND expires_at > NOW()
+            ORDER BY created_at DESC
+            LIMIT 1
+            "#,
+        )
+        .bind(citizen_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(|e| format!("Failed to load SS status: {e}"))?;
 
     Ok(match row {
-        Some((expires_at, last_used)) => VpnStatus {
+        Some((id, expires_at, last_used, method, port, acl_profile)) => SsStatus {
             is_active: true,
+            session_id: Some(id),
             expires_at: Some(expires_at),
             last_used,
+            transport: "shadowsocks",
+            server: Some(ss_public_host()),
+            port: Some(port as u16),
+            method: Some(method),
+            acl_profile: Some(acl_profile),
         },
-        None => VpnStatus {
+        None => SsStatus {
             is_active: false,
+            session_id: None,
             expires_at: None,
             last_used: None,
+            transport: "shadowsocks",
+            server: None,
+            port: None,
+            method: None,
+            acl_profile: None,
         },
     })
 }
 
-/// Revoke all active keys for a citizen (`is_active = false`). Returns whether any row changed.
-pub async fn revoke_vpn_key(pool: &PgPool, citizen_id: &str) -> Result<bool, String> {
-    let result = sqlx::query(
+pub async fn list_active_ss_credentials(pool: &PgPool) -> Result<Vec<SsCredentialInfo>, String> {
+    sqlx::query_as::<_, SsCredentialInfo>(
         r#"
-        UPDATE vpn_keys
-        SET is_active = FALSE, private_key = ''
-        WHERE citizen_id = $1 AND is_active = TRUE
+        SELECT id, citizen_id, method, port, acl_profile, expires_at, last_used, is_active, created_at
+        FROM vpn_ss_credentials
+        WHERE is_active = TRUE AND expires_at > NOW()
+        ORDER BY created_at DESC
         "#,
     )
-    .bind(citizen_id)
-    .execute(pool)
+    .fetch_all(pool)
     .await
-    .map_err(|e| format!("Failed to revoke VPN key: {e}"))?;
-
-    let changed = result.rows_affected() > 0;
-    if changed {
-        rewrite_authorized_keys(pool).await;
-    }
-    Ok(changed)
+    .map_err(|e| format!("Failed to list SS credentials: {e}"))
 }
 
-/// Deactivate expired or idle keys:
-/// `expires_at < NOW()` OR `last_used < NOW() - 24h`.
-pub async fn cleanup_expired_keys(pool: &PgPool) -> Result<u64, String> {
+pub async fn cleanup_expired_ss_credentials(pool: &PgPool) -> Result<u64, String> {
     let result = sqlx::query(
         r#"
-        UPDATE vpn_keys
-        SET is_active = FALSE, private_key = ''
+        UPDATE vpn_ss_credentials
+        SET is_active = FALSE, password = ''
         WHERE is_active = TRUE
           AND (
             expires_at < NOW()
@@ -545,121 +599,151 @@ pub async fn cleanup_expired_keys(pool: &PgPool) -> Result<u64, String> {
     )
     .execute(pool)
     .await
-    .map_err(|e| format!("Failed to cleanup VPN keys: {e}"))?;
+    .map_err(|e| format!("Failed to cleanup SS credentials: {e}"))?;
 
     let deactivated = result.rows_affected();
-    // Always rewrite so authorized_keys cannot drift from DB (stale pubkeys).
-    rewrite_authorized_keys(pool).await;
-
-    match gc_inactive_vpn_keys(pool).await {
-        Ok(n) if n > 0 => {
-            tracing::info!(deleted = n, "VPN inactive keys garbage-collected");
-        }
-        Ok(_) => {}
-        Err(e) => tracing::warn!(error = %e, "VPN inactive key GC failed"),
+    if deactivated > 0 {
+        let new_password = generate_ss_password();
+        let _ = rotate_remaining_passwords(pool, &new_password).await;
     }
+    sync_ssserver_config(pool).await;
+
+    let _ = sqlx::query(
+        r#"
+        DELETE FROM vpn_ss_credentials
+        WHERE COALESCE(is_active, FALSE) = FALSE
+          AND created_at < NOW() - make_interval(days => $1::int)
+        "#,
+    )
+    .bind(SS_INACTIVE_RETENTION_DAYS as i32)
+    .execute(pool)
+    .await;
 
     Ok(deactivated)
 }
 
-/// List all currently active (and not expired) VPN keys — admin view (no private keys).
-pub async fn list_active_keys(pool: &PgPool) -> Result<Vec<VpnKeyInfo>, String> {
-    sqlx::query_as::<_, VpnKeyInfo>(
-        r#"
-        SELECT id, citizen_id, public_key, expires_at, last_used, is_active, created_at
-        FROM vpn_keys
-        WHERE is_active = TRUE
-          AND expires_at > NOW()
-        ORDER BY created_at DESC
-        "#,
-    )
-    .fetch_all(pool)
-    .await
-    .map_err(|e| format!("Failed to list VPN keys: {e}"))
+/// Alias for background cleanup loop.
+pub async fn cleanup_expired_keys(pool: &PgPool) -> Result<u64, String> {
+    cleanup_expired_ss_credentials(pool).await
 }
 
-/// POST /api/vpn/key — Citizen+
-pub async fn generate_vpn_key_handler(
+async fn ss_session_valid(pool: &PgPool, citizen_id: &str, session_id: &str) -> bool {
+    sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM vpn_ss_credentials
+            WHERE id = $1 AND citizen_id = $2 AND is_active = TRUE AND expires_at > NOW()
+        )
+        "#,
+    )
+    .bind(session_id)
+    .bind(citizen_id)
+    .fetch_one(pool)
+    .await
+    .unwrap_or(false)
+}
+
+/// POST /api/vpn/ss/credential — Citizen+
+pub async fn issue_ss_credential_handler(
     Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
-    body: Option<Json<GenerateVpnKeyRequest>>,
+    body: Option<Json<IssueSsCredentialRequest>>,
 ) -> impl IntoResponse {
-    if !tunnel::tunnel_enabled() {
-        return response::service_unavailable(
-            "SSH tunnel / VPN support is disabled (SSH_TUNNEL_ENABLED=false)",
-        );
+    if !ss_enabled() {
+        return response::service_unavailable("Shadowsocks VPN is disabled (SS_ENABLED=false)");
     }
     if let Some(resp) = require_citizen(&auth) {
         return resp;
     }
 
-    if let Err(e) = cleanup_expired_keys(&state.db).await {
-        tracing::warn!(error = %e, "VPN on-demand cleanup before issue failed");
+    if let Err(e) = cleanup_expired_ss_credentials(&state.db).await {
+        tracing::warn!(error = %e, "SS on-demand cleanup before issue failed");
     }
 
-    let ttl_hours = body
-        .and_then(|Json(b)| b.ttl_hours)
-        .unwrap_or_else(default_ttl_hours);
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let auth_citizen = auth.resolve_account_id(&state.db).await;
+    let citizen_id = req
+        .citizen_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(auth_citizen.as_str());
+    if citizen_id != auth_citizen && !auth.is_admin() {
+        return response::forbidden("Cannot issue SS credentials for another citizen");
+    }
 
-    let citizen_id = auth.resolve_account_id(&state.db).await;
-    match generate_vpn_key(&state.db, &citizen_id, ttl_hours).await {
-        Ok(key) => {
-            // Do not log private_key.
+    let ttl_hours = req.ttl_hours.unwrap_or_else(default_ttl_hours);
+    let _services = req.services;
+
+    match issue_ss_credential(&state.db, citizen_id, ttl_hours).await {
+        Ok(cred) => {
             tracing::info!(
-                citizen_id = %key.citizen_id,
-                key_id = %key.id,
-                expires_at = %key.expires_at,
-                "VPN temporary SSH key issued"
+                citizen_id = %cred.citizen_id,
+                session_id = %cred.session_id,
+                expires_at = %cred.expires_at,
+                "SS credential issued"
             );
-            let tunnel_cfg = tunnel::tunnel_config();
-            Json(ApiResponse::success(serde_json::json!({
-                "id": key.id,
-                "citizen_id": key.citizen_id,
-                "private_key": key.private_key,
-                "public_key": key.public_key,
-                "expires_at": key.expires_at,
-                "ttl_hours": ttl_hours,
-                "ssh_user": std::env::var("SSH_TUNNEL_USER").unwrap_or_else(|_| "quazar-tunnel".into()),
-                "tunnel": tunnel_cfg,
-            })))
-            .into_response()
+            Json(ApiResponse::success(cred)).into_response()
         }
         Err(e) => {
             if e.contains("ttl_hours") {
                 response::bad_request(e)
             } else {
-                tracing::error!(error = %e, "VPN key generation failed");
-                response::internal_error("Failed to generate VPN key")
+                tracing::error!(error = %e, "SS credential issue failed");
+                response::internal_error("Failed to issue SS credential")
             }
         }
     }
 }
 
-/// Alias used by main.rs / older call sites.
-pub async fn create_vpn_key_handler(
-    auth: Extension<AuthContext>,
-    state: State<Arc<AppState>>,
-    body: Option<Json<GenerateVpnKeyRequest>>,
+/// POST /api/vpn/ss/revoke — Citizen+
+pub async fn revoke_ss_credential_handler(
+    Extension(auth): Extension<AuthContext>,
+    State(state): State<Arc<AppState>>,
+    body: Option<Json<RevokeSsCredentialRequest>>,
 ) -> impl IntoResponse {
-    generate_vpn_key_handler(auth, state, body).await
+    if let Some(resp) = require_citizen(&auth) {
+        return resp;
+    }
+
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+    let auth_citizen = auth.resolve_account_id(&state.db).await;
+    let citizen_id = req
+        .citizen_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(auth_citizen.as_str());
+    if citizen_id != auth_citizen && !auth.is_admin() {
+        return response::forbidden("Cannot revoke SS credentials for another citizen");
+    }
+
+    let session_id = req.session_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+
+    match revoke_ss_credentials(&state.db, Some(citizen_id), session_id).await {
+        Ok(_) => Json(ApiResponse::success(serde_json::json!({
+            "ok": true,
+            "revoked": true,
+            "transport": "shadowsocks",
+        })))
+        .into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "SS revoke failed");
+            response::internal_error("Failed to revoke SS credential")
+        }
+    }
 }
 
-/// GET /api/vpn/status — Citizen+
-pub async fn vpn_status_handler(
+/// GET /api/vpn/ss/status — Citizen+
+pub async fn ss_status_handler(
     Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
     if let Some(resp) = require_citizen(&auth) {
         return resp;
     }
-
-    if let Err(e) = cleanup_expired_keys(&state.db).await {
-        tracing::warn!(error = %e, "VPN on-demand cleanup before status failed");
-    }
-
     let citizen_id = auth.resolve_account_id(&state.db).await;
-    let tunnel_cfg = tunnel::tunnel_config();
-    match get_vpn_status(&state.db, &citizen_id).await {
+    match get_ss_status(&state.db, &citizen_id).await {
         Ok(status) => {
             let now = Utc::now();
             let seconds_remaining = status
@@ -668,55 +752,44 @@ pub async fn vpn_status_handler(
                 .unwrap_or(0);
             Json(ApiResponse::success(serde_json::json!({
                 "is_active": status.is_active,
-                "has_active_key": status.is_active,
+                "session_id": status.session_id,
                 "expires_at": status.expires_at,
                 "last_used": status.last_used,
                 "seconds_remaining": seconds_remaining,
-                "ssh_user": std::env::var("SSH_TUNNEL_USER").unwrap_or_else(|_| "quazar-tunnel".into()),
-                "tunnel": tunnel_cfg,
+                "transport": status.transport,
+                "server": status.server,
+                "host": status.server,
+                "port": status.port,
+                "method": status.method,
+                "acl_profile": status.acl_profile,
             })))
             .into_response()
         }
         Err(e) => {
-            tracing::error!(error = %e, "VPN status failed");
-            response::internal_error("Failed to load VPN status")
+            tracing::error!(error = %e, "SS status failed");
+            response::internal_error("Failed to load SS status")
         }
     }
 }
 
-/// POST /api/vpn/revoke — Citizen+
-pub async fn revoke_vpn_key_handler(
-    Extension(auth): Extension<AuthContext>,
-    State(state): State<Arc<AppState>>,
+/// GET /api/vpn/status — SS status (SSH tunnel removed).
+pub async fn vpn_status_handler(
+    auth: Extension<AuthContext>,
+    state: State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    if let Some(resp) = require_citizen(&auth) {
-        return resp;
-    }
-
-    if let Err(e) = cleanup_expired_keys(&state.db).await {
-        tracing::warn!(error = %e, "VPN on-demand cleanup before revoke failed");
-    }
-
-    let citizen_id = auth.resolve_account_id(&state.db).await;
-
-    match revoke_vpn_key(&state.db, &citizen_id).await {
-        Ok(false) => response::bad_request("No active VPN key to revoke"),
-        Ok(true) => {
-            tracing::info!(citizen_id = %citizen_id, "VPN key(s) revoked");
-            Json(ApiResponse::success(serde_json::json!({
-                "message": "VPN key revoked",
-                "revoked": true,
-            })))
-            .into_response()
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "VPN revoke failed");
-            response::internal_error("Failed to revoke VPN key")
-        }
-    }
+    ss_status_handler(auth, state).await
 }
 
-/// GET /api/vpn/keys — Aiya / Founder
+/// POST /api/vpn/revoke — revoke SS credentials (SSH tunnel removed).
+pub async fn revoke_vpn_key_handler(
+    auth: Extension<AuthContext>,
+    state: State<Arc<AppState>>,
+    body: Option<Json<RevokeSsCredentialRequest>>,
+) -> impl IntoResponse {
+    revoke_ss_credential_handler(auth, state, body).await
+}
+
+/// GET /api/vpn/keys — admin list of active SS sessions (no passwords).
 pub async fn list_vpn_keys_handler(
     Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
@@ -724,14 +797,24 @@ pub async fn list_vpn_keys_handler(
     if let Some(resp) = require_aiya_admin(&auth) {
         return resp;
     }
-
-    match list_active_keys(&state.db).await {
-        Ok(keys) => Json(ApiResponse::success(serde_json::json!({ "keys": keys }))).into_response(),
+    match list_active_ss_credentials(&state.db).await {
+        Ok(keys) => Json(ApiResponse::success(serde_json::json!({
+            "keys": keys,
+            "transport": "shadowsocks",
+        })))
+        .into_response(),
         Err(e) => {
-            tracing::error!(error = %e, "VPN list failed");
-            response::internal_error("Failed to list VPN keys")
+            tracing::error!(error = %e, "SS list failed");
+            response::internal_error("Failed to list SS credentials")
         }
     }
+}
+
+/// POST /api/vpn/key — removed (was SSH tunnel). Use /api/vpn/ss/credential.
+pub async fn generate_vpn_key_handler() -> impl IntoResponse {
+    response::gone(
+        "SSH tunnel VPN removed. Use POST /api/vpn/ss/credential (Shadowsocks).",
+    )
 }
 
 #[derive(Debug, Deserialize)]
@@ -739,9 +822,7 @@ pub struct ActivateVpnBody {
     pub vpn_session_id: String,
 }
 
-/// POST /api/citizen/activate_vpn — единый акт: ВПН = принятие роли.
-/// Роль: citizens.role (Guardian+) или target из Appointed-кандидатуры.
-/// Идемпотентно при active + уже верной роли; иначе лечит role из Appointed.
+/// POST /api/citizen/activate_vpn — vpn_session_id = SS session_id.
 pub async fn activate_vpn_handler(
     Extension(auth): Extension<AuthContext>,
     State(state): State<Arc<AppState>>,
@@ -787,7 +868,7 @@ pub async fn activate_vpn_handler(
 
     if was_active && role_already_ok {
         let _ = sqlx::query(
-            "UPDATE vpn_keys SET last_used = NOW()
+            "UPDATE vpn_ss_credentials SET last_used = NOW()
              WHERE citizen_id = $1 AND is_active = TRUE AND expires_at > NOW()
                AND ($2 = '' OR id = $2)",
         )
@@ -802,24 +883,14 @@ pub async fn activate_vpn_handler(
             "access": access,
             "idempotent": true,
             "vpn_session_id": session,
+            "transport": "shadowsocks",
         })))
         .into_response();
     }
 
-    let session_ok: bool = sqlx::query_scalar(
-        "SELECT EXISTS(
-            SELECT 1 FROM vpn_keys
-            WHERE id = $1 AND citizen_id = $2 AND is_active = TRUE AND expires_at > NOW()
-         )",
-    )
-    .bind(session)
-    .bind(&citizen_id)
-    .fetch_one(&state.db)
-    .await
-    .unwrap_or(false);
-    if !session_ok {
+    if !ss_session_valid(&state.db, &citizen_id, session).await {
         return response::bad_request(
-            "Недействительная ВПН-сессия: получите ключ (POST /api/vpn/key) и передайте его id как vpn_session_id",
+            "Недействительная ВПН-сессия: получите credentials (POST /api/vpn/ss/credential) и передайте session_id как vpn_session_id",
         );
     }
 
@@ -844,7 +915,7 @@ pub async fn activate_vpn_handler(
     .await;
 
     let _ = sqlx::query(
-        "UPDATE vpn_keys SET last_used = NOW() WHERE id = $1 AND citizen_id = $2",
+        "UPDATE vpn_ss_credentials SET last_used = NOW() WHERE id = $1 AND citizen_id = $2",
     )
     .bind(session)
     .bind(&citizen_id)
@@ -867,7 +938,7 @@ pub async fn activate_vpn_handler(
         previous_role = %role_raw,
         vpn_session_id = %session,
         healed = was_active && !role_already_ok,
-        "VPN activated: citizen active + role applied"
+        "VPN activated: citizen active + role applied (shadowsocks)"
     );
 
     Json(ApiResponse::success(serde_json::json!({
@@ -877,6 +948,7 @@ pub async fn activate_vpn_handler(
         "access": access,
         "idempotent": false,
         "vpn_session_id": session,
+        "transport": "shadowsocks",
         "message": "ВПН включён — роль принята, доступ к экономике открыт",
     })))
     .into_response()
@@ -885,7 +957,6 @@ pub async fn activate_vpn_handler(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
 
     #[test]
     fn clamp_ttl_rejects_out_of_range() {
@@ -895,60 +966,14 @@ mod tests {
     }
 
     #[test]
-    fn openssh_keypair_roundtrip_shapes() {
-        let (priv_pem, pub_line) = generate_openssh_keypair("test-comment").unwrap();
-        assert!(priv_pem.contains("OPENSSH PRIVATE KEY"));
-        assert!(pub_line.starts_with("ssh-ed25519 "));
-        let parsed = PrivateKey::from_openssh(&priv_pem).unwrap();
-        assert_eq!(parsed.comment(), "test-comment");
-        assert!(!pub_line.contains("PRIVATE KEY"));
-    }
-
-    #[test]
-    fn expiry_detects_past_and_boundary() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 21, 12, 0, 0).unwrap();
-        assert!(!is_vpn_key_expired(now + ChronoDuration::hours(1), now));
-        assert!(is_vpn_key_expired(now - ChronoDuration::seconds(1), now));
-        assert!(is_vpn_key_expired(now, now));
-    }
-
-    #[test]
-    fn idle_revoke_respects_last_used() {
-        let now = Utc.with_ymd_and_hms(2026, 7, 21, 12, 0, 0).unwrap();
-        assert!(!is_vpn_key_idle(None, now, 24));
-        assert!(!is_vpn_key_idle(
-            Some(now - ChronoDuration::hours(23)),
-            now,
-            24
-        ));
-        assert!(is_vpn_key_idle(
-            Some(now - ChronoDuration::hours(24)),
-            now,
-            24
-        ));
-    }
-
-    #[test]
-    fn deactivate_on_new_key_keeps_only_new() {
-        let previous = vec!["old-a".into(), "old-b".into()];
-        let active = deactivate_on_new_key_ids(&previous, "new-1");
-        assert_eq!(active, vec!["new-1".to_string()]);
-        assert!(!active.iter().any(|id| id.starts_with("old-")));
-    }
-
-    #[test]
-    fn secure_bytes_eq_matches_and_rejects() {
-        assert!(secure_bytes_eq(b"abc", b"abc"));
-        assert!(!secure_bytes_eq(b"abc", b"abd"));
-        assert!(!secure_bytes_eq(b"abc", b"ab"));
+    fn password_has_expected_len() {
+        let p = generate_ss_password();
+        assert_eq!(p.len(), 24);
     }
 
     #[test]
     fn prefer_vpn_role_uses_appointed_when_citizen() {
-        assert_eq!(
-            prefer_vpn_role("Citizen", Some("Aiya")),
-            Role::Aiya
-        );
+        assert_eq!(prefer_vpn_role("Citizen", Some("Aiya")), Role::Aiya);
         assert_eq!(
             prefer_vpn_role("Candidate", Some("Guardian")),
             Role::Guardian

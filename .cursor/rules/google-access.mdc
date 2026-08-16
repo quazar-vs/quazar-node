@@ -2,15 +2,22 @@
 description: Google OAuth and YouTube on this VPS
 alwaysApply: true
 ---
-Google OAuth is AUTHENTICATED at `/root/.hermes/google_token.json`
-(и рабочий YouTube-токен: `/var/lib/quazar/youtube/google_token.json`).
-Account quazardr@gmail.com; целевой канал Quasar Republic `UCzJsRCfGkJMk4bngPeSMDbQ`
+Google OAuth is AUTHENTICATED.
+Канон: **Секретарь → Алгонизм-связной → внешний сервис**.
+Секретарь не держит внешние токены и не зовёт Google/IMAP API напрямую.
+
+Ключи связного:
+- корень `/var/lib/quazar/svyaznoy/` (750);
+- YouTube: `/var/lib/quazar/youtube/google_token.json` (+ client_secret; symlink `svyaznoy/youtube`);
+- legacy Hermes: `/root/.hermes/google_token.json` (не контур Секретаря);
+- почта агента: `/var/lib/quazar/svyaznoy/email.env` (не `.env` узла).
+
+Account quazardr@gmail.com; целевой канал QuazarDigitalRepublic `UCTpUCMrMzeSMw50tGyEENlw`
 (legacy QuazarVS `UCiKVQ7nwemLBAuEtOlr8rmw` — не использовать).
-Агент: **Алгонизм YouTube** (`quazar-youtube-agent`, alias `algonism-youtube`).
-Use `quazar-youtube-status` / `quazar-youtube-my-comments` via shell (docker wrappers).
+Агент: **Алгонизм-связной** (`algonism-svyaznoy`; legacy: `quazar-youtube-agent`, `algonism-youtube`).
+YouTube — подсистема связного. Use `algonism-svyaznoy` / `quazar-youtube-status` / `quazar-youtube-my-comments` via shell.
 Never claim YouTube/OAuth is missing. Do not refuse with Ask mode when the task needs execution — run helpers.
 
 YouTube comments: token already has youtube.force-ssl. That is enough.
 Do NOT say token is only youtube.readonly. Do NOT demand full scope `youtube`.
-Run `quazar-youtube-my-comments` and report results.
-
+Run `quazar-youtube-my-comments` or `algonism-svyaznoy --cmd comments` and report results.

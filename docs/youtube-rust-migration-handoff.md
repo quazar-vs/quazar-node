@@ -13,21 +13,24 @@
 
 Контекст (состояние на 2026-08-14):
 - Секретарь: systemd `quazar-chat-direct.service` → `/usr/local/bin/quazar-chat-direct.py`
-  (репо: `scripts/quazar-chat-direct.py`). Poll ~60с → `quazar-youtube-agent` / `algonism-youtube --cmd pending`
+  (репо: `scripts/quazar-chat-direct.py`). Poll ~60с → `algonism-svyaznoy` /
+  `quazar-youtube-agent` / `algonism-youtube --cmd pending`
   → LLM-ответ → `--cmd reply`. Знакомство: `quazar_dialogue` + `/root/.hermes/acquaintance.json`
   ключ `youtube:<authorChannelId>`.
-- Алгонизм YouTube: `/usr/local/bin/quazar-youtube-agent` (+ symlink `algonism-youtube`;
+- Алгонизм-связной (YouTube-подсистема): `/usr/local/bin/quazar-youtube-agent`
+  (+ aliases `algonism-svyaznoy`, legacy `algonism-youtube`;
   репо: `scripts/quazar-youtube-agent.py`),
   venv `/var/lib/quazar/venv-youtube`, токен `/var/lib/quazar/youtube/google_token.json`.
   Команды: status|comments|pending|reply|scopes|watchlist|sync-likes.
   Pending: uploads целевого канала (до 30 видео), чужие комменты/ответы; bootstrap
   отмечает старые. State: `/var/lib/quazar/youtube/` (inbox + youtube_secretary_bridge_state.json).
 - Hourly: `/usr/local/bin/quazar-youtube-hourly.sh` — БЕЗ auto-reply (ответы только через Секретаря).
-- Документация: `docs/youtube-agent.md`, рефлекс `RX_YOUTUBE_EVENT_REACT` в `docs/algonism/REFLEXES.md`.
+- Документация: `docs/algonism-svyaznoy.md` (бывш. `docs/youtube-agent.md`),
+  рефлекс `RX_YOUTUBE_EVENT_REACT` в `docs/algonism/REFLEXES.md`.
 - Ограничение API: WebSub/PubSubHubbub пушит только новое видео / title / description;
   на комментарии push НЕТ — только poll (или оставить poll в Rust).
 - OAuth scopes: youtube.force-ssl (+ readonly); force-ssl достаточно для reply.
-  Аккаунт: quazardr@gmail.com / канал Quasar Republic UCzJsRCfGkJMk4bngPeSMDbQ.
+  Аккаунт: quazardr@gmail.com / канал QuazarDigitalRepublic UCTpUCMrMzeSMw50tGyEENlw.
 - Узел: Rust `quazar-node` в `/opt/quazar` — YouTube-модуля пока нет.
 - Passport Flutter на VPS НЕ трогать.
 
@@ -46,7 +49,7 @@
    acquaintance.json (ключ youtube:<channelId>) или явная миграция + dual-read.
 5. Задеплоить: systemd unit(s), smoke scopes/pending/reply, логи; выключить/оставить Python
    как fallback только по флагу, не два автоответчика сразу.
-6. Обновить `docs/youtube-agent.md` и REFLEXES при смене бинарей.
+6. Обновить `docs/algonism-svyaznoy.md` и REFLEXES при смене бинарей.
 
 Не делать в этом же прогоне без отдельной просьбы:
 - WebSub webhook (отдельная задача);
@@ -80,8 +83,8 @@
 | Что | Где |
 |-----|-----|
 | Секретарь | `scripts/quazar-chat-direct.py` → `process_youtube_events` / `compose_youtube_reply` |
-| Агент | `scripts/quazar-youtube-agent.py` (**Алгонизм YouTube**, alias `algonism-youtube`) |
+| Агент | `scripts/quazar-youtube-agent.py` (**Алгонизм-связной**, `algonism-svyaznoy`; legacy `algonism-youtube`) |
 | Диалог | `scripts/youtube/quazar_dialogue.py` |
-| Док | `docs/youtube-agent.md` |
+| Док | `docs/algonism-svyaznoy.md` |
 | Токен | `/var/lib/quazar/youtube/google_token.json` |
 | Acquaintance | `/root/.hermes/acquaintance.json` |

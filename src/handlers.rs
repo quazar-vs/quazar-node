@@ -420,9 +420,18 @@ pub async fn offline_handler(
     .execute(&state.db)
     .await;
 
+    let ss_revoked = match vpn::revoke_ss_for_citizen(&state.db, citizen_id).await {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!(error = %e, citizen_id = %citizen_id, "SS revoke on offline failed");
+            0
+        }
+    };
+
     Json(ApiResponse::success(serde_json::json!({
         "citizen_id": citizen_id,
-        "message": "Citizen marked as offline"
+        "message": "Citizen marked as offline",
+        "ss_credentials_revoked": ss_revoked,
     })))
     .into_response()
 }
@@ -620,17 +629,17 @@ pub async fn background_sync(state: Arc<AppState>) {
     }
 }
 
-/// Every 5 minutes: deactivate expired / idle VPN keys.
+/// Every 5 minutes: deactivate expired / idle SS credentials.
 pub async fn background_vpn_cleanup(state: Arc<AppState>) {
     let mut interval = time::interval(VPN_CLEANUP_INTERVAL);
     loop {
         interval.tick().await;
-        match vpn::cleanup_expired_keys(&state.db).await {
+        match vpn::cleanup_expired_ss_credentials(&state.db).await {
             Ok(n) => {
-                tracing::info!("VPN ключей деактивировано: {n}");
+                tracing::info!("SS credentials deactivated: {n}");
             }
             Err(e) => {
-                tracing::warn!(error = %e, "VPN key cleanup failed");
+                tracing::warn!(error = %e, "SS credential cleanup failed");
             }
         }
     }

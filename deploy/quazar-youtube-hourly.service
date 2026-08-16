@@ -1,5 +1,5 @@
 [Unit]
-Description=Алгонизм YouTube hourly (likes sync; replies via Secretary)
+Description=Алгонизм-связной hourly (YouTube likes sync; replies via Secretary)
 After=network-online.target
 Wants=network-online.target
 

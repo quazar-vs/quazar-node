@@ -1,4 +1,4 @@
-# Лендинг quazar.website
+# Портал входа quazar.website
 
-Статическая страница для GitHub Pages или любого static-хостинга.
-Корень сайта: `index.html`.
+Статический портал для входа в Квазар (GitHub Pages или любой static-хостинг).
+Корень: `index.html`.

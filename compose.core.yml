@@ -1,0 +1,117 @@
+# Quazar Core — node + Postgres (+ optional in-core agent profiles).
+# Does NOT start external agents (Cursor / связной HTTP gateway).
+#
+#   docker compose -f compose.core.yml up -d
+#
+# Equivalent default today: docker compose -f docker-compose.yml up -d
+# (this file is the explicit “core install” entrypoint + shared network name).
+
+name: quazar-core
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-quazar}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      POSTGRES_DB: quazar
+    volumes:
+      - quazar_pg_data:/var/lib/postgresql/data
+    networks:
+      - quazar
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d quazar"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  quazar-node:
+    build: .
+    restart: always
+    ports:
+      - "127.0.0.1:8080:8080"
+    volumes:
+      - /var/lib/quazar/algonism:/var/lib/quazar/algonism
+      - /var/lib/quazar/ss:/var/lib/quazar/ss
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?DATABASE_URL must be set}
+      QUAZAR_NODE_SECRET: ${QUAZAR_NODE_SECRET:?QUAZAR_NODE_SECRET must be set}
+      QUAZAR_REG_SECRET: ${QUAZAR_REG_SECRET:?QUAZAR_REG_SECRET must be set}
+      QUAZAR_STRICT_SECRETS: ${QUAZAR_STRICT_SECRETS:-true}
+      RECAPTCHA_SITE_KEY: ${RECAPTCHA_SITE_KEY:-}
+      RECAPTCHA_SECRET_KEY: ${RECAPTCHA_SECRET_KEY:-}
+      QUAZAR_TRUSTED_PROXIES: ${QUAZAR_TRUSTED_PROXIES:-}
+      ADMIN_API_KEY: ${ADMIN_API_KEY:?ADMIN_API_KEY must be set}
+      QUAZAR_INIT_TEST_KEYS: ${QUAZAR_INIT_TEST_KEYS:-false}
+      QUAZAR_NODE_ID: ${QUAZAR_NODE_ID:-QZ-NODE-1}
+      QUAZAR_NODE_URL: ${QUAZAR_NODE_URL:-http://quazar-node:8080}
+      PASSPORT_DOWNLOAD_URL: ${PASSPORT_DOWNLOAD_URL:-https://github.com/quazar-vs/quazar-passport/releases}
+      QUAZAR_PORT: ${QUAZAR_PORT:-8080}
+      QUAZAR_SYNC_INTERVAL_SECS: ${QUAZAR_SYNC_INTERVAL_SECS:-60}
+      EXCHANGE_DEFAULT_SHELF_LIFE_SECS: ${EXCHANGE_DEFAULT_SHELF_LIFE_SECS:-2592000}
+      QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
+      QUAZAR_NETWORK_URL: ${QUAZAR_NETWORK_URL:-}
+      QUAZAR_BOOTSTRAP_PEERS: ${QUAZAR_BOOTSTRAP_PEERS:-}
+      RUST_LOG: ${RUST_LOG:-info}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_USERNAME: ${SMTP_USERNAME:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_FROM_NAME: ${SMTP_FROM_NAME:-Квазар}
+      SMTP_TLS_INSECURE: ${SMTP_TLS_INSECURE:-false}
+      NOTIFY_EMAIL: ${NOTIFY_EMAIL:-}
+      GMAIL_USER: ${GMAIL_USER:-}
+      GMAIL_APP_PASSWORD: ${GMAIL_APP_PASSWORD:-}
+      GMAIL_FROM_NAME: ${GMAIL_FROM_NAME:-}
+      SS_ENABLED: ${SS_ENABLED:-true}
+      SS_PORT: ${SS_PORT:-8388}
+      SS_METHOD: ${SS_METHOD:-chacha20-ietf-poly1305}
+      SS_TTL_HOURS: ${SS_TTL_HOURS:-24}
+      SS_PUBLIC_HOST: ${SS_PUBLIC_HOST:-quazar.website}
+      SS_CONFIG_DIR: ${SS_CONFIG_DIR:-/var/lib/quazar/ss}
+      VPN_KEY_TTL_HOURS: ${VPN_KEY_TTL_HOURS:-24}
+      SVOD_VIDEO_CREATE_REWARD: ${SVOD_VIDEO_CREATE_REWARD:-50}
+      SVOD_VIDEO_VIEW_REWARD: ${SVOD_VIDEO_VIEW_REWARD:-10}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      QUAZAR_ALGONISM_CACHE_PATH: /var/lib/quazar/algonism/ALGONISM.md
+      QUAZAR_SVOD_SEED_PATH: ${QUAZAR_SVOD_SEED_PATH:-/var/lib/quazar/algonism/SVOD.md}
+      QUAZAR_ALGONISM_POLL_SECS: ${QUAZAR_ALGONISM_POLL_SECS:-120}
+      # Secretary → external agents (optional; empty = host CLI / unset).
+      SVYAZNOY_URL: ${SVYAZNOY_URL:-}
+      CURSOR_AGENT_URL: ${CURSOR_AGENT_URL:-}
+    networks:
+      - quazar
+    depends_on:
+      postgres:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  # In-core optional agents (same image family as node; no external keys).
+  crypto-agent:
+    build: .
+    profiles: ["crypto-agent", "core"]
+    restart: unless-stopped
+    command: ["/app/quazar_crypto_agent"]
+    networks:
+      - quazar
+    environment:
+      CRYPTO_AGENT_EXCHANGE: ${CRYPTO_AGENT_EXCHANGE:-binance}
+      CRYPTO_AGENT_SYMBOLS: ${CRYPTO_AGENT_SYMBOLS:-BTCUSDT,ETHUSDT}
+      CRYPTO_AGENT_INTERVAL_SECS: ${CRYPTO_AGENT_INTERVAL_SECS:-30}
+      CRYPTO_AGENT_ALERT_PCT: ${CRYPTO_AGENT_ALERT_PCT:-2.0}
+      RUST_LOG: ${CRYPTO_AGENT_RUST_LOG:-info}
+
+volumes:
+  quazar_pg_data:
+
+networks:
+  quazar:
+    name: quazar

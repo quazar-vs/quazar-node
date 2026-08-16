@@ -53,7 +53,6 @@ mod referendum;
 mod register_verify;
 mod response;
 mod reward_svod;
-mod tunnel;
 mod vpn;
 mod svod;
 mod types;
@@ -73,12 +72,9 @@ use agent_permissions::{
 };
 use citizenship_application::citizenship_application_handler;
 use register_verify::{send_code_handler, verify_code_handler};
-use tunnel::{
-    tunnel_clients_handler, tunnel_config_handler, tunnel_connect_handler, tunnel_heartbeat_handler,
-    tunnel_stats_handler, tunnel_status_handler, TunnelRegistry,
-};
 use vpn::{
-    activate_vpn_handler, generate_vpn_key_handler, list_vpn_keys_handler, revoke_vpn_key_handler,
+    activate_vpn_handler, generate_vpn_key_handler, issue_ss_credential_handler,
+    list_vpn_keys_handler, revoke_ss_credential_handler, revoke_vpn_key_handler, ss_status_handler,
     vpn_status_handler,
 };
 use crypto::assert_production_secrets;
@@ -125,7 +121,6 @@ pub struct AppState {
     node_registry: Arc<NodeRegistry>,
     pub node_id: String,
     pub channel_hub: Arc<ChannelHub>,
-    pub tunnel_registry: Arc<TunnelRegistry>,
     /// Trusted proxies for XFF: `nodes` registry (non-local) + `QUAZAR_TRUSTED_PROXIES`.
     pub trusted_proxies: client_ip::TrustedProxyCache,
     /// In-RAM Algonism DNA (genetic memory); not stored on-chain.
@@ -239,7 +234,6 @@ async fn main() {
         node_registry,
         node_id,
         channel_hub: Arc::new(ChannelHub::new()),
-        tunnel_registry: Arc::new(TunnelRegistry::new()),
         trusted_proxies,
         dna,
     });
@@ -294,12 +288,6 @@ async fn main() {
         .route("/api/public-config", get(applications::public_config_handler))
         .route("/api/public/stats", get(public_stats_handler))
         .route("/api/citizens", post(session_citizens_handler))
-        .route("/api/tunnel/status", get(tunnel_status_handler))
-        .route("/api/tunnel/stats", get(tunnel_stats_handler))
-        .route("/api/tunnel/config", get(tunnel_config_handler))
-        .route("/api/tunnel/connect", post(tunnel_connect_handler))
-        .route("/api/tunnel/heartbeat", post(tunnel_heartbeat_handler))
-        .route("/api/tunnel/clients", get(tunnel_clients_handler))
         .route("/health", get(health_handler))
         .route("/algonism/identity", get(algonism::identity_handler))
         .route("/algonism/awaken", get(algonism::awaken_handler))
@@ -535,6 +523,9 @@ async fn main() {
             delete(revoke_permission_handler),
         )
         .route("/api/vpn/key", post(generate_vpn_key_handler))
+        .route("/api/vpn/ss/credential", post(issue_ss_credential_handler))
+        .route("/api/vpn/ss/revoke", post(revoke_ss_credential_handler))
+        .route("/api/vpn/ss/status", get(ss_status_handler))
         .route("/api/vpn/status", get(vpn_status_handler))
         .route("/api/vpn/revoke", post(revoke_vpn_key_handler))
         .route("/api/vpn/keys", get(list_vpn_keys_handler))

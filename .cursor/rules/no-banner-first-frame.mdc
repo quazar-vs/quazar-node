@@ -1,0 +1,9 @@
+---
+description: Do not use YouTube banner as first frame for promo/Shorts video
+alwaysApply: true
+---
+Never use `quazar-youtube-banner.png` as the first frame, Ken Burns base, or image-to-video start for promo / Shorts.
+
+Allowed for atmosphere/center: `gerb.png`, or new abstract frames (GenerateImage / ffmpeg space gradients). In video finales use `gerb.png` (not `quazar-youtube-logo.png`). Banner is channel art only — not a video opener.
+
+Crest file: `site/assets/gerb.png` (URL `/assets/gerb.png`). Old name `quazar-coat-of-arms.png` may remain as a symlink for compatibility.
