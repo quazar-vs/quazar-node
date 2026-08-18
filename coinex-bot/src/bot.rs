@@ -7,9 +7,9 @@
 use crate::config::{split_market, BotConfig};
 use crate::error::BotError;
 use crate::exchange::{
-    ceil_amount_to_min, is_bot_tp_client_id, make_bot_tp_client_id, parse_open_from_bot_tp_client_id,
-    round_amount, round_price, side_prefix, snap_amount_to_min, CoinExClient, ExchangePosition,
-    MarketMeta, WsEvent,
+    is_bot_tp_client_id, make_bot_tp_client_id, parse_open_from_bot_tp_client_id, round_amount,
+    round_price, side_prefix, snap_amount_to_min, spot_buy_gross_for_shortage, CoinExClient,
+    ExchangePosition, MarketMeta, WsEvent,
 };
 use crate::scanner;
 use crate::strategy::{BotState, CloseReason, Position, Side};
@@ -27,12 +27,16 @@ pub struct Bot {
     market_meta: StdMutex<MarketMeta>,
     handled_closes: Arc<Mutex<HashSet<String>>>,
     closing: Arc<Mutex<bool>>,
+    /// Blocks idle-ensure from opening a second cycle while open_position is in flight.
+    opening: Arc<Mutex<bool>>,
     /// TP fill seen while soft-SL/reopen holds `closing` (otherwise WS fill is ignored).
     tp_filled_during_busy: Arc<Mutex<Option<String>>>,
     /// Exact TP order id we currently own (survives soft-SL clear of `position`).
     watched_tp_order_id: Arc<Mutex<Option<String>>>,
     /// Ignore soft-SL / reconcile for a short window after place/amend (API lag + stale ticks).
     tp_guard_until: Arc<Mutex<Instant>>,
+    /// After a failed/empty scan, skip idle opens until this instant.
+    scanner_cooldown_until: StdMutex<Instant>,
 }
 
 impl Bot {
@@ -62,9 +66,11 @@ impl Bot {
             market_meta: StdMutex::new(meta),
             handled_closes: Arc::new(Mutex::new(HashSet::new())),
             closing: Arc::new(Mutex::new(false)),
+            opening: Arc::new(Mutex::new(false)),
             tp_filled_during_busy: Arc::new(Mutex::new(None)),
             watched_tp_order_id: Arc::new(Mutex::new(None)),
             tp_guard_until: Arc::new(Mutex::new(Instant::now())),
+            scanner_cooldown_until: StdMutex::new(Instant::now()),
         })
     }
 
@@ -317,7 +323,11 @@ impl Bot {
                     return Ok(());
                 }
             }
-            self.select_market_if_idle().await;
+            if !self.select_market_if_idle(true).await {
+                warn!("start: scanner found no live-nervous market — idle until next scan");
+                self.log_state_ready().await;
+                return Ok(());
+            }
             let lot = self.state.lock().await.initial_lot;
             info!(
                 side = side.label(),
@@ -385,9 +395,17 @@ impl Bot {
         Ok(())
     }
 
-    async fn select_market_if_idle(&self) {
+    /// Returns true if a market is ready for a new cycle.
+    /// `force` skips the idle cooldown (use after TP / startup).
+    async fn select_market_if_idle(&self, force: bool) -> bool {
         if !self.client.config().auto_market || !self.client.config().is_spot() {
-            return;
+            return true;
+        }
+        if !force {
+            let until = *self.scanner_cooldown_until.lock().expect("scan cooldown");
+            if Instant::now() < until {
+                return false;
+            }
         }
         let cfg = self.state.lock().await.config.clone();
         match scanner::select_spot_market(&self.client, &cfg).await {
@@ -396,24 +414,37 @@ impl Bot {
                     warn!(
                         error = %e,
                         market = %pick.market,
-                        "scanner apply failed — keep current market"
+                        "scanner apply failed — skip new entry"
                     );
+                    *self.scanner_cooldown_until.lock().expect("scan cooldown") =
+                        Instant::now() + Duration::from_secs(30);
+                    return false;
                 }
+                true
             }
-            Ok(None) => warn!("scanner found nothing — keep current market"),
-            Err(e) => warn!(error = %e, "scanner failed — keep current market"),
+            Ok(None) => {
+                warn!("scanner: no still-nervous market — wait, do not open on a calm pair");
+                *self.scanner_cooldown_until.lock().expect("scan cooldown") =
+                    Instant::now() + Duration::from_secs(30);
+                false
+            }
+            Err(e) => {
+                warn!(error = %e, "scanner failed — wait, do not open");
+                *self.scanner_cooldown_until.lock().expect("scan cooldown") =
+                    Instant::now() + Duration::from_secs(30);
+                false
+            }
         }
     }
 
-    /// If free+frozen base exceeds the TP amount, enlarge the resting TP.
-    /// Dust below min_amount used to sit unused; now it goes into the same TP.
+    /// Enlarge TP only when leftover base is at least one exchange min lot.
+    /// Tiny fee dust stays free so the working lot stays a round step.
     async fn align_tp_amount_to_inventory(&self, pos: &mut Position) -> Result<()> {
         let base = self.client.base_ccy().clone();
         let (available, frozen) = self.client.get_balance_parts(&base).await?;
         let inventory = round_amount(available + frozen, &self.meta());
         let gap = inventory - pos.lot;
-        let amt_tick = 10f64.powi(-(self.meta().amount_precision as i32)).max(1e-12);
-        if gap + f64::EPSILON < amt_tick {
+        if gap + f64::EPSILON < self.meta().min_amount {
             return Ok(());
         }
         if inventory + f64::EPSILON < self.meta().min_amount {
@@ -641,6 +672,17 @@ impl Bot {
     /// Open a **new** cycle at min lot: shortage buy if needed, one limit TP.
     /// Spot: always forces `initial_lot` — step sizing is soft-SL modify only.
     async fn open_position(&self, side: Side, lot: f64) -> Result<()> {
+        if *self.opening.lock().await {
+            warn!("open_position skipped — another entry already in flight");
+            return Ok(());
+        }
+        *self.opening.lock().await = true;
+        let result = self.open_position_inner(side, lot).await;
+        *self.opening.lock().await = false;
+        result
+    }
+
+    async fn open_position_inner(&self, side: Side, lot: f64) -> Result<()> {
         let mut lot = round_amount(lot, &self.meta());
         if self.client.config().is_spot() {
             let initial = round_amount(self.state.lock().await.initial_lot, &self.meta());
@@ -673,31 +715,31 @@ impl Bot {
                 .get_available_balance(&self.client.base_ccy())
                 .await?;
             let need = (lot - available_base).max(0.0);
-            let need_rounded = round_amount(need, &self.meta());
-            if need_rounded >= self.meta().min_amount {
-                info!(
-                    available_base,
-                    lot,
-                    need,
-                    "open: USDT check for shortage only (not full lot)"
-                );
-                self.client
-                    .ensure_balance_for_lot(&side, need_rounded, price)
-                    .await
-                    .context("insufficient quote balance for spot shortage top-up")?;
-            } else if available_base + f64::EPSILON >= lot {
+            if available_base + f64::EPSILON >= lot {
                 info!(
                     available_base,
                     lot,
                     base = %self.client.base_ccy(),
                     "open: free base covers lot — limit TP only"
                 );
+            } else if let Some(buy_qty) = spot_buy_gross_for_shortage(available_base, lot, &self.meta()) {
+                info!(
+                    available_base,
+                    lot,
+                    need,
+                    buy_qty,
+                    "open: USDT check for fee-padded shortage"
+                );
+                self.client
+                    .ensure_balance_for_lot(&side, buy_qty, price)
+                    .await
+                    .context("insufficient quote balance for spot shortage top-up")?;
             } else {
                 info!(
                     available_base,
                     lot,
                     need,
-                    "shortage below min_amount — will place TP on available"
+                    "open: fee-padded shortage below min_amount — no extra buy"
                 );
             }
         } else {
@@ -801,6 +843,9 @@ impl Bot {
         if *self.closing.lock().await {
             return Ok(());
         }
+        if *self.opening.lock().await {
+            return Ok(());
+        }
         if self.state.lock().await.position.is_some() {
             return Ok(());
         }
@@ -833,7 +878,10 @@ impl Bot {
         }
 
         *self.closing.lock().await = true;
-        self.select_market_if_idle().await;
+        if !self.select_market_if_idle(false).await {
+            *self.closing.lock().await = false;
+            return Ok(());
+        }
         let lot = self.state.lock().await.initial_lot;
         info!(
             side = side.label(),
@@ -1030,8 +1078,8 @@ impl Bot {
     ) -> Result<()> {
         let target_lot = {
             let mut st = self.state.lock().await;
-            let stepped_from = snap_amount_to_min(current_lot, &self.meta());
-            match st.next_lot_after_sl_add(stepped_from) {
+            // Do not snap current_lot first: 39.88 vs min 20 must stay step 0.
+            match st.next_lot_after_sl_add(current_lot) {
                 Ok(lot) => snap_amount_to_min(lot, &self.meta()),
                 Err(BotError::LotExceedsMax { lot, max_lot }) => {
                     warn!(
@@ -1075,7 +1123,7 @@ impl Bot {
         // Shortage only: never market-buy the whole target_lot when base is already held
         // (including amount frozen in the resting TP).
         let need = (target_lot - inventory).max(0.0);
-        let buy_qty = ceil_amount_to_min(need, &self.meta());
+        let buy_qty = spot_buy_gross_for_shortage(inventory, target_lot, &self.meta()).unwrap_or(0.0);
 
         info!(
             available,
@@ -1262,9 +1310,9 @@ impl Bot {
             info!(
                 target = target_lot,
                 sellable,
-                "soft SL: TP amount = full inventory (absorb leftover dust)"
+                surplus = sellable - target_lot,
+                "soft SL: surplus left free (TP stays on stepped working lot)"
             );
-            new_lot = sellable;
         }
 
         // Final pre-modify check: KOMA >= new_lot (no credit).
@@ -1584,7 +1632,10 @@ impl Bot {
             if let Err(e) = self.client.drain_spot_base_tail(&self.meta()).await {
                 warn!(error = %e, "drain base tail after TP failed");
             }
-            self.select_market_if_idle().await;
+            if !self.select_market_if_idle(true).await {
+                warn!("spot reopen: no still-nervous market after TP — stay idle");
+                return Ok(());
+            }
         }
 
         let next_lot = {

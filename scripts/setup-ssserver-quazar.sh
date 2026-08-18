@@ -48,6 +48,7 @@ if [[ ! -f "$SS_DIR/config.json" ]]; then
   "password": "${PASS}",
   "mode": "tcp_and_udp",
   "timeout": 300,
+  "ipv6_first": false,
   "acl": "${SS_DIR}/citizen.acl"
 }
 EOF

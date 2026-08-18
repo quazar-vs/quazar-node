@@ -3,6 +3,7 @@ Description=Reload Quazar ssserver when config.json changes
 
 [Path]
 PathModified=/var/lib/quazar/ss/config.json
+PathModified=/var/lib/quazar/ss/citizen.acl
 Unit=quazar-ssserver-reload.service
 
 [Install]

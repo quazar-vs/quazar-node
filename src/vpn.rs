@@ -294,10 +294,17 @@ pub async fn sync_ssserver_config(pool: &PgPool) {
 
     let acl_src = Path::new("/opt/quazar/deploy/ss/citizen.acl");
     let acl_dst = dir.join("citizen.acl");
-    if acl_src.exists() && !acl_dst.exists() {
-        let _ = std::fs::copy(acl_src, &acl_dst);
+    if acl_src.exists() {
+        let src = std::fs::read(acl_src).ok();
+        let dst = std::fs::read(&acl_dst).ok();
+        if src != dst {
+            if let Err(e) = std::fs::copy(acl_src, &acl_dst) {
+                tracing::warn!(error = %e, "SS ACL copy failed");
+            }
+        }
     }
 
+    let config_path = dir.join("config.json");
     let active: Result<Vec<(String,)>, sqlx::Error> = sqlx::query_as(
         r#"
         SELECT password
@@ -312,7 +319,7 @@ pub async fn sync_ssserver_config(pool: &PgPool) {
 
     let password = match active {
         Ok(rows) if !rows.is_empty() => rows[0].0.clone(),
-        Ok(_) => generate_ss_password(),
+        Ok(_) => read_existing_ss_password(&config_path).unwrap_or_else(generate_ss_password),
         Err(e) => {
             tracing::warn!(error = %e, "SS config: failed to load active passwords");
             return;
@@ -322,6 +329,8 @@ pub async fn sync_ssserver_config(pool: &PgPool) {
     let method = ss_method();
     let port = ss_port();
     let acl_path = acl_dst.to_string_lossy().to_string();
+    // ipv6_first=false: this VPS has no global IPv6 route; googlevideo AAAA
+    // otherwise fails with "No route to host" before IPv4 fallback.
     let config = serde_json::json!({
         "server": "0.0.0.0",
         "server_port": port,
@@ -329,10 +338,10 @@ pub async fn sync_ssserver_config(pool: &PgPool) {
         "password": password,
         "mode": "tcp_and_udp",
         "timeout": 300,
+        "ipv6_first": false,
         "acl": acl_path,
     });
 
-    let config_path = dir.join("config.json");
     let tmp = dir.join("config.json.tmp");
     let body = match serde_json::to_vec_pretty(&config) {
         Ok(b) => b,
@@ -341,6 +350,17 @@ pub async fn sync_ssserver_config(pool: &PgPool) {
             return;
         }
     };
+    // systemd path unit restarts ssserver on any inode/mtime change. Cleanup
+    // used to rewrite identical JSON every 5 minutes and kill YouTube tunnels.
+    if let Ok(existing) = std::fs::read(&config_path) {
+        if existing == body {
+            tracing::debug!(
+                path = %config_path.display(),
+                "SS ssserver config unchanged"
+            );
+            return;
+        }
+    }
     if let Err(e) = std::fs::write(&tmp, &body) {
         tracing::warn!(error = %e, "SS config temp write failed");
         return;
@@ -360,6 +380,12 @@ pub async fn sync_ssserver_config(pool: &PgPool) {
         port = port,
         "SS ssserver config rewritten"
     );
+}
+
+fn read_existing_ss_password(config_path: &Path) -> Option<String> {
+    let raw = std::fs::read(config_path).ok()?;
+    let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+    v.get("password")?.as_str().filter(|s| !s.is_empty()).map(str::to_string)
 }
 
 async fn current_shared_password(pool: &PgPool) -> Result<Option<String>, String> {
@@ -605,8 +631,8 @@ pub async fn cleanup_expired_ss_credentials(pool: &PgPool) -> Result<u64, String
     if deactivated > 0 {
         let new_password = generate_ss_password();
         let _ = rotate_remaining_passwords(pool, &new_password).await;
+        sync_ssserver_config(pool).await;
     }
-    sync_ssserver_config(pool).await;
 
     let _ = sqlx::query(
         r#"
@@ -969,6 +995,16 @@ mod tests {
     fn password_has_expected_len() {
         let p = generate_ss_password();
         assert_eq!(p.len(), 24);
+    }
+
+    #[test]
+    fn read_existing_ss_password_parses_json() {
+        let dir = std::env::temp_dir().join(format!("ss-cfg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.json");
+        std::fs::write(&path, r#"{"password":"abc123"}"#).unwrap();
+        assert_eq!(read_existing_ss_password(&path).as_deref(), Some("abc123"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

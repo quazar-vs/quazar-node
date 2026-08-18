@@ -182,15 +182,28 @@ impl BotState {
         Ok(next)
     }
 
-    /// Target lot after a spot soft-SL add (× LOT_STEP_COEFF, hard-capped by max_lot).
+    /// Target lot after a spot soft-SL add.
+    /// Next size is `initial_lot × LOT_STEP_COEFF^(steps+1)`, never `current × coeff`.
+    /// Dusty TP amounts (e.g. 39.88 vs min 20) stay at step 0 → next = min × coeff.
     pub fn next_lot_after_sl_add(&self, current_lot: f64) -> Result<f64, BotError> {
-        let next = self.next_step_lot(current_lot)?;
+        let steps = self.soft_sl_steps_from_lot(current_lot);
+        let next_steps = steps.saturating_add(1);
+        let next = self.initial_lot * self.config.lot_step_coeff.powi(next_steps as i32);
+        if next > self.max_lot + f64::EPSILON {
+            return Err(BotError::LotExceedsMax {
+                lot: next,
+                max_lot: self.max_lot,
+            });
+        }
+        let next = next.min(self.max_lot);
         info!(
             current_lot,
             next_lot = next,
             add_qty = next - current_lot,
+            soft_sl_steps = steps,
             lot_step_coeff = self.config.lot_step_coeff,
-            "spot SL add: next lot"
+            initial_lot = self.initial_lot,
+            "spot SL add: next lot from working min × steps"
         );
         Ok(next)
     }
@@ -250,6 +263,8 @@ mod tests {
             max_spread_pct: 0.5,
             market_blacklist: vec![],
             scanner_quote: "USDT".into(),
+            scanner_hour_bars: 4,
+            scanner_hour_range_ratio: 0.30,
         }
     }
 
@@ -297,6 +312,19 @@ mod tests {
         assert_eq!(stepped.soft_sl_steps_from_lot(150.0), 1);
         assert_eq!(stepped.soft_sl_steps_from_lot(225.0), 2);
         assert!((stepped.next_lot_after_sl_add(100.0).unwrap() - 150.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn sl_add_uses_working_min_not_dusty_tp_amount() {
+        let mut cfg = sample_config();
+        cfg.lot_step_coeff = 3.0;
+        cfg.initial_lot = 20.0;
+        cfg.max_lot = 25000.0;
+        let st = BotState::new(cfg);
+        assert_eq!(st.soft_sl_steps_from_lot(39.88), 0);
+        assert!((st.next_lot_after_sl_add(39.88).unwrap() - 60.0).abs() < 1e-9);
+        assert!((st.next_lot_after_sl_add(20.0).unwrap() - 60.0).abs() < 1e-9);
+        assert!((st.next_lot_after_sl_add(60.0).unwrap() - 180.0).abs() < 1e-9);
     }
 
     #[test]

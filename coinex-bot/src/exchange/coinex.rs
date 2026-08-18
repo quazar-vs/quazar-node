@@ -26,6 +26,8 @@ pub struct MarketMeta {
     pub min_amount: f64,
     pub amount_precision: u32,
     pub price_precision: u32,
+    /// Spot taker fee on bought base (e.g. 0.003 = 0.3%).
+    pub taker_fee_rate: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -251,11 +253,17 @@ impl CoinExClient {
             .unwrap_or("0")
             .parse::<f64>()
             .unwrap_or(0.0);
+        let taker_fee_rate = first
+            .get("taker_fee_rate")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(0.003);
         Ok(MarketMeta {
             tick_size,
             min_amount,
             amount_precision,
             price_precision,
+            taker_fee_rate,
         })
     }
 
@@ -266,6 +274,15 @@ impl CoinExClient {
     pub async fn get_spot_depth(&self, market: &str) -> Result<Value> {
         let query = format!("market={market}&limit=5&interval=0");
         self.request("GET", "/spot/depth", Some(&query), None).await
+    }
+
+    pub async fn get_spot_kline(&self, market: &str, period: &str, limit: u32) -> Result<Vec<Value>> {
+        let query = format!("market={market}&period={period}&limit={limit}");
+        let data: Value = self.request("GET", "/spot/kline", Some(&query), None).await?;
+        if let Some(arr) = data.as_array() {
+            return Ok(arr.clone());
+        }
+        Ok(Vec::new())
     }
 
     pub async fn get_all_pending_orders(&self) -> Result<Vec<Value>> {
@@ -979,10 +996,8 @@ impl CoinExClient {
         })
     }
 
-    /// Spot BUY: ensure free base ≥ `lot` by market-buying only the shortage,
-    /// snapped up to a whole `min_amount` (no fee-pad fractions).
-    /// Returns `(available_after, buy_fill_price)` — `buy_fill_price` is `Some` only
-    /// when a shortage market buy actually executed (use as TP/SL anchor).
+    /// Spot BUY: buy only when free base < working lot.
+    /// Gross = ceil(shortage / (1 − taker_fee)); never bump a tiny fee gap to min_amount.
     pub async fn ensure_spot_base_for_lot(
         &self,
         lot: f64,
@@ -1001,23 +1016,24 @@ impl CoinExClient {
             return Ok((available, None));
         }
         let need = lot - available;
-        let buy_qty = ceil_amount_to_min(need, meta);
-        if buy_qty < meta.min_amount {
+        let Some(buy_qty) = spot_buy_gross_for_shortage(available, lot, meta) else {
             info!(
                 available,
                 lot,
                 need,
-                "spot open: shortage below min_amount — will TP available"
+                base = %base,
+                "spot open: fee-padded gross below min_amount — skip buy"
             );
             return Ok((available, None));
-        }
+        };
         info!(
             available,
             lot,
             need,
             buy_qty,
+            fee = meta.taker_fee_rate,
             base = %base,
-            "spot open: market-buying shortage (whole min_amount steps)"
+            "spot open: market-buying shortage (gross covers taker fee)"
         );
         let order = self.place_market_order(&Side::Buy, buy_qty).await?;
         let fill = if order.filled_price > 0.0 {
@@ -1090,15 +1106,20 @@ impl CoinExClient {
                         meta.min_amount
                     );
                 }
-                // TP the whole free balance so leftover dust is not left hanging.
-                lot = sellable;
-                if lot + f64::EPSILON < requested {
-                    warn!(requested, lot, "TP amount clamped to available after fees");
-                } else if lot > requested + f64::EPSILON {
+                // TP = working lot only. Surplus from fee-pad stays free as dust.
+                lot = requested;
+                if sellable + f64::EPSILON < requested {
+                    warn!(
+                        requested,
+                        sellable,
+                        "spot open: sellable below working lot after buy"
+                    );
+                } else if sellable > requested + f64::EPSILON {
                     info!(
                         requested,
-                        lot,
-                        "spot open: TP includes leftover dust on balance"
+                        sellable,
+                        surplus = sellable - requested,
+                        "spot open: surplus left free (TP on working lot)"
                     );
                 }
                 if let Some(fp) = buy_fill.filter(|p| *p > 0.0) {
@@ -1622,6 +1643,21 @@ pub fn round_amount(amount: f64, meta: &MarketMeta) -> f64 {
 pub fn ceil_amount(amount: f64, meta: &MarketMeta) -> f64 {
     let factor = 10f64.powi(meta.amount_precision as i32);
     (amount * factor).ceil() / factor
+}
+
+/// Gross market-buy to cover `target` after taker fee on base:
+/// `ceil((target − available) / (1 − fee))`. None if no buy needed or gross < min_amount.
+pub fn spot_buy_gross_for_shortage(available: f64, target: f64, meta: &MarketMeta) -> Option<f64> {
+    if available + f64::EPSILON >= target {
+        return None;
+    }
+    let need = target - available;
+    let fee = meta.taker_fee_rate.clamp(0.0, 0.99);
+    let gross = ceil_amount(need / (1.0 - fee), meta);
+    if gross + f64::EPSILON < meta.min_amount {
+        return None;
+    }
+    Some(gross)
 }
 
 /// Smallest whole `min_amount` that covers `amount` (500, 1000, … — no 502.20 tails).

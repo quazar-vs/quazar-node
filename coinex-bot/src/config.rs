@@ -76,6 +76,10 @@ pub struct BotConfig {
     pub market_blacklist: Vec<String>,
     /// Quote suffix the scanner keeps (usually USDT).
     pub scanner_quote: String,
+    /// How many 1h candles to judge if the pair is still nervous.
+    pub scanner_hour_bars: u32,
+    /// min(max 1h range / 24h range) to accept the pair (e.g. 0.30).
+    pub scanner_hour_range_ratio: f64,
 }
 
 impl BotConfig {
@@ -188,6 +192,14 @@ impl BotConfig {
         let scanner_quote = env::var("SCANNER_QUOTE")
             .unwrap_or_else(|_| "USDT".to_string())
             .to_ascii_uppercase();
+        let scanner_hour_bars: u32 = env::var("SCANNER_HOUR_BARS")
+            .unwrap_or_else(|_| "4".to_string())
+            .parse()
+            .context("SCANNER_HOUR_BARS must be an integer")?;
+        let scanner_hour_range_ratio: f64 = env::var("SCANNER_HOUR_RANGE_RATIO")
+            .unwrap_or_else(|_| "0.30".to_string())
+            .parse()
+            .context("SCANNER_HOUR_RANGE_RATIO must be a number")?;
 
         // Infer base/quote from market name when possible (e.g. BTCUSDT, SOLUSDT).
         let (base_ccy, quote_ccy) = split_market(&market);
@@ -232,6 +244,8 @@ impl BotConfig {
             max_spread_pct,
             market_blacklist,
             scanner_quote,
+            scanner_hour_bars,
+            scanner_hour_range_ratio,
         })
     }
 

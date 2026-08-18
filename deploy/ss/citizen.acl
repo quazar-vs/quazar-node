@@ -16,6 +16,13 @@
 (?i)(^|\.)googleusercontent\.com$
 (?i)(^|\.)yt\.be$
 (?i)(^|\.)youtube\.googleapis\.com$
+(?i)(^|\.)youtubei\.googleapis\.com$
+(?i)(^|\.)youtubekids\.com$
+(?i)(^|\.)video\.google\.com$
+(?i)(^|\.)gvt1\.com$
+(?i)(^|\.)gvt2\.com$
+(?i)(^|\.)gvt3\.com$
+(?i)(^|\.)widevine\.com$
 
 # Telegram
 (?i)(^|\.)telegram\.org$
