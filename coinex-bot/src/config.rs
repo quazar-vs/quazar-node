@@ -3,14 +3,13 @@
 use anyhow::{bail, Context, Result};
 use std::env;
 
-/// Soft-SL ladder depth: entry + this many **full** adds (= 9 levels total).
-/// After this many successful adds the bot freezes TP until fill (no partial adds).
-pub const MAX_SOFT_SL_ADDS: u32 = 8;
+/// Default soft-SL adds (entry + 6 adds = 7 levels). Override via `MAX_SOFT_SL_ADDS`.
+pub const DEFAULT_MAX_SOFT_SL_ADDS: u32 = 6;
 
 /// Approx USDT needed for a full ladder at constant `price` (fee buffer 5%).
 /// Final inventory ≈ `initial_lot × LOT_STEP_COEFF^max_adds`.
 pub fn full_ladder_usdt(initial_lot: f64, price: f64, lot_step_coeff: f64, max_adds: u32) -> f64 {
-    if initial_lot <= 0.0 || price <= 0.0 || lot_step_coeff <= 1.0 {
+    if initial_lot <= 0.0 || price <= 0.0 || lot_step_coeff <= 1.0 || max_adds == 0 {
         return f64::INFINITY;
     }
     let final_lot = initial_lot * lot_step_coeff.powi(max_adds as i32);
@@ -66,6 +65,8 @@ pub struct BotConfig {
     pub lot_coeff: f64,
     /// Soft-SL lot multiplier. Env: `LOT_STEP_COEFF` (default 2 → 100→200→400).
     pub lot_step_coeff: f64,
+    /// Max full soft-SL adds after entry (levels = adds + 1). Env: `MAX_SOFT_SL_ADDS` (default 6 → 7 levels).
+    pub max_soft_sl_adds: u32,
     /// Working min lot = round(exchange_min × lot_coeff). Filled after market meta load.
     pub initial_lot: f64,
     /// Shared TP and SL distance as percent of first-entry price.
@@ -137,6 +138,11 @@ impl BotConfig {
             .unwrap_or_else(|_| "2".to_string())
             .parse()
             .context("LOT_STEP_COEFF must be a number")?;
+
+        let max_soft_sl_adds: u32 = env::var("MAX_SOFT_SL_ADDS")
+            .unwrap_or_else(|_| DEFAULT_MAX_SOFT_SL_ADDS.to_string())
+            .parse()
+            .context("MAX_SOFT_SL_ADDS must be an integer")?;
 
         // One percent for both TP and SL. Legacy: TP_PERCENT / SL_PERCENT / TP_POINTS / SL_POINTS.
         let tp_sl_percent_fallback: f64 = env::var("TP_SL_PERCENT")
@@ -212,6 +218,9 @@ impl BotConfig {
         if lot_step_coeff <= 1.0 {
             bail!("LOT_STEP_COEFF must be > 1 (e.g. 2 = double on soft SL)");
         }
+        if max_soft_sl_adds == 0 {
+            bail!("MAX_SOFT_SL_ADDS must be >= 1 (number of full soft-SL adds after entry)");
+        }
         if tp_sl_percent_fallback <= 0.0 {
             bail!("TP_SL_PERCENT must be > 0");
         }
@@ -227,6 +236,7 @@ impl BotConfig {
             trade_side,
             lot_coeff,
             lot_step_coeff,
+            max_soft_sl_adds,
             // Resolved from exchange min_amount × lot_coeff after meta load.
             initial_lot: 0.0,
             tp_sl_percent,
@@ -389,6 +399,7 @@ mod tests {
             trade_side: super::TradeSide::Buy,
             lot_coeff: 1.0,
             lot_step_coeff: 2.0,
+            max_soft_sl_adds: super::DEFAULT_MAX_SOFT_SL_ADDS,
             initial_lot: 1.0,
             tp_sl_percent: 5.0,
             tp_sl_percent_fallback: 5.0,

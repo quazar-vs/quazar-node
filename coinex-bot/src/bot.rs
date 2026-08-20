@@ -4,7 +4,7 @@
 //! Soft SL: × LOT_STEP_COEFF via modify; TP and SL each shift by another TP_SL_PERCENT of **first entry** (not add fill).
 //! After TP / idle with no order: optional AUTO_MARKET scanner picks a volatile tight-spread USDT pair.
 
-use crate::config::{full_ladder_usdt, split_market, BotConfig, MAX_SOFT_SL_ADDS};
+use crate::config::{full_ladder_usdt, split_market, BotConfig};
 use crate::error::BotError;
 use crate::exchange::{
     is_bot_tp_client_id, make_bot_tp_client_id, parse_open_from_bot_tp_client_id, round_amount,
@@ -59,7 +59,7 @@ impl Bot {
             exchange_min_amount = meta.min_amount,
             lot_coeff = config.lot_coeff,
             working_min_lot = config.initial_lot,
-            max_soft_sl_adds = crate::config::MAX_SOFT_SL_ADDS,
+            max_soft_sl_adds = config.max_soft_sl_adds,
             "loaded market metadata — min lot = exchange_min × LOT_COEFF"
         );
         client.set_working_min_lot(config.initial_lot);
@@ -355,9 +355,13 @@ impl Bot {
                 return Err(e).context("load meta for scanned market");
             }
         };
-        let (lot_coeff, lot_step_coeff) = {
+        let (lot_coeff, lot_step_coeff, max_soft_sl_adds) = {
             let st = self.state.lock().await;
-            (st.config.lot_coeff, st.config.lot_step_coeff)
+            (
+                st.config.lot_coeff,
+                st.config.lot_step_coeff,
+                st.config.max_soft_sl_adds,
+            )
         };
         let raw = meta.min_amount * lot_coeff;
         let mut min_lot = round_amount(raw, &meta);
@@ -376,7 +380,7 @@ impl Bot {
                     );
                 }
             };
-            let need = full_ladder_usdt(min_lot, price, lot_step_coeff, MAX_SOFT_SL_ADDS);
+            let need = full_ladder_usdt(min_lot, price, lot_step_coeff, max_soft_sl_adds);
             let usdt_avail = match self.client.get_available_balance(&quote).await {
                 Ok(v) => v,
                 Err(e) => {
@@ -394,7 +398,7 @@ impl Bot {
                     need,
                     min_lot,
                     price,
-                    MAX_SOFT_SL_ADDS,
+                    max_soft_sl_adds,
                     usdt_avail
                 );
             }
@@ -404,7 +408,7 @@ impl Bot {
                 price,
                 ladder_usdt_need = need,
                 quote_available = usdt_avail,
-                max_soft_sl_adds = MAX_SOFT_SL_ADDS,
+                max_soft_sl_adds,
                 "scanner: balance covers full soft-SL ladder"
             );
         }
@@ -614,7 +618,7 @@ impl Bot {
             position = ?st.position.as_ref().map(|p| (&p.id, p.lot, p.open_price, p.tp_price, p.sl_price)),
             current_lot = st.current_lot,
             initial_lot = st.initial_lot,
-            max_soft_sl_adds = crate::config::MAX_SOFT_SL_ADDS,
+            max_soft_sl_adds = st.config.max_soft_sl_adds,
             "one-sided martingale ready"
         );
     }

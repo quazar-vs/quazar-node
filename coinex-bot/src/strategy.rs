@@ -4,7 +4,7 @@
 //! New cycle: min lot; TP/SL = ±TP_SL_PERCENT from first entry.
 //! Soft SL: lot × LOT_STEP_COEFF; TP and SL each shift by another −/+ % of first entry (never from add fill).
 
-use crate::config::{BotConfig, TradeSide, MAX_SOFT_SL_ADDS};
+use crate::config::{BotConfig, TradeSide};
 use crate::error::BotError;
 use tracing::info;
 
@@ -182,13 +182,14 @@ impl BotState {
     /// Target lot after a spot soft-SL add.
     /// Next size is `initial_lot × LOT_STEP_COEFF^(steps+1)`, never `current × coeff`.
     /// Dusty TP amounts (e.g. 39.88 vs min 20) stay at step 0 → next = min × coeff.
-    /// Caps at entry + `MAX_SOFT_SL_ADDS` full adds (9 levels); no partial sizing.
+    /// Caps at entry + `max_soft_sl_adds` full adds; no partial sizing.
     pub fn next_lot_after_sl_add(&self, current_lot: f64) -> Result<f64, BotError> {
+        let max_adds = self.config.max_soft_sl_adds;
         let steps = self.soft_sl_steps_from_lot(current_lot);
-        if steps >= MAX_SOFT_SL_ADDS {
+        if steps >= max_adds {
             return Err(BotError::SoftSlDepthExceeded {
                 steps,
-                max_adds: MAX_SOFT_SL_ADDS,
+                max_adds,
                 lot: current_lot,
             });
         }
@@ -201,18 +202,19 @@ impl BotState {
             soft_sl_steps = steps,
             lot_step_coeff = self.config.lot_step_coeff,
             initial_lot = self.initial_lot,
-            max_soft_sl_adds = MAX_SOFT_SL_ADDS,
+            max_soft_sl_adds = max_adds,
             "spot SL add: next lot from working min × steps"
         );
         Ok(next)
     }
 
     fn next_step_lot(&self, lot: f64) -> Result<f64, BotError> {
+        let max_adds = self.config.max_soft_sl_adds;
         let steps = self.soft_sl_steps_from_lot(lot);
-        if steps >= MAX_SOFT_SL_ADDS {
+        if steps >= max_adds {
             return Err(BotError::SoftSlDepthExceeded {
                 steps,
-                max_adds: MAX_SOFT_SL_ADDS,
+                max_adds,
                 lot,
             });
         }
@@ -248,6 +250,7 @@ mod tests {
             trade_side: TradeSide::Buy,
             lot_coeff: 2.0,
             lot_step_coeff: 2.0,
+            max_soft_sl_adds: 6,
             initial_lot: 100.0,
             tp_sl_percent: 10.0,
             tp_sl_percent_fallback: 10.0,
@@ -348,18 +351,18 @@ mod tests {
                 .abs()
                 < 1e-9
         );
-        // 8 adds done (lot = initial × 2^8 = 25600) → depth exceeded, freeze path.
+        // 6 adds done (lot = initial × 2^6 = 6400) → depth exceeded, freeze path.
         assert!(matches!(
-            state.next_lot_after_sl_add(100.0 * 2f64.powi(8)),
+            state.next_lot_after_sl_add(100.0 * 2f64.powi(6)),
             Err(BotError::SoftSlDepthExceeded {
-                steps: 8,
-                max_adds: 8,
+                steps: 6,
+                max_adds: 6,
                 ..
             })
         ));
-        // 7 adds done → 8th add still allowed (final level).
+        // 5 adds done → 6th add still allowed (final level).
         assert!(
-            (state.next_lot_after_sl_add(100.0 * 2f64.powi(7)).unwrap() - 100.0 * 2f64.powi(8))
+            (state.next_lot_after_sl_add(100.0 * 2f64.powi(5)).unwrap() - 100.0 * 2f64.powi(6))
                 .abs()
                 < 1e-6
         );

@@ -9,8 +9,8 @@
 3. При закрытии:
    - **TP** → новый цикл снова с min lot (exchange_min × LOT_COEFF);
    - **SL** → полная докупка shortage до `initial × LOT_STEP_COEFF^(step)` + modify того же TP;
-     максимум **8 докупок** (9 уровней). Partial нет; нехватка USDT или глубина исчерпана → freeze TP до fill.
-     Сканер берёт пару только если баланса хватает на полную лестницу (`min_lot × price × coeff^8 × 1.05`).
+     максимум **MAX_SOFT_SL_ADDS** докупок (по умолчанию 6 → 7 уровней). Partial нет; нехватка USDT или глубина исчерпана → freeze TP до fill.
+     Сканер берёт пару только если баланса хватает на полную лестницу (`min_lot × price × coeff^MAX_SOFT_SL_ADDS × 1.05`).
 4. Вторую сторону **не открывает** (не хедж).
 5. При старте: есть `botB_tp` → restore; нет → процедура открытия.
 
@@ -39,6 +39,7 @@ cp .env.example .env
 # TRADE_SIDE=buy
 # LOT_COEFF=1
 # LOT_STEP_COEFF=2
+# MAX_SOFT_SL_ADDS=6
 # TP_SL_PERCENT=10
 
 cargo run --release

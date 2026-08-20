@@ -7,7 +7,7 @@ pub enum BotError {
     #[error("insufficient balance to open lot={lot}: available={available}")]
     InsufficientBalance { lot: f64, available: f64 },
 
-    /// Soft-SL ladder finished (entry + MAX_SOFT_SL_ADDS full adds) — freeze TP until fill.
+    /// Soft-SL ladder finished (entry + configured max adds) — freeze TP until fill.
     #[error(
         "soft SL depth exceeded: steps={steps} max_adds={max_adds} next_lot={lot}"
     )]
