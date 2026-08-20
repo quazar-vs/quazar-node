@@ -26,8 +26,14 @@ pub struct MarketMeta {
     pub min_amount: f64,
     pub amount_precision: u32,
     pub price_precision: u32,
-    /// Spot taker fee on bought base (e.g. 0.003 = 0.3%).
+    /// Spot maker fee rate on the traded base (e.g. 0.003 = 0.3%).
+    pub maker_fee_rate: f64,
+    /// Spot taker fee rate on the traded base (e.g. 0.003 = 0.3%).
     pub taker_fee_rate: f64,
+    /// Fee rate used for all internal fee-based calculations.
+    /// Chosen as the more conservative of maker/taker:
+    /// `fee_rate_for_calc = max(maker_fee_rate, taker_fee_rate)`.
+    pub fee_rate_for_calc: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -258,12 +264,20 @@ impl CoinExClient {
             .and_then(|v| v.as_str())
             .and_then(|s| s.parse::<f64>().ok())
             .unwrap_or(0.003);
+        let maker_fee_rate = first
+            .get("maker_fee_rate")
+            .and_then(|v| v.as_str())
+            .and_then(|s| s.parse::<f64>().ok())
+            .unwrap_or(taker_fee_rate);
+        let fee_rate_for_calc = maker_fee_rate.max(taker_fee_rate);
         Ok(MarketMeta {
             tick_size,
             min_amount,
             amount_precision,
             price_precision,
+            maker_fee_rate,
             taker_fee_rate,
+            fee_rate_for_calc,
         })
     }
 
@@ -997,7 +1011,7 @@ impl CoinExClient {
     }
 
     /// Spot BUY: buy only when free base < working lot.
-    /// Gross = ceil(shortage / (1 − taker_fee)); never bump a tiny fee gap to min_amount.
+    /// Gross = ceil(shortage / (1 − fee_used_for_calc)); never bump a tiny fee gap to min_amount.
     pub async fn ensure_spot_base_for_lot(
         &self,
         lot: f64,
@@ -1031,9 +1045,9 @@ impl CoinExClient {
             lot,
             need,
             buy_qty,
-            fee = meta.taker_fee_rate,
+            fee = meta.fee_rate_for_calc,
             base = %base,
-            "spot open: market-buying shortage (gross covers taker fee)"
+            "spot open: market-buying shortage (gross covers max(maker,taker) fee)"
         );
         let order = self.place_market_order(&Side::Buy, buy_qty).await?;
         let fill = if order.filled_price > 0.0 {
@@ -1144,7 +1158,18 @@ impl CoinExClient {
             last
         };
         let buy = matches!(side, Side::Buy);
-        let (raw_tp, raw_sl) = self.config.calc_tp_sl(buy, anchor);
+        // Spot leg recomputes from `anchor` (the fee-padded shortage fill, if any).
+        // TP/SL distance is derived from *this pair's* fee, not from env-fixed values.
+        let mut tp_sl_percent = BotConfig::tp_sl_percent_from_fee_rate(meta.fee_rate_for_calc);
+        if !tp_sl_percent.is_finite() || tp_sl_percent <= 0.0 {
+            tp_sl_percent = self.config.tp_sl_percent_fallback;
+        }
+        let m = tp_sl_percent / 100.0;
+        let (raw_tp, raw_sl) = if buy {
+            (anchor * (1.0 + m), anchor * (1.0 - m))
+        } else {
+            (anchor * (1.0 - m), anchor * (1.0 + m))
+        };
         let tp_price = round_price(raw_tp, meta);
         let sl_price = round_price(raw_sl, meta);
         let anchor_rounded = round_price(anchor, meta);
@@ -1645,14 +1670,14 @@ pub fn ceil_amount(amount: f64, meta: &MarketMeta) -> f64 {
     (amount * factor).ceil() / factor
 }
 
-/// Gross market-buy to cover `target` after taker fee on base:
+/// Gross market-buy to cover `target` after fee on base:
 /// `ceil((target − available) / (1 − fee))`. None if no buy needed or gross < min_amount.
 pub fn spot_buy_gross_for_shortage(available: f64, target: f64, meta: &MarketMeta) -> Option<f64> {
     if available + f64::EPSILON >= target {
         return None;
     }
     let need = target - available;
-    let fee = meta.taker_fee_rate.clamp(0.0, 0.99);
+    let fee = meta.fee_rate_for_calc.clamp(0.0, 0.99);
     let gross = ceil_amount(need / (1.0 - fee), meta);
     if gross + f64::EPSILON < meta.min_amount {
         return None;
@@ -1791,5 +1816,30 @@ mod client_id_tests {
         assert!(!is_bot_tp_client_id("botS_tp", "botB_tp"));
         assert!(!is_bot_tp_client_id("", "botB_tp"));
         assert!(!is_bot_tp_client_id("other", "botB_tp"));
+    }
+}
+
+#[cfg(test)]
+mod fee_calc_tests {
+    use super::*;
+
+    fn sample_meta(fee_rate_for_calc: f64) -> MarketMeta {
+        MarketMeta {
+            tick_size: 0.0,
+            min_amount: 0.01,
+            amount_precision: 8,
+            price_precision: 2,
+            maker_fee_rate: 0.001,
+            taker_fee_rate: 0.002,
+            fee_rate_for_calc,
+        }
+    }
+
+    #[test]
+    fn spot_buy_gross_for_shortage_uses_fee_rate_for_calc() {
+        let meta = sample_meta(0.02); // pretend max(maker,taker)=2%
+        let got = spot_buy_gross_for_shortage(0.0, 1.0, &meta).unwrap();
+        let expected = ceil_amount(1.0 / (1.0 - meta.fee_rate_for_calc), &meta);
+        assert!((got - expected).abs() < 1e-12);
     }
 }

@@ -3,6 +3,20 @@
 use anyhow::{bail, Context, Result};
 use std::env;
 
+/// Soft-SL ladder depth: entry + this many **full** adds (= 9 levels total).
+/// After this many successful adds the bot freezes TP until fill (no partial adds).
+pub const MAX_SOFT_SL_ADDS: u32 = 8;
+
+/// Approx USDT needed for a full ladder at constant `price` (fee buffer 5%).
+/// Final inventory ≈ `initial_lot × LOT_STEP_COEFF^max_adds`.
+pub fn full_ladder_usdt(initial_lot: f64, price: f64, lot_step_coeff: f64, max_adds: u32) -> f64 {
+    if initial_lot <= 0.0 || price <= 0.0 || lot_step_coeff <= 1.0 {
+        return f64::INFINITY;
+    }
+    let final_lot = initial_lot * lot_step_coeff.powi(max_adds as i32);
+    final_lot * price * 1.05
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarketKind {
     Futures,
@@ -54,11 +68,12 @@ pub struct BotConfig {
     pub lot_step_coeff: f64,
     /// Working min lot = round(exchange_min × lot_coeff). Filled after market meta load.
     pub initial_lot: f64,
-    /// Absolute martingale cap from `MAX_LOT` / `MAX_LOT_SPOT`.
-    pub max_lot: f64,
     /// Shared TP and SL distance as percent of first-entry price.
-    /// Env: `TP_SL_PERCENT` (e.g. 5 = +5% TP and −5% SL for BUY).
+    /// Active value: auto-derived from pair fee after market meta load, with env fallback.
     pub tp_sl_percent: f64,
+    /// Manual env fallback kept for cases where pair fee metadata is missing/invalid.
+    /// Env: `TP_SL_PERCENT` (e.g. 5 = +5% TP and −5% SL for BUY).
+    pub tp_sl_percent_fallback: f64,
     pub leverage: u32,
     pub margin_mode: String,
     pub tp_sl_trigger: String,
@@ -123,22 +138,8 @@ impl BotConfig {
             .parse()
             .context("LOT_STEP_COEFF must be a number")?;
 
-        let futures_max: f64 = env::var("MAX_LOT")
-            .unwrap_or_else(|_| "0.064".to_string())
-            .parse()
-            .context("MAX_LOT must be a number")?;
-        let spot_max: f64 = env::var("MAX_LOT_SPOT")
-            .unwrap_or_else(|_| "6400".to_string())
-            .parse()
-            .context("MAX_LOT_SPOT must be a number")?;
-
-        let max_lot = match market_kind {
-            MarketKind::Spot => spot_max,
-            MarketKind::Futures => futures_max,
-        };
-
         // One percent for both TP and SL. Legacy: TP_PERCENT / SL_PERCENT / TP_POINTS / SL_POINTS.
-        let tp_sl_percent: f64 = env::var("TP_SL_PERCENT")
+        let tp_sl_percent_fallback: f64 = env::var("TP_SL_PERCENT")
             .or_else(|_| env::var("TP_PERCENT"))
             .or_else(|_| env::var("SL_PERCENT"))
             .or_else(|_| env::var("TP_POINTS"))
@@ -146,6 +147,7 @@ impl BotConfig {
             .unwrap_or_else(|_| "10".to_string())
             .parse()
             .context("TP_SL_PERCENT must be a number")?;
+        let tp_sl_percent = tp_sl_percent_fallback;
         let leverage: u32 = env::var("LEVERAGE")
             .unwrap_or_else(|_| "10".to_string())
             .parse()
@@ -210,10 +212,7 @@ impl BotConfig {
         if lot_step_coeff <= 1.0 {
             bail!("LOT_STEP_COEFF must be > 1 (e.g. 2 = double on soft SL)");
         }
-        if max_lot <= 0.0 {
-            bail!("MAX_LOT / MAX_LOT_SPOT must be > 0");
-        }
-        if tp_sl_percent <= 0.0 {
+        if tp_sl_percent_fallback <= 0.0 {
             bail!("TP_SL_PERCENT must be > 0");
         }
         if market_kind == MarketKind::Futures && !(1..=100).contains(&leverage) {
@@ -230,8 +229,8 @@ impl BotConfig {
             lot_step_coeff,
             // Resolved from exchange min_amount × lot_coeff after meta load.
             initial_lot: 0.0,
-            max_lot,
             tp_sl_percent,
+            tp_sl_percent_fallback,
             leverage,
             margin_mode,
             tp_sl_trigger,
@@ -274,17 +273,31 @@ impl BotConfig {
                 "rounded min lot {lot} is below exchange min_amount {exchange_min}"
             );
         }
-        if self.max_lot + f64::EPSILON < lot {
-            bail!(
-                "MAX_LOT {} is below working min lot {} (exchange_min {} × LOT_COEFF {})",
-                self.max_lot,
-                lot,
-                exchange_min,
-                self.lot_coeff
-            );
-        }
         self.initial_lot = lot;
         Ok(())
+    }
+
+    /// Recompute TP/SL percent from the pair fee returned by market metadata.
+    ///
+    /// CoinEx fee rates come as fractions (e.g. `0.003 = 0.3%`), while this config
+    /// stores TP/SL as percents (e.g. `1.8 = 1.8%`). Formula:
+    /// `tp_sl_percent = max_fee * 2 * 3 * 100 = max_fee * 600`.
+    ///
+    /// Returns the active percent after applying the fee-based value or env fallback.
+    pub fn apply_fee_based_tp_sl_percent(&mut self, fee_rate_for_calc: f64) -> f64 {
+        let computed = Self::tp_sl_percent_from_fee_rate(fee_rate_for_calc);
+        self.tp_sl_percent = if computed.is_finite() && computed > 0.0 {
+            computed
+        } else {
+            self.tp_sl_percent_fallback
+        };
+        self.tp_sl_percent
+    }
+
+    /// Convert fee fraction (e.g. `0.003 = 0.3%`) into TP/SL percent points
+    /// used by the rest of the strategy (e.g. `1.8 = 1.8%`).
+    pub fn tp_sl_percent_from_fee_rate(fee_rate_for_calc: f64) -> f64 {
+        fee_rate_for_calc * 600.0
     }
 
     /// How many soft-SL steps are in `lot` vs working min lot (`LOT_STEP_COEFF`).
@@ -354,4 +367,48 @@ pub fn split_market(market: &str) -> (String, String) {
         }
     }
     (market.to_string(), "USDT".to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::BotConfig;
+
+    #[test]
+    fn fee_based_tp_sl_percent_stays_in_percent_units() {
+        let got = BotConfig::tp_sl_percent_from_fee_rate(0.003);
+        assert!((got - 1.8).abs() < 1e-12);
+    }
+
+    #[test]
+    fn invalid_fee_uses_env_fallback() {
+        let mut cfg = BotConfig {
+            api_key: "k".into(),
+            api_secret: "s".into(),
+            market: "BTCUSDT".into(),
+            market_kind: super::MarketKind::Spot,
+            trade_side: super::TradeSide::Buy,
+            lot_coeff: 1.0,
+            lot_step_coeff: 2.0,
+            initial_lot: 1.0,
+            tp_sl_percent: 5.0,
+            tp_sl_percent_fallback: 5.0,
+            leverage: 10,
+            margin_mode: "cross".into(),
+            tp_sl_trigger: "latest_price".into(),
+            rest_base_url: "https://api.coinex.com/v2".into(),
+            ws_url: "wss://socket.coinex.com/v2/spot".into(),
+            quote_ccy: "USDT".into(),
+            base_ccy: "BTC".into(),
+            auto_market: false,
+            min_turnover_usdt: 50_000.0,
+            max_spread_pct: 0.5,
+            market_blacklist: vec![],
+            scanner_quote: "USDT".into(),
+            scanner_hour_bars: 4,
+            scanner_hour_range_ratio: 0.30,
+        };
+        let got = cfg.apply_fee_based_tp_sl_percent(0.0);
+        assert!((got - 5.0).abs() < 1e-12);
+        assert!((cfg.tp_sl_percent - 5.0).abs() < 1e-12);
+    }
 }

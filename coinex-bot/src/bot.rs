@@ -4,7 +4,7 @@
 //! Soft SL: × LOT_STEP_COEFF via modify; TP and SL each shift by another TP_SL_PERCENT of **first entry** (not add fill).
 //! After TP / idle with no order: optional AUTO_MARKET scanner picks a volatile tight-spread USDT pair.
 
-use crate::config::{split_market, BotConfig};
+use crate::config::{full_ladder_usdt, split_market, BotConfig, MAX_SOFT_SL_ADDS};
 use crate::error::BotError;
 use crate::exchange::{
     is_bot_tp_client_id, make_bot_tp_client_id, parse_open_from_bot_tp_client_id, round_amount,
@@ -44,6 +44,9 @@ impl Bot {
         let client = Arc::new(CoinExClient::new(config.clone())?);
         let meta = client.get_market_meta().await.context("load market meta")?;
         let mut config = config;
+        // Variant A: derive active TP/SL percent from this concrete pair fee.
+        // Env `TP_SL_PERCENT` is kept only as a fallback (if fee metadata is missing).
+        config.apply_fee_based_tp_sl_percent(meta.fee_rate_for_calc);
         let meta_for_round = meta.clone();
         config
             .apply_exchange_min_lot(meta.min_amount, |a| round_amount(a, &meta_for_round))
@@ -56,7 +59,7 @@ impl Bot {
             exchange_min_amount = meta.min_amount,
             lot_coeff = config.lot_coeff,
             working_min_lot = config.initial_lot,
-            max_lot = config.max_lot,
+            max_soft_sl_adds = crate::config::MAX_SOFT_SL_ADDS,
             "loaded market metadata — min lot = exchange_min × LOT_COEFF"
         );
         client.set_working_min_lot(config.initial_lot);
@@ -187,13 +190,9 @@ impl Bot {
         Ok(())
     }
 
-    fn is_critical(e: &anyhow::Error) -> bool {
-        // Soft-SL InsufficientBalance / ×2>max freeze the cycle (Ok) — not a stop.
-        // LotExceedsMax remains fatal only outside that path (e.g. futures SL reopen).
-        e.chain().any(|c| {
-            c.downcast_ref::<BotError>()
-                .is_some_and(|be| matches!(be, BotError::LotExceedsMax { .. }))
-        })
+    fn is_critical(_e: &anyhow::Error) -> bool {
+        // Soft-SL depth / InsufficientBalance freeze the cycle (Ok) — never stop the bot.
+        false
     }
 
     fn is_insufficient_balance(e: &anyhow::Error) -> bool {
@@ -278,7 +277,7 @@ impl Bot {
                     if let Some(mkt) = item.get("market").and_then(|v| v.as_str()) {
                         if !mkt.eq_ignore_ascii_case(&self.client.market()) {
                             info!(market = %mkt, "start: found bot TP on another market — switching");
-                            if let Err(e) = self.apply_live_market(mkt).await {
+                            if let Err(e) = self.apply_live_market(mkt, false).await {
                                 warn!(error = %e, market = %mkt, "start: switch to TP market failed");
                             } else {
                                 limits = self.client.get_pending_orders().await.unwrap_or_default();
@@ -341,7 +340,7 @@ impl Bot {
         Ok(())
     }
 
-    async fn apply_live_market(&self, market: &str) -> Result<()> {
+    async fn apply_live_market(&self, market: &str, require_full_ladder: bool) -> Result<()> {
         let current = self.client.market();
         if current.eq_ignore_ascii_case(market) {
             return Ok(());
@@ -356,18 +355,61 @@ impl Bot {
                 return Err(e).context("load meta for scanned market");
             }
         };
-        {
-            let mut st = self.state.lock().await;
-            if meta.min_amount > st.max_lot + f64::EPSILON {
+        let (lot_coeff, lot_step_coeff) = {
+            let st = self.state.lock().await;
+            (st.config.lot_coeff, st.config.lot_step_coeff)
+        };
+        let raw = meta.min_amount * lot_coeff;
+        let mut min_lot = round_amount(raw, &meta);
+        if min_lot + f64::EPSILON < meta.min_amount {
+            min_lot = round_amount(meta.min_amount, &meta);
+        }
+        // Ladder USDT check only for NEW scanner picks — never block restore of an existing TP.
+        if require_full_ladder {
+            let price = match self.client.get_last_price().await {
+                Ok(p) if p > 0.0 => p,
+                Ok(_) | Err(_) => {
+                    let (b, q) = split_market(&current);
+                    self.client.set_live_market(&current, &b, &q);
+                    anyhow::bail!(
+                        "scanner skip {market}: cannot read last price for ladder USDT check"
+                    );
+                }
+            };
+            let need = full_ladder_usdt(min_lot, price, lot_step_coeff, MAX_SOFT_SL_ADDS);
+            let usdt_avail = match self.client.get_available_balance(&quote).await {
+                Ok(v) => v,
+                Err(e) => {
+                    let (b, q) = split_market(&current);
+                    self.client.set_live_market(&current, &b, &q);
+                    return Err(e).context("scanner: quote balance for ladder check");
+                }
+            };
+            if usdt_avail + f64::EPSILON < need {
                 let (b, q) = split_market(&current);
                 self.client.set_live_market(&current, &b, &q);
                 anyhow::bail!(
-                    "scanner skip {}: min_amount {} > max_lot {}",
+                    "scanner skip {}: ladder USDT need {:.6} (min_lot={} × price={} × coeff^{} ×1.05) > available {:.6}",
                     market,
-                    meta.min_amount,
-                    st.max_lot
+                    need,
+                    min_lot,
+                    price,
+                    MAX_SOFT_SL_ADDS,
+                    usdt_avail
                 );
             }
+            info!(
+                market,
+                min_lot,
+                price,
+                ladder_usdt_need = need,
+                quote_available = usdt_avail,
+                max_soft_sl_adds = MAX_SOFT_SL_ADDS,
+                "scanner: balance covers full soft-SL ladder"
+            );
+        }
+        {
+            let mut st = self.state.lock().await;
             st.config.market = market.to_string();
             st.config.base_ccy = base.clone();
             st.config.quote_ccy = quote.clone();
@@ -379,6 +421,8 @@ impl Bot {
                 self.client.set_live_market(&current, &b, &q);
                 return Err(e);
             }
+            // Variant A: recompute TP/SL percent for each scanned market.
+            st.config.apply_fee_based_tp_sl_percent(meta.fee_rate_for_calc);
             st.initial_lot = st.config.initial_lot;
             st.current_lot = st.config.initial_lot;
             self.client.set_working_min_lot(st.config.initial_lot);
@@ -390,6 +434,7 @@ impl Bot {
             base = %base,
             min_amount = meta.min_amount,
             working_min_lot = self.state.lock().await.initial_lot,
+            require_full_ladder,
             "switched live spot market"
         );
         Ok(())
@@ -410,7 +455,7 @@ impl Bot {
         let cfg = self.state.lock().await.config.clone();
         match scanner::select_spot_market(&self.client, &cfg).await {
             Ok(Some(pick)) => {
-                if let Err(e) = self.apply_live_market(&pick.market).await {
+                if let Err(e) = self.apply_live_market(&pick.market, true).await {
                     warn!(
                         error = %e,
                         market = %pick.market,
@@ -507,7 +552,14 @@ impl Bot {
             return None;
         }
         let lot = round_amount(lot, &self.meta());
-        let cfg = self.client.config();
+        // Restore TP/SL from an existing TP price, so TP/SL percent must match
+        // the *current* pair fee (variant A). Use env value only as fallback.
+        let meta = self.meta();
+        let mut cfg = self.client.config().clone();
+        let fee_based = BotConfig::tp_sl_percent_from_fee_rate(meta.fee_rate_for_calc);
+        if fee_based.is_finite() && fee_based > 0.0 {
+            cfg.tp_sl_percent = fee_based;
+        }
         let buy = matches!(side, Side::Buy);
         let live_cid = tp_obj
             .get("client_id")
@@ -562,7 +614,7 @@ impl Bot {
             position = ?st.position.as_ref().map(|p| (&p.id, p.lot, p.open_price, p.tp_price, p.sl_price)),
             current_lot = st.current_lot,
             initial_lot = st.initial_lot,
-            max_lot = st.max_lot,
+            max_soft_sl_adds = crate::config::MAX_SOFT_SL_ADDS,
             "one-sided martingale ready"
         );
     }
@@ -1081,12 +1133,17 @@ impl Bot {
             // Do not snap current_lot first: 39.88 vs min 20 must stay step 0.
             match st.next_lot_after_sl_add(current_lot) {
                 Ok(lot) => snap_amount_to_min(lot, &self.meta()),
-                Err(BotError::LotExceedsMax { lot, max_lot }) => {
+                Err(BotError::SoftSlDepthExceeded {
+                    steps,
+                    max_adds,
+                    lot,
+                }) => {
                     warn!(
                         current_lot,
                         next_lot = lot,
-                        max_lot,
-                        "soft SL: next lot exceeds max_lot — freezing TP until fill"
+                        soft_sl_steps = steps,
+                        max_soft_sl_adds = max_adds,
+                        "soft SL: ladder depth reached — freezing TP until fill"
                     );
                     st.sl_frozen = true;
                     return Ok(());

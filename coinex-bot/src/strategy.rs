@@ -4,7 +4,7 @@
 //! New cycle: min lot; TP/SL = ±TP_SL_PERCENT from first entry.
 //! Soft SL: lot × LOT_STEP_COEFF; TP and SL each shift by another −/+ % of first entry (never from add fill).
 
-use crate::config::{BotConfig, TradeSide};
+use crate::config::{BotConfig, TradeSide, MAX_SOFT_SL_ADDS};
 use crate::error::BotError;
 use tracing::info;
 
@@ -97,24 +97,21 @@ pub struct BotState {
     pub position: Option<Position>,
     pub current_lot: f64,
     pub initial_lot: f64,
-    pub max_lot: f64,
     pub trade_side: Side,
     pub is_running: bool,
-    /// Soft SL frozen: not enough USDT to step the lot — keep TP as-is until it fills.
+    /// Soft SL frozen: not enough USDT for a full add, or ladder depth reached — keep TP until fill.
     pub sl_frozen: bool,
 }
 
 impl BotState {
     pub fn new(config: BotConfig) -> Self {
         let initial_lot = config.initial_lot;
-        let max_lot = config.max_lot;
         let trade_side = Side::from_trade_side(config.trade_side);
         Self {
             config,
             position: None,
             current_lot: initial_lot,
             initial_lot,
-            max_lot,
             trade_side,
             is_running: true,
             sl_frozen: false,
@@ -185,17 +182,18 @@ impl BotState {
     /// Target lot after a spot soft-SL add.
     /// Next size is `initial_lot × LOT_STEP_COEFF^(steps+1)`, never `current × coeff`.
     /// Dusty TP amounts (e.g. 39.88 vs min 20) stay at step 0 → next = min × coeff.
+    /// Caps at entry + `MAX_SOFT_SL_ADDS` full adds (9 levels); no partial sizing.
     pub fn next_lot_after_sl_add(&self, current_lot: f64) -> Result<f64, BotError> {
         let steps = self.soft_sl_steps_from_lot(current_lot);
-        let next_steps = steps.saturating_add(1);
-        let next = self.initial_lot * self.config.lot_step_coeff.powi(next_steps as i32);
-        if next > self.max_lot + f64::EPSILON {
-            return Err(BotError::LotExceedsMax {
-                lot: next,
-                max_lot: self.max_lot,
+        if steps >= MAX_SOFT_SL_ADDS {
+            return Err(BotError::SoftSlDepthExceeded {
+                steps,
+                max_adds: MAX_SOFT_SL_ADDS,
+                lot: current_lot,
             });
         }
-        let next = next.min(self.max_lot);
+        let next_steps = steps.saturating_add(1);
+        let next = self.initial_lot * self.config.lot_step_coeff.powi(next_steps as i32);
         info!(
             current_lot,
             next_lot = next,
@@ -203,20 +201,22 @@ impl BotState {
             soft_sl_steps = steps,
             lot_step_coeff = self.config.lot_step_coeff,
             initial_lot = self.initial_lot,
+            max_soft_sl_adds = MAX_SOFT_SL_ADDS,
             "spot SL add: next lot from working min × steps"
         );
         Ok(next)
     }
 
     fn next_step_lot(&self, lot: f64) -> Result<f64, BotError> {
-        let next = lot * self.config.lot_step_coeff;
-        if next > self.max_lot + f64::EPSILON {
-            return Err(BotError::LotExceedsMax {
-                lot: next,
-                max_lot: self.max_lot,
+        let steps = self.soft_sl_steps_from_lot(lot);
+        if steps >= MAX_SOFT_SL_ADDS {
+            return Err(BotError::SoftSlDepthExceeded {
+                steps,
+                max_adds: MAX_SOFT_SL_ADDS,
+                lot,
             });
         }
-        Ok(next.min(self.max_lot))
+        Ok(lot * self.config.lot_step_coeff)
     }
 
     /// Volume-weighted average entry after adding `add_qty` at `add_price`.
@@ -249,8 +249,8 @@ mod tests {
             lot_coeff: 2.0,
             lot_step_coeff: 2.0,
             initial_lot: 100.0,
-            max_lot: 800.0,
             tp_sl_percent: 10.0,
+            tp_sl_percent_fallback: 10.0,
             leverage: 10,
             margin_mode: "cross".into(),
             tp_sl_trigger: "latest_price".into(),
@@ -319,7 +319,6 @@ mod tests {
         let mut cfg = sample_config();
         cfg.lot_step_coeff = 3.0;
         cfg.initial_lot = 20.0;
-        cfg.max_lot = 25000.0;
         let st = BotState::new(cfg);
         assert_eq!(st.soft_sl_steps_from_lot(39.88), 0);
         assert!((st.next_lot_after_sl_add(39.88).unwrap() - 60.0).abs() < 1e-9);
@@ -349,10 +348,21 @@ mod tests {
                 .abs()
                 < 1e-9
         );
+        // 8 adds done (lot = initial × 2^8 = 25600) → depth exceeded, freeze path.
         assert!(matches!(
-            state.next_lot_after_sl_add(800.0),
-            Err(BotError::LotExceedsMax { .. })
+            state.next_lot_after_sl_add(100.0 * 2f64.powi(8)),
+            Err(BotError::SoftSlDepthExceeded {
+                steps: 8,
+                max_adds: 8,
+                ..
+            })
         ));
+        // 7 adds done → 8th add still allowed (final level).
+        assert!(
+            (state.next_lot_after_sl_add(100.0 * 2f64.powi(7)).unwrap() - 100.0 * 2f64.powi(8))
+                .abs()
+                < 1e-6
+        );
     }
 
     #[test]

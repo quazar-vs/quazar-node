@@ -31,7 +31,7 @@ async fn main() -> Result<()> {
         side = config.trade_side.as_str(),
         lot_coeff = config.lot_coeff,
         lot_step_coeff = config.lot_step_coeff,
-        max_lot = config.max_lot,
+        max_soft_sl_adds = crate::config::MAX_SOFT_SL_ADDS,
         tp_sl_percent = config.tp_sl_percent,
         auto_market = config.auto_market,
         leverage = config.leverage,

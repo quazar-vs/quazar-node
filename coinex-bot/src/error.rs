@@ -7,8 +7,15 @@ pub enum BotError {
     #[error("insufficient balance to open lot={lot}: available={available}")]
     InsufficientBalance { lot: f64, available: f64 },
 
-    #[error("lot {lot} exceeds configured max_lot {max_lot}")]
-    LotExceedsMax { lot: f64, max_lot: f64 },
+    /// Soft-SL ladder finished (entry + MAX_SOFT_SL_ADDS full adds) — freeze TP until fill.
+    #[error(
+        "soft SL depth exceeded: steps={steps} max_adds={max_adds} next_lot={lot}"
+    )]
+    SoftSlDepthExceeded {
+        steps: u32,
+        max_adds: u32,
+        lot: f64,
+    },
 
     #[error("CoinEx API error code={code}: {message}")]
     Api { code: i64, message: String },
