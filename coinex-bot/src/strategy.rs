@@ -268,13 +268,9 @@ mod tests {
             market_blacklist: vec![],
             scanner_quote: "USDT".into(),
             scanner_bars: 12,
-            scanner_shortlist: 20,
+            scanner_shortlist: 40,
             scanner_alive_min_bars: 8,
             scanner_alive_max_bar_share: 0.60,
-            scanner_hour_directionality_max: 0.70,
-            scanner_close_pos_min: 0.25,
-            scanner_close_pos_max: 0.75,
-            scanner_dump_wick_pass_pct: 0.65,
         }
     }
 

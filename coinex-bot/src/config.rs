@@ -97,20 +97,12 @@ pub struct BotConfig {
     pub scanner_quote: String,
     /// Candles per timeframe (12h / 1h / 5m). Env: `SCANNER_BARS` (default 12).
     pub scanner_bars: u32,
-    /// After turnover filter, how many pairs get depth + kline. Env: `SCANNER_SHORTLIST` (default 20).
+    /// After turnover filter, how many pairs get depth + kline. Env: `SCANNER_SHORTLIST` (default 40).
     pub scanner_shortlist: u32,
     /// 12h liveness: at least this many of `scanner_bars` must have a non-zero range.
     pub scanner_alive_min_bars: u32,
     /// 12h liveness: one bar must not dominate the window range (e.g. 0.60).
     pub scanner_alive_max_bar_share: f64,
-    /// 1h anti dump/pump: |net move| / window range must be below this (e.g. 0.70).
-    pub scanner_hour_directionality_max: f64,
-    /// 1h: last close position in window range must be ≥ this (e.g. 0.25).
-    pub scanner_close_pos_min: f64,
-    /// 1h: last close position in window range must be ≤ this (e.g. 0.75).
-    pub scanner_close_pos_max: f64,
-    /// 5m: share of bearish candles with lower_wick > body (e.g. 0.65).
-    pub scanner_dump_wick_pass_pct: f64,
 }
 
 impl BotConfig {
@@ -228,7 +220,7 @@ impl BotConfig {
             .parse()
             .context("SCANNER_BARS must be an integer")?;
         let scanner_shortlist: u32 = env::var("SCANNER_SHORTLIST")
-            .unwrap_or_else(|_| "20".to_string())
+            .unwrap_or_else(|_| "40".to_string())
             .parse()
             .context("SCANNER_SHORTLIST must be an integer")?;
         let scanner_alive_min_bars: u32 = env::var("SCANNER_ALIVE_MIN_BARS")
@@ -239,22 +231,6 @@ impl BotConfig {
             .unwrap_or_else(|_| "0.60".to_string())
             .parse()
             .context("SCANNER_ALIVE_MAX_BAR_SHARE must be a number")?;
-        let scanner_hour_directionality_max: f64 = env::var("SCANNER_HOUR_DIRECTIONALITY_MAX")
-            .unwrap_or_else(|_| "0.70".to_string())
-            .parse()
-            .context("SCANNER_HOUR_DIRECTIONALITY_MAX must be a number")?;
-        let scanner_close_pos_min: f64 = env::var("SCANNER_CLOSE_POS_MIN")
-            .unwrap_or_else(|_| "0.25".to_string())
-            .parse()
-            .context("SCANNER_CLOSE_POS_MIN must be a number")?;
-        let scanner_close_pos_max: f64 = env::var("SCANNER_CLOSE_POS_MAX")
-            .unwrap_or_else(|_| "0.75".to_string())
-            .parse()
-            .context("SCANNER_CLOSE_POS_MAX must be a number")?;
-        let scanner_dump_wick_pass_pct: f64 = env::var("SCANNER_DUMP_WICK_PASS_PCT")
-            .unwrap_or_else(|_| "0.65".to_string())
-            .parse()
-            .context("SCANNER_DUMP_WICK_PASS_PCT must be a number")?;
 
         // Infer base/quote from market name when possible (e.g. BTCUSDT, SOLUSDT).
         let (base_ccy, quote_ccy) = split_market(&market);
@@ -285,18 +261,6 @@ impl BotConfig {
         }
         if !(0.0..=1.0).contains(&scanner_alive_max_bar_share) {
             bail!("SCANNER_ALIVE_MAX_BAR_SHARE must be in 0..=1");
-        }
-        if !(0.0..=1.0).contains(&scanner_hour_directionality_max) {
-            bail!("SCANNER_HOUR_DIRECTIONALITY_MAX must be in 0..=1");
-        }
-        if !(0.0..=1.0).contains(&scanner_close_pos_min)
-            || !(0.0..=1.0).contains(&scanner_close_pos_max)
-            || scanner_close_pos_min > scanner_close_pos_max
-        {
-            bail!("SCANNER_CLOSE_POS_MIN/MAX must be in 0..=1 with min <= max");
-        }
-        if !(0.0..=1.0).contains(&scanner_dump_wick_pass_pct) {
-            bail!("SCANNER_DUMP_WICK_PASS_PCT must be in 0..=1");
         }
 
         Ok(Self {
@@ -329,10 +293,6 @@ impl BotConfig {
             scanner_shortlist,
             scanner_alive_min_bars,
             scanner_alive_max_bar_share,
-            scanner_hour_directionality_max,
-            scanner_close_pos_min,
-            scanner_close_pos_max,
-            scanner_dump_wick_pass_pct,
         })
     }
 
@@ -495,13 +455,9 @@ mod tests {
             market_blacklist: vec![],
             scanner_quote: "USDT".into(),
             scanner_bars: 12,
-            scanner_shortlist: 20,
+            scanner_shortlist: 40,
             scanner_alive_min_bars: 8,
             scanner_alive_max_bar_share: 0.60,
-            scanner_hour_directionality_max: 0.70,
-            scanner_close_pos_min: 0.25,
-            scanner_close_pos_max: 0.75,
-            scanner_dump_wick_pass_pct: 0.65,
         };
         let got = cfg.apply_fee_based_tp_sl_percent(0.0);
         assert!((got - 5.0).abs() < 1e-12);

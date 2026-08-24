@@ -1,9 +1,9 @@
-//! Pick a liquid USDT spot market that is chopping, not pumping/dumping.
+//! Pick a liquid USDT spot market for the next martingale cycle.
 //!
-//! 0) Ticker shortlist by 24h turnover (not max range), then tight spread.
+//! 0) Turnover shortlist → depth for all → keep spread ≤ max → sort narrowest first.
 //! 1) 12hour × N: pair has been alive (range spread across bars, not one spike).
-//! 2) 1hour × N: reject one-sided dump/pump (net move and close not glued to extremes).
-//! 3) 5min × N: on bearish bars, lower wick > body; bullish bars unrestricted.
+//! 2) Prefer explicit 5m dump-entry; else calm bullish 1h without explicit reject.
+//!    Reject: window-high 5m bar has upper_wick ≥ body **and** 1h is bullish.
 
 use crate::config::BotConfig;
 use crate::exchange::CoinExClient;
@@ -22,7 +22,9 @@ pub struct MarketPick {
     pub vol: f64,
     pub spread_pct: f64,
     pub turnover: f64,
+    /// Signed 1h net move vs first open: (last_close − first_open) / first_open.
     pub hour_ratio: f64,
+    pub reason: &'static str,
 }
 
 struct TickerCand {
@@ -30,6 +32,14 @@ struct TickerCand {
     last: f64,
     vol: f64,
     turnover: f64,
+}
+
+struct SpreadCand {
+    market: String,
+    last: f64,
+    vol: f64,
+    turnover: f64,
+    spread_pct: f64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,9 +63,19 @@ impl Bar {
         self.close + f64::EPSILON < self.open
     }
 
-    fn lower_wick(&self) -> f64 {
-        self.open.min(self.close) - self.low
+    fn upper_wick(&self) -> f64 {
+        self.high - self.open.max(self.close)
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandClass {
+    /// 5m dump trigger: take first in spread order.
+    DumpEntry,
+    /// No reject, bullish 1h: fallback if no dump entry.
+    CalmBull,
+    /// Explicit reject or not tradable under current rules.
+    Skip,
 }
 
 pub async fn select_spot_market(
@@ -124,10 +144,10 @@ pub async fn select_spot_market(
     info!(
         n = shortlist.len(),
         top = %shortlist.first().map(|c| c.market.as_str()).unwrap_or("-"),
-        "scanner: turnover shortlist ready (depth + kline next)"
+        "scanner: turnover shortlist ready (depth for all, then sort by spread)"
     );
 
-    let bars_n = cfg.scanner_bars.max(1);
+    let mut with_spread: Vec<SpreadCand> = Vec::new();
     for cand in &shortlist {
         let spread_pct = match client.get_spot_depth(&cand.market).await {
             Ok(depth) => match spread_pct_from_depth(&depth) {
@@ -151,7 +171,36 @@ pub async fn select_spot_market(
             );
             continue;
         }
+        with_spread.push(SpreadCand {
+            market: cand.market.clone(),
+            last: cand.last,
+            vol: cand.vol,
+            turnover: cand.turnover,
+            spread_pct,
+        });
+    }
 
+    with_spread.sort_by(|a, b| {
+        a.spread_pct
+            .partial_cmp(&b.spread_pct)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if with_spread.is_empty() {
+        warn!("scanner: no candidates left after spread filter");
+        return Ok(None);
+    }
+    info!(
+        n = with_spread.len(),
+        tightest = %with_spread.first().map(|c| c.market.as_str()).unwrap_or("-"),
+        tightest_spread = with_spread.first().map(|c| c.spread_pct).unwrap_or(0.0),
+        "scanner: spread-sorted candidates ready (kline next)"
+    );
+
+    let bars_n = cfg.scanner_bars.max(1);
+    let mut dump_pick: Option<MarketPick> = None;
+    let mut calm_pick: Option<MarketPick> = None;
+
+    for cand in &with_spread {
         let h12 = match load_bars(client, &cand.market, "12hour", bars_n).await {
             Ok(v) => v,
             Err(e) => {
@@ -171,11 +220,6 @@ pub async fn select_spot_market(
                 continue;
             }
         };
-        let Some(hour_ratio) = hour_not_dump_pump(&h1, cfg) else {
-            debug!(market = %cand.market, n = h1.len(), "scanner: 1h dump/pump — skip");
-            continue;
-        };
-
         let m5 = match load_bars(client, &cand.market, "5min", bars_n).await {
             Ok(v) => v,
             Err(e) => {
@@ -183,32 +227,68 @@ pub async fn select_spot_market(
                 continue;
             }
         };
-        if !dump_wicks_ok(&m5, cfg) {
-            debug!(market = %cand.market, n = m5.len(), "scanner: 5m dump wick filter — skip");
-            continue;
+
+        let hour_bull = hour_is_bullish(&h1);
+        let hour_ratio = hour_net_ratio(&h1).unwrap_or(0.0);
+        let class = classify_5m(&m5, hour_bull);
+        match class {
+            CandClass::Skip => {
+                debug!(
+                    market = %cand.market,
+                    hour_bull,
+                    "scanner: explicit reject or no entry signal — skip"
+                );
+                continue;
+            }
+            CandClass::DumpEntry => {
+                if dump_pick.is_none() {
+                    dump_pick = Some(MarketPick {
+                        market: cand.market.clone(),
+                        last: cand.last,
+                        vol: cand.vol,
+                        spread_pct: cand.spread_pct,
+                        turnover: cand.turnover,
+                        hour_ratio,
+                        reason: "dump_entry",
+                    });
+                }
+            }
+            CandClass::CalmBull => {
+                if calm_pick.is_none() {
+                    calm_pick = Some(MarketPick {
+                        market: cand.market.clone(),
+                        last: cand.last,
+                        vol: cand.vol,
+                        spread_pct: cand.spread_pct,
+                        turnover: cand.turnover,
+                        hour_ratio,
+                        reason: "calm_bull",
+                    });
+                }
+            }
         }
 
-        let pick = MarketPick {
-            market: cand.market.clone(),
-            last: cand.last,
-            vol: cand.vol,
-            spread_pct,
-            turnover: cand.turnover,
-            hour_ratio,
-        };
+        // Early exit once both slots filled (list is already narrowest-first).
+        if dump_pick.is_some() && calm_pick.is_some() {
+            break;
+        }
+    }
+
+    if let Some(pick) = dump_pick.or(calm_pick) {
         info!(
             market = %pick.market,
+            reason = pick.reason,
             vol_pct = pick.vol * 100.0,
-            hour_directionality = pick.hour_ratio,
+            hour_net = pick.hour_ratio,
             spread_pct = pick.spread_pct,
             turnover = pick.turnover,
             last = pick.last,
-            "scanner: selected chopping spot market (12h alive, 1h not dump/pump, 5m dump wick)"
+            "scanner: selected spot market"
         );
         return Ok(Some(pick));
     }
 
-    warn!("scanner: no candidate passed 12h/1h/5m filters");
+    warn!("scanner: no dump-entry or calm-bull candidate");
     Ok(None)
 }
 
@@ -270,49 +350,62 @@ fn pair_is_alive(bars: &[Bar], cfg: &BotConfig) -> bool {
     max_bar / window <= cfg.scanner_alive_max_bar_share + f64::EPSILON
 }
 
-/// 1h: reject one-way dump/pump. `Some(directionality)` if accepted.
-fn hour_not_dump_pump(bars: &[Bar], cfg: &BotConfig) -> Option<f64> {
-    if bars.len() < 2 {
-        return None;
+fn hour_is_bullish(bars: &[Bar]) -> bool {
+    match (bars.first(), bars.last()) {
+        (Some(first), Some(last)) => last.close > first.open + f64::EPSILON,
+        _ => false,
     }
-    let (wh, wl) = window_high_low(bars)?;
-    let window = wh - wl;
-    if window <= f64::EPSILON {
-        return None;
-    }
-    let first_open = bars.first()?.open;
-    let last_close = bars.last()?.close;
-    let directionality = (last_close - first_open).abs() / window;
-    if directionality > cfg.scanner_hour_directionality_max + f64::EPSILON {
-        return None;
-    }
-    let pos = (last_close - wl) / window;
-    if pos + f64::EPSILON < cfg.scanner_close_pos_min
-        || pos > cfg.scanner_close_pos_max + f64::EPSILON
-    {
-        return None;
-    }
-    Some(directionality)
 }
 
-/// 5m: among bearish bars, lower wick must beat body. Bullish unrestricted.
-/// No bearish bars in the window → pass (up-move left as-is).
-fn dump_wicks_ok(bars: &[Bar], cfg: &BotConfig) -> bool {
-    let mut bear = 0u32;
-    let mut pass = 0u32;
-    for b in bars {
-        if !b.is_bearish() {
-            continue;
-        }
-        bear += 1;
-        if b.lower_wick() > b.body() + f64::EPSILON {
-            pass += 1;
-        }
+fn hour_net_ratio(bars: &[Bar]) -> Option<f64> {
+    let first = bars.first()?;
+    let last = bars.last()?;
+    if first.open <= f64::EPSILON {
+        return None;
     }
-    if bear == 0 {
-        return true;
+    Some((last.close - first.open) / first.open)
+}
+
+/// Window-high bar has upper wick ≥ body (top rejection).
+fn top_reject_wick(bars: &[Bar]) -> bool {
+    let Some(hi_bar) = bars
+        .iter()
+        .max_by(|a, b| a.high.partial_cmp(&b.high).unwrap_or(std::cmp::Ordering::Equal))
+    else {
+        return false;
+    };
+    hi_bar.upper_wick() + f64::EPSILON >= hi_bar.body()
+}
+
+/// Explicit dump entry: prev bearish and last.open − last.low ≥ prev.body.
+fn dump_entry_signal(bars: &[Bar]) -> bool {
+    if bars.len() < 2 {
+        return false;
     }
-    (pass as f64 / bear as f64) + f64::EPSILON >= cfg.scanner_dump_wick_pass_pct
+    let prev = bars[bars.len() - 2];
+    let last = bars[bars.len() - 1];
+    if !prev.is_bearish() {
+        return false;
+    }
+    let body = prev.body();
+    if body <= f64::EPSILON {
+        return false;
+    }
+    (last.open - last.low) + f64::EPSILON >= body
+}
+
+fn classify_5m(m5: &[Bar], hour_bull: bool) -> CandClass {
+    // Explicit reject only on bullish hourly context.
+    if hour_bull && top_reject_wick(m5) {
+        return CandClass::Skip;
+    }
+    if dump_entry_signal(m5) {
+        return CandClass::DumpEntry;
+    }
+    if hour_bull {
+        return CandClass::CalmBull;
+    }
+    CandClass::Skip
 }
 
 fn window_high_low(bars: &[Bar]) -> Option<(f64, f64)> {
@@ -392,13 +485,9 @@ mod tests {
             market_blacklist: vec![],
             scanner_quote: "USDT".into(),
             scanner_bars: 12,
-            scanner_shortlist: 20,
+            scanner_shortlist: 40,
             scanner_alive_min_bars: 8,
             scanner_alive_max_bar_share: 0.60,
-            scanner_hour_directionality_max: 0.70,
-            scanner_close_pos_min: 0.25,
-            scanner_close_pos_max: 0.75,
-            scanner_dump_wick_pass_pct: 0.65,
         }
     }
 
@@ -432,48 +521,50 @@ mod tests {
     }
 
     #[test]
-    fn hour_rejects_one_way_dump() {
-        let c = cfg();
-        let bars: Vec<Bar> = (0..12)
+    fn hour_bullish_when_close_above_first_open() {
+        let up = vec![bar(10.0, 10.5, 9.9, 10.2), bar(10.2, 11.0, 10.1, 10.8)];
+        assert!(hour_is_bullish(&up));
+        let down = vec![bar(10.0, 10.2, 9.5, 9.6), bar(9.6, 9.7, 9.0, 9.1)];
+        assert!(!hour_is_bullish(&down));
+    }
+
+    #[test]
+    fn top_reject_only_with_bull_hour() {
+        // High of window on last bar with huge upper wick.
+        let m5 = vec![
+            bar(10.0, 10.2, 9.9, 10.1),
+            bar(10.1, 10.3, 10.0, 10.2),
+            bar(10.2, 12.0, 10.2, 10.4), // high=12, body=0.2, upper=1.6
+        ];
+        assert!(top_reject_wick(&m5));
+        assert_eq!(classify_5m(&m5, true), CandClass::Skip);
+        // Same 5m on bear hour: not this reject; no dump signal → skip as non-calm.
+        assert_eq!(classify_5m(&m5, false), CandClass::Skip);
+    }
+
+    #[test]
+    fn dump_entry_prev_bear_and_plunge() {
+        let mut m5 = vec![bar(10.0, 10.1, 9.95, 10.05); 10];
+        // prev bearish body=0.4; last open-low=0.5 ≥ 0.4
+        m5.push(bar(10.5, 10.55, 10.0, 10.1));
+        m5.push(bar(10.1, 10.15, 9.6, 9.9));
+        assert!(dump_entry_signal(&m5));
+        assert_eq!(classify_5m(&m5, false), CandClass::DumpEntry);
+        assert_eq!(classify_5m(&m5, true), CandClass::DumpEntry);
+    }
+
+    #[test]
+    fn calm_bull_when_no_reject_no_dump() {
+        // Upper wick tiny vs body so window-high is not a top-reject; no dump plunge.
+        let m5: Vec<Bar> = (0..12)
             .map(|i| {
-                let p = 12.0 - i as f64;
-                bar(p, p + 0.05, p - 0.2, p - 0.15)
+                let o = 10.0 + i as f64 * 0.05;
+                bar(o, o + 0.05, o - 0.01, o + 0.04)
             })
             .collect();
-        assert!(hour_not_dump_pump(&bars, &c).is_none());
-    }
-
-    #[test]
-    fn hour_accepts_chop_mid_close() {
-        let c = cfg();
-        let bars = vec![
-            bar(10.0, 10.8, 9.6, 10.2),
-            bar(10.2, 10.5, 9.9, 10.0),
-            bar(10.0, 10.7, 9.7, 10.4),
-            bar(10.4, 10.6, 9.8, 10.1),
-            bar(10.1, 10.9, 9.5, 10.3),
-            bar(10.3, 10.6, 9.8, 10.0),
-            bar(10.0, 10.8, 9.6, 10.5),
-            bar(10.5, 10.7, 9.9, 10.2),
-            bar(10.2, 10.6, 9.7, 10.1),
-            bar(10.1, 10.8, 9.6, 10.4),
-            bar(10.4, 10.7, 9.8, 10.2),
-            bar(10.2, 10.6, 9.7, 10.3),
-        ];
-        assert!(hour_not_dump_pump(&bars, &c).is_some());
-    }
-
-    #[test]
-    fn dump_wick_requires_lower_wick_gt_body() {
-        let c = cfg();
-        // Bearish with tiny lower wick — fail.
-        let fail = vec![bar(10.0, 10.1, 9.9, 9.5); 12];
-        assert!(!dump_wicks_ok(&fail, &c));
-        // Bearish with long lower wick (body 0.2, lower wick 0.8).
-        let ok = vec![bar(10.0, 10.05, 9.0, 9.8); 12];
-        assert!(dump_wicks_ok(&ok, &c));
-        // All bullish — pass (up-move unrestricted).
-        let up = vec![bar(10.0, 10.5, 9.95, 10.4); 12];
-        assert!(dump_wicks_ok(&up, &c));
+        assert!(!top_reject_wick(&m5));
+        assert!(!dump_entry_signal(&m5));
+        assert_eq!(classify_5m(&m5, true), CandClass::CalmBull);
+        assert_eq!(classify_5m(&m5, false), CandClass::Skip);
     }
 }

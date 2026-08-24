@@ -323,7 +323,7 @@ impl Bot {
                 }
             }
             if !self.select_market_if_idle(true).await {
-                warn!("start: scanner found no live-nervous market — idle until next scan");
+                warn!("start: scanner found no market — idle until next scan");
                 self.log_state_ready().await;
                 return Ok(());
             }
@@ -472,7 +472,7 @@ impl Bot {
                 true
             }
             Ok(None) => {
-                warn!("scanner: no chopping market passed 12h/1h/5m — wait, do not open");
+                warn!("scanner: no dump-entry or calm-bull market — wait, do not open");
                 *self.scanner_cooldown_until.lock().expect("scan cooldown") =
                     Instant::now() + Duration::from_secs(30);
                 false
@@ -1694,7 +1694,7 @@ impl Bot {
                 warn!(error = %e, "drain base tail after TP failed");
             }
             if !self.select_market_if_idle(true).await {
-                warn!("spot reopen: no still-nervous market after TP — stay idle");
+                warn!("spot reopen: no dump-entry/calm-bull market after TP — stay idle");
                 return Ok(());
             }
         }
