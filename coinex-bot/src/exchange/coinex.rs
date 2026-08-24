@@ -30,10 +30,13 @@ pub struct MarketMeta {
     pub maker_fee_rate: f64,
     /// Spot taker fee rate on the traded base (e.g. 0.003 = 0.3%).
     pub taker_fee_rate: f64,
-    /// Fee rate used for all internal fee-based calculations.
+    /// Fee rate used for TP/SL % distance (and optional base-fee padding).
     /// Chosen as the more conservative of maker/taker:
     /// `fee_rate_for_calc = max(maker_fee_rate, taker_fee_rate)`.
     pub fee_rate_for_calc: f64,
+    /// If true, spot trading fee is charged in quote (USDT), so market BUY
+    /// shortage uses exact base amount (no `/(1−fee)` pad). Env: `SPOT_FEE_IN_QUOTE`.
+    pub fee_in_quote: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -278,6 +281,7 @@ impl CoinExClient {
             maker_fee_rate,
             taker_fee_rate,
             fee_rate_for_calc,
+            fee_in_quote: self.config.is_spot() && self.config.spot_fee_in_quote,
         })
     }
 
@@ -1011,7 +1015,9 @@ impl CoinExClient {
     }
 
     /// Spot BUY: buy only when free base < working lot.
-    /// Gross = ceil(shortage / (1 − fee_used_for_calc)); never bump a tiny fee gap to min_amount.
+    /// Quote-fee markets: exact shortage (fee paid in USDT). Base-fee: pad `/(1−fee)`.
+    /// If shortage rounds below `min_amount` but lot is still uncovered — buy one `min_amount`
+    /// (surplus stays free). Never skip a real shortage that leaves us unable to place TP.
     pub async fn ensure_spot_base_for_lot(
         &self,
         lot: f64,
@@ -1035,8 +1041,9 @@ impl CoinExClient {
                 available,
                 lot,
                 need,
+                fee_in_quote = meta.fee_in_quote,
                 base = %base,
-                "spot open: fee-padded gross below min_amount — skip buy"
+                "spot open: tiny base-fee dust only — skip buy"
             );
             return Ok((available, None));
         };
@@ -1046,8 +1053,9 @@ impl CoinExClient {
             need,
             buy_qty,
             fee = meta.fee_rate_for_calc,
+            fee_in_quote = meta.fee_in_quote,
             base = %base,
-            "spot open: market-buying shortage (gross covers max(maker,taker) fee)"
+            "spot open: market-buying shortage"
         );
         let order = self.place_market_order(&Side::Buy, buy_qty).await?;
         let fill = if order.filled_price > 0.0 {
@@ -1670,19 +1678,33 @@ pub fn ceil_amount(amount: f64, meta: &MarketMeta) -> f64 {
     (amount * factor).ceil() / factor
 }
 
-/// Gross market-buy to cover `target` after fee on base:
-/// `ceil((target − available) / (1 − fee))`. None if no buy needed or gross < min_amount.
+/// Market-buy size to cover `target` from `available` free base.
+///
+/// - `fee_in_quote` (USDT fee): buy exact `ceil(need)` — fee is not taken from base.
+/// - fee on base: buy `ceil(need / (1 − fee))`.
+/// - If that size is still `< min_amount` but inventory is below target: buy one `min_amount`
+///   (quote-fee / real shortage). Only return `None` for tiny base-fee dust gaps.
 pub fn spot_buy_gross_for_shortage(available: f64, target: f64, meta: &MarketMeta) -> Option<f64> {
     if available + f64::EPSILON >= target {
         return None;
     }
     let need = target - available;
-    let fee = meta.fee_rate_for_calc.clamp(0.0, 0.99);
-    let gross = ceil_amount(need / (1.0 - fee), meta);
-    if gross + f64::EPSILON < meta.min_amount {
-        return None;
+    let raw = if meta.fee_in_quote {
+        need
+    } else {
+        let fee = meta.fee_rate_for_calc.clamp(0.0, 0.99);
+        need / (1.0 - fee)
+    };
+    let buy = ceil_amount(raw, meta);
+    if buy + f64::EPSILON >= meta.min_amount {
+        return Some(buy);
     }
-    Some(gross)
+    // Sub-min market order is impossible. Quote-fee (or any real hole below lot):
+    // buy one exchange min; surplus stays free. Base-fee microscopic dust: skip.
+    if meta.fee_in_quote || need + f64::EPSILON >= meta.min_amount * 0.5 {
+        return Some(round_amount(meta.min_amount, meta));
+    }
+    None
 }
 
 /// Smallest whole `min_amount` that covers `amount` (500, 1000, … — no 502.20 tails).
@@ -1832,6 +1854,7 @@ mod fee_calc_tests {
             maker_fee_rate: 0.001,
             taker_fee_rate: 0.002,
             fee_rate_for_calc,
+            fee_in_quote: false,
         }
     }
 
@@ -1841,5 +1864,25 @@ mod fee_calc_tests {
         let got = spot_buy_gross_for_shortage(0.0, 1.0, &meta).unwrap();
         let expected = ceil_amount(1.0 / (1.0 - meta.fee_rate_for_calc), &meta);
         assert!((got - expected).abs() < 1e-12);
+    }
+
+    #[test]
+    fn quote_fee_buys_exact_shortage_not_padded() {
+        let mut meta = sample_meta(0.02);
+        meta.fee_in_quote = true;
+        meta.min_amount = 200_000.0;
+        meta.amount_precision = 8;
+        // Dust left from prior fill — need almost a full min lot.
+        let got = spot_buy_gross_for_shortage(400.80160321, 200_000.0, &meta).unwrap();
+        assert!((got - 200_000.0).abs() < 1e-6, "got {got}");
+    }
+
+    #[test]
+    fn quote_fee_zero_available_buys_exact_target() {
+        let mut meta = sample_meta(0.003);
+        meta.fee_in_quote = true;
+        meta.min_amount = 50.0;
+        let got = spot_buy_gross_for_shortage(0.0, 50.0, &meta).unwrap();
+        assert!((got - 50.0).abs() < 1e-12);
     }
 }

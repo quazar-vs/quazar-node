@@ -251,6 +251,7 @@ mod tests {
             lot_coeff: 2.0,
             lot_step_coeff: 2.0,
             max_soft_sl_adds: 6,
+            spot_fee_in_quote: true,
             initial_lot: 100.0,
             tp_sl_percent: 10.0,
             tp_sl_percent_fallback: 10.0,
@@ -266,8 +267,14 @@ mod tests {
             max_spread_pct: 0.5,
             market_blacklist: vec![],
             scanner_quote: "USDT".into(),
-            scanner_hour_bars: 4,
-            scanner_hour_range_ratio: 0.30,
+            scanner_bars: 12,
+            scanner_shortlist: 20,
+            scanner_alive_min_bars: 8,
+            scanner_alive_max_bar_share: 0.60,
+            scanner_hour_directionality_max: 0.70,
+            scanner_close_pos_min: 0.25,
+            scanner_close_pos_max: 0.75,
+            scanner_dump_wick_pass_pct: 0.65,
         }
     }
 

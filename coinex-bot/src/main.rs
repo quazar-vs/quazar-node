@@ -32,6 +32,7 @@ async fn main() -> Result<()> {
         lot_coeff = config.lot_coeff,
         lot_step_coeff = config.lot_step_coeff,
         max_soft_sl_adds = config.max_soft_sl_adds,
+        spot_fee_in_quote = config.spot_fee_in_quote,
         tp_sl_percent = config.tp_sl_percent,
         auto_market = config.auto_market,
         leverage = config.leverage,

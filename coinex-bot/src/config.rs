@@ -67,6 +67,9 @@ pub struct BotConfig {
     pub lot_step_coeff: f64,
     /// Max full soft-SL adds after entry (levels = adds + 1). Env: `MAX_SOFT_SL_ADDS` (default 6 → 7 levels).
     pub max_soft_sl_adds: u32,
+    /// Spot fee charged in quote (USDT): buy exact base shortage, no `/(1−fee)` pad.
+    /// Env: `SPOT_FEE_IN_QUOTE` (default true). Set false only if the pair deducts fee from base.
+    pub spot_fee_in_quote: bool,
     /// Working min lot = round(exchange_min × lot_coeff). Filled after market meta load.
     pub initial_lot: f64,
     /// Shared TP and SL distance as percent of first-entry price.
@@ -92,10 +95,22 @@ pub struct BotConfig {
     pub market_blacklist: Vec<String>,
     /// Quote suffix the scanner keeps (usually USDT).
     pub scanner_quote: String,
-    /// How many 1h candles to judge if the pair is still nervous.
-    pub scanner_hour_bars: u32,
-    /// min(max 1h range / 24h range) to accept the pair (e.g. 0.30).
-    pub scanner_hour_range_ratio: f64,
+    /// Candles per timeframe (12h / 1h / 5m). Env: `SCANNER_BARS` (default 12).
+    pub scanner_bars: u32,
+    /// After turnover filter, how many pairs get depth + kline. Env: `SCANNER_SHORTLIST` (default 20).
+    pub scanner_shortlist: u32,
+    /// 12h liveness: at least this many of `scanner_bars` must have a non-zero range.
+    pub scanner_alive_min_bars: u32,
+    /// 12h liveness: one bar must not dominate the window range (e.g. 0.60).
+    pub scanner_alive_max_bar_share: f64,
+    /// 1h anti dump/pump: |net move| / window range must be below this (e.g. 0.70).
+    pub scanner_hour_directionality_max: f64,
+    /// 1h: last close position in window range must be ≥ this (e.g. 0.25).
+    pub scanner_close_pos_min: f64,
+    /// 1h: last close position in window range must be ≤ this (e.g. 0.75).
+    pub scanner_close_pos_max: f64,
+    /// 5m: share of bearish candles with lower_wick > body (e.g. 0.65).
+    pub scanner_dump_wick_pass_pct: f64,
 }
 
 impl BotConfig {
@@ -143,6 +158,14 @@ impl BotConfig {
             .unwrap_or_else(|_| DEFAULT_MAX_SOFT_SL_ADDS.to_string())
             .parse()
             .context("MAX_SOFT_SL_ADDS must be an integer")?;
+
+        let spot_fee_in_quote = matches!(
+            env::var("SPOT_FEE_IN_QUOTE")
+                .unwrap_or_else(|_| "true".to_string())
+                .to_ascii_lowercase()
+                .as_str(),
+            "1" | "true" | "yes" | "on"
+        );
 
         // One percent for both TP and SL. Legacy: TP_PERCENT / SL_PERCENT / TP_POINTS / SL_POINTS.
         let tp_sl_percent_fallback: f64 = env::var("TP_SL_PERCENT")
@@ -200,14 +223,38 @@ impl BotConfig {
         let scanner_quote = env::var("SCANNER_QUOTE")
             .unwrap_or_else(|_| "USDT".to_string())
             .to_ascii_uppercase();
-        let scanner_hour_bars: u32 = env::var("SCANNER_HOUR_BARS")
-            .unwrap_or_else(|_| "4".to_string())
+        let scanner_bars: u32 = env::var("SCANNER_BARS")
+            .unwrap_or_else(|_| "12".to_string())
             .parse()
-            .context("SCANNER_HOUR_BARS must be an integer")?;
-        let scanner_hour_range_ratio: f64 = env::var("SCANNER_HOUR_RANGE_RATIO")
-            .unwrap_or_else(|_| "0.30".to_string())
+            .context("SCANNER_BARS must be an integer")?;
+        let scanner_shortlist: u32 = env::var("SCANNER_SHORTLIST")
+            .unwrap_or_else(|_| "20".to_string())
             .parse()
-            .context("SCANNER_HOUR_RANGE_RATIO must be a number")?;
+            .context("SCANNER_SHORTLIST must be an integer")?;
+        let scanner_alive_min_bars: u32 = env::var("SCANNER_ALIVE_MIN_BARS")
+            .unwrap_or_else(|_| "8".to_string())
+            .parse()
+            .context("SCANNER_ALIVE_MIN_BARS must be an integer")?;
+        let scanner_alive_max_bar_share: f64 = env::var("SCANNER_ALIVE_MAX_BAR_SHARE")
+            .unwrap_or_else(|_| "0.60".to_string())
+            .parse()
+            .context("SCANNER_ALIVE_MAX_BAR_SHARE must be a number")?;
+        let scanner_hour_directionality_max: f64 = env::var("SCANNER_HOUR_DIRECTIONALITY_MAX")
+            .unwrap_or_else(|_| "0.70".to_string())
+            .parse()
+            .context("SCANNER_HOUR_DIRECTIONALITY_MAX must be a number")?;
+        let scanner_close_pos_min: f64 = env::var("SCANNER_CLOSE_POS_MIN")
+            .unwrap_or_else(|_| "0.25".to_string())
+            .parse()
+            .context("SCANNER_CLOSE_POS_MIN must be a number")?;
+        let scanner_close_pos_max: f64 = env::var("SCANNER_CLOSE_POS_MAX")
+            .unwrap_or_else(|_| "0.75".to_string())
+            .parse()
+            .context("SCANNER_CLOSE_POS_MAX must be a number")?;
+        let scanner_dump_wick_pass_pct: f64 = env::var("SCANNER_DUMP_WICK_PASS_PCT")
+            .unwrap_or_else(|_| "0.65".to_string())
+            .parse()
+            .context("SCANNER_DUMP_WICK_PASS_PCT must be a number")?;
 
         // Infer base/quote from market name when possible (e.g. BTCUSDT, SOLUSDT).
         let (base_ccy, quote_ccy) = split_market(&market);
@@ -227,6 +274,30 @@ impl BotConfig {
         if market_kind == MarketKind::Futures && !(1..=100).contains(&leverage) {
             bail!("LEVERAGE must be between 1 and 100");
         }
+        if scanner_bars == 0 {
+            bail!("SCANNER_BARS must be >= 1");
+        }
+        if scanner_shortlist == 0 {
+            bail!("SCANNER_SHORTLIST must be >= 1");
+        }
+        if scanner_alive_min_bars == 0 || scanner_alive_min_bars > scanner_bars {
+            bail!("SCANNER_ALIVE_MIN_BARS must be in 1..=SCANNER_BARS");
+        }
+        if !(0.0..=1.0).contains(&scanner_alive_max_bar_share) {
+            bail!("SCANNER_ALIVE_MAX_BAR_SHARE must be in 0..=1");
+        }
+        if !(0.0..=1.0).contains(&scanner_hour_directionality_max) {
+            bail!("SCANNER_HOUR_DIRECTIONALITY_MAX must be in 0..=1");
+        }
+        if !(0.0..=1.0).contains(&scanner_close_pos_min)
+            || !(0.0..=1.0).contains(&scanner_close_pos_max)
+            || scanner_close_pos_min > scanner_close_pos_max
+        {
+            bail!("SCANNER_CLOSE_POS_MIN/MAX must be in 0..=1 with min <= max");
+        }
+        if !(0.0..=1.0).contains(&scanner_dump_wick_pass_pct) {
+            bail!("SCANNER_DUMP_WICK_PASS_PCT must be in 0..=1");
+        }
 
         Ok(Self {
             api_key,
@@ -237,6 +308,7 @@ impl BotConfig {
             lot_coeff,
             lot_step_coeff,
             max_soft_sl_adds,
+            spot_fee_in_quote,
             // Resolved from exchange min_amount × lot_coeff after meta load.
             initial_lot: 0.0,
             tp_sl_percent,
@@ -253,8 +325,14 @@ impl BotConfig {
             max_spread_pct,
             market_blacklist,
             scanner_quote,
-            scanner_hour_bars,
-            scanner_hour_range_ratio,
+            scanner_bars,
+            scanner_shortlist,
+            scanner_alive_min_bars,
+            scanner_alive_max_bar_share,
+            scanner_hour_directionality_max,
+            scanner_close_pos_min,
+            scanner_close_pos_max,
+            scanner_dump_wick_pass_pct,
         })
     }
 
@@ -400,6 +478,7 @@ mod tests {
             lot_coeff: 1.0,
             lot_step_coeff: 2.0,
             max_soft_sl_adds: super::DEFAULT_MAX_SOFT_SL_ADDS,
+            spot_fee_in_quote: true,
             initial_lot: 1.0,
             tp_sl_percent: 5.0,
             tp_sl_percent_fallback: 5.0,
@@ -415,8 +494,14 @@ mod tests {
             max_spread_pct: 0.5,
             market_blacklist: vec![],
             scanner_quote: "USDT".into(),
-            scanner_hour_bars: 4,
-            scanner_hour_range_ratio: 0.30,
+            scanner_bars: 12,
+            scanner_shortlist: 20,
+            scanner_alive_min_bars: 8,
+            scanner_alive_max_bar_share: 0.60,
+            scanner_hour_directionality_max: 0.70,
+            scanner_close_pos_min: 0.25,
+            scanner_close_pos_max: 0.75,
+            scanner_dump_wick_pass_pct: 0.65,
         };
         let got = cfg.apply_fee_based_tp_sl_percent(0.0);
         assert!((got - 5.0).abs() < 1e-12);

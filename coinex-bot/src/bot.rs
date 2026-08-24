@@ -472,7 +472,7 @@ impl Bot {
                 true
             }
             Ok(None) => {
-                warn!("scanner: no still-nervous market — wait, do not open on a calm pair");
+                warn!("scanner: no chopping market passed 12h/1h/5m — wait, do not open");
                 *self.scanner_cooldown_until.lock().expect("scan cooldown") =
                     Instant::now() + Duration::from_secs(30);
                 false
@@ -795,7 +795,7 @@ impl Bot {
                     available_base,
                     lot,
                     need,
-                    "open: fee-padded shortage below min_amount — no extra buy"
+                    "open: tiny base-fee dust only — no extra buy"
                 );
             }
         } else {
