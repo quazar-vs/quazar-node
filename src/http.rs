@@ -248,6 +248,11 @@ fn allows_online_citizen(path: &str) -> bool {
         || path == "/svod"
         || path.starts_with("/law/")
         || path == "/algonism/identity"
+        // Shop browse (buy still requires status=active inside handler)
+        || path == "/api/shop/items"
+        || path.starts_with("/api/shop/items/")
+        || path == "/api/shop/balance"
+        || path == "/api/shop/warehouse"
 }
 
 pub async fn rate_limit_middleware(

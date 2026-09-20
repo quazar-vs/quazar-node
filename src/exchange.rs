@@ -17,8 +17,11 @@ use uuid::Uuid;
 
 use crate::auth::AuthContext;
 use crate::chain_events;
+use crate::offices::is_active_mayor;
 use crate::response::ApiResponse;
+use crate::shop;
 use crate::svod;
+use crate::types::Role;
 use crate::validator::FOUNDER_DISPLAY_NAME;
 use crate::AppState;
 
@@ -394,7 +397,12 @@ pub struct CreateRequestBody {
 
 #[derive(Debug, Deserialize)]
 pub struct CreateNeedBody {
-    pub svod_code: String,
+    /// `action` (default) | `item` — два свода на бирже.
+    pub kind: Option<String>,
+    /// Код лота Свода действий (`SVOD.md` / service_catalog).
+    pub svod_code: Option<String>,
+    /// Код предмета Свода предметов (`ITEMS.md` / shop_items).
+    pub item_code: Option<String>,
     pub quantity: u64,
     /// Обязателен, если потребность подаёт Agent (Секретарь) от имени гражданина.
     pub citizen_id: Option<String>,
@@ -441,6 +449,57 @@ pub struct ListQuery {
     pub lot_scope: Option<String>,
     /// City/node whose local board is being viewed (defaults to this node).
     pub node_id: Option<String>,
+    /// `action` | `item` | `all` (default) — unified exchange board filter.
+    pub kind: Option<String>,
+    /// Optional Items svod code filter for board/needs.
+    pub item_code: Option<String>,
+}
+
+fn parse_lot_kind(raw: Option<&str>) -> ExchangeResult<&'static str> {
+    match raw.map(str::trim).filter(|s| !s.is_empty()).unwrap_or("action") {
+        "action" | "actions" => Ok("action"),
+        "item" | "items" => Ok("item"),
+        other => Err(ExchangeError::BadRequest(format!(
+            "kind must be action|item, got {other}"
+        ))),
+    }
+}
+
+fn can_procure_items(auth: &AuthContext) -> bool {
+    matches!(
+        auth.role,
+        Role::Aiya | Role::Founder | Role::Agent | Role::Mayor
+    )
+}
+
+/// Credit warehouse + bump exchange_item_created after item-lot fulfillment.
+async fn fulfill_item_to_warehouse(
+    tx: &mut Transaction<'_, Postgres>,
+    item_code: &str,
+    qty: i64,
+    ts: i64,
+) -> ExchangeResult<(String, Uuid, i64, i64)> {
+    let node = shop::this_node_id();
+    let (item_id, _) = shop::item_id_by_code_tx(&mut *tx, item_code)
+        .await
+        .map_err(ExchangeError::BadRequest)?;
+    let (prev, new_qty) = shop::credit_warehouse_delta(&mut *tx, &node, item_id, qty)
+        .await
+        .map_err(ExchangeError::DatabaseError)?;
+    sqlx::query(
+        "INSERT INTO exchange_item_created (item_code, created_qty, updated_at)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (item_code) DO UPDATE SET
+           created_qty = exchange_item_created.created_qty + EXCLUDED.created_qty,
+           updated_at = EXCLUDED.updated_at",
+    )
+    .bind(item_code)
+    .bind(qty)
+    .bind(ts)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+    Ok((node, item_id, prev, new_qty))
 }
 
 /// Встроенный Агент Биржи: проверка резерва Successful и выставление лота республики.
@@ -497,6 +556,7 @@ async fn exchange_agent_list_need(
     let existing: Option<(String, i64)> = sqlx::query_as(
         "SELECT id, qty_remaining FROM exchange_listings
          WHERE is_state_agent = TRUE AND status = 'active' AND svod_code = $1
+           AND COALESCE(lot_kind, 'action') = 'action'
          ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
     )
     .bind(svod_code)
@@ -538,8 +598,8 @@ async fn exchange_agent_list_need(
         let request_id = format!("exreq_{}", Uuid::new_v4());
         sqlx::query(
             "INSERT INTO exchange_requests
-             (id, citizen_id, side, svod_code, qty_total, qty_remaining, unit_svod, status, created_at, updated_at)
-             VALUES ($1,$2,'sell',$3,$4,$4,$5,'accepted',$6,$6)",
+             (id, citizen_id, side, svod_code, qty_total, qty_remaining, unit_svod, status, created_at, updated_at, lot_kind)
+             VALUES ($1,$2,'sell',$3,$4,$4,$5,'accepted',$6,$6,'action')",
         )
         .bind(&request_id)
         .bind(STATE_RESERVE_ID)
@@ -556,8 +616,8 @@ async fn exchange_agent_list_need(
             "INSERT INTO exchange_listings
              (id, request_id, seller_id, svod_code, qty_total, qty_remaining,
               unit_svod, unit_buyer_price, unit_seller_price, status, created_at, updated_at,
-              is_state_agent, lot_scope, expires_at)
-             VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,'active',$9,$9,TRUE,$10,$11)",
+              is_state_agent, lot_scope, expires_at, lot_kind)
+             VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,'active',$9,$9,TRUE,$10,$11,'action')",
         )
         .bind(&lid)
         .bind(&request_id)
@@ -628,8 +688,184 @@ async fn exchange_agent_list_need(
     Ok((listing_id, reserve_bal))
 }
 
+/// Агент Биржи: предметный лот (обеспечение склада) → listing с lot_kind=item.
+async fn exchange_agent_list_item_need(
+    state: &Arc<AppState>,
+    need_id: &str,
+    citizen_id: &str,
+    item_code: &str,
+    qty: i64,
+    unit_svod: i64,
+    initiator: &str,
+    shelf_life_secs: Option<i64>,
+) -> ExchangeResult<(String, i64)> {
+    let mut tx = state
+        .db
+        .begin()
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+    let reserve_need = unit_svod.saturating_mul(qty);
+    let reserve_bal = lock_balance(&mut tx, STATE_RESERVE_ID).await?;
+    if reserve_bal < reserve_need {
+        let reason = format!(
+            "Недостаточный резерв республики ({FOUNDER_DISPLAY_NAME}): нужно {reserve_need} КВАЗИ, доступно {reserve_bal}"
+        );
+        sqlx::query(
+            "UPDATE exchange_needs SET status = 'rejected', reason = $1, reserve_balance = $2,
+             unit_svod = $3, updated_at = $4 WHERE id = $5",
+        )
+        .bind(&reason)
+        .bind(reserve_bal)
+        .bind(unit_svod)
+        .bind(now())
+        .bind(need_id)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        return Err(ExchangeError::BadRequest(reason));
+    }
+
+    let existing: Option<(String, i64)> = sqlx::query_as(
+        "SELECT id, qty_remaining FROM exchange_listings
+         WHERE is_state_agent = TRUE AND status = 'active' AND lot_kind = 'item'
+           AND item_code = $1
+         ORDER BY created_at ASC LIMIT 1 FOR UPDATE",
+    )
+    .bind(item_code)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+    let unit_buyer = buyer_unit_price(unit_svod);
+    let unit_seller = seller_unit_price(unit_svod);
+    let ts = now();
+    let expires_at = resolve_expires_at(shelf_life_secs, ts);
+    let lot_scope = "global";
+
+    let listing_id = if let Some((lid, rem)) = existing {
+        sqlx::query(
+            "UPDATE exchange_listings SET
+               qty_total = GREATEST(qty_total, $1),
+               qty_remaining = GREATEST(qty_remaining, $1),
+               unit_buyer_price = $2,
+               unit_seller_price = $3,
+               updated_at = $4,
+               expires_at = COALESCE(expires_at, $5),
+               status = 'active'
+             WHERE id = $6",
+        )
+        .bind(qty)
+        .bind(unit_buyer)
+        .bind(unit_seller)
+        .bind(ts)
+        .bind(expires_at)
+        .bind(&lid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        let _ = rem;
+        lid
+    } else {
+        let request_id = format!("exreq_{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO exchange_requests
+             (id, citizen_id, side, svod_code, item_code, qty_total, qty_remaining, unit_svod,
+              status, created_at, updated_at, lot_kind)
+             VALUES ($1,$2,'sell',NULL,$3,$4,$4,$5,'accepted',$6,$6,'item')",
+        )
+        .bind(&request_id)
+        .bind(STATE_RESERVE_ID)
+        .bind(item_code)
+        .bind(qty)
+        .bind(unit_svod)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        let lid = format!("exlist_{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO exchange_listings
+             (id, request_id, seller_id, svod_code, item_code, qty_total, qty_remaining,
+              unit_svod, unit_buyer_price, unit_seller_price, status, created_at, updated_at,
+              is_state_agent, lot_scope, expires_at, lot_kind)
+             VALUES ($1,$2,$3,NULL,$4,$5,$5,$6,$7,$8,'active',$9,$9,TRUE,$10,$11,'item')",
+        )
+        .bind(&lid)
+        .bind(&request_id)
+        .bind(STATE_RESERVE_ID)
+        .bind(item_code)
+        .bind(qty)
+        .bind(unit_svod)
+        .bind(unit_buyer)
+        .bind(unit_seller)
+        .bind(ts)
+        .bind(lot_scope)
+        .bind(expires_at)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        sqlx::query("UPDATE exchange_requests SET listing_id = $1, updated_at = $2 WHERE id = $3")
+            .bind(&lid)
+            .bind(ts)
+            .bind(&request_id)
+            .execute(&mut *tx)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        lid
+    };
+
+    sqlx::query(
+        "UPDATE exchange_needs SET status = 'listed', listing_id = $1, unit_svod = $2,
+         reserve_balance = $3, reason = NULL, updated_at = $4 WHERE id = $5",
+    )
+    .bind(&listing_id)
+    .bind(unit_svod)
+    .bind(reserve_bal)
+    .bind(ts)
+    .bind(need_id)
+    .execute(&mut *tx)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+    tx.commit()
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+    emit_event(
+        state,
+        "ExchangeAgentListed",
+        initiator,
+        "Агент Биржи выставил предметный лот",
+        format!("need {need_id} → listing {listing_id} {qty} x item:{item_code}"),
+        &format!("evt_agent_{need_id}"),
+        json!({
+            "need_id": need_id,
+            "listing_id": listing_id,
+            "citizen_id": citizen_id,
+            "kind": "item",
+            "item_code": item_code,
+            "quantity": qty,
+            "unit_svod": unit_svod,
+            "reserve_id": STATE_RESERVE_ID,
+            "reserve_balance": reserve_bal,
+            "seller_id": STATE_RESERVE_ID,
+            "seller_name": FOUNDER_DISPLAY_NAME,
+        }),
+    )
+    .await?;
+
+    Ok((listing_id, reserve_bal))
+}
+
 /// POST /exchange/needs — гражданин (или Секретарь от его имени) выражает потребность.
 /// Агент Биржи сразу проверяет резерв Successful и выставляет лот республики.
+/// `kind=item` + `item_code` — обеспечение склада (Свод предметов).
 pub async fn create_need(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -643,6 +879,8 @@ pub async fn create_need(
     if body.quantity == 0 {
         return Err(ExchangeError::BadRequest("quantity must be > 0".into()));
     }
+
+    let lot_kind = parse_lot_kind(body.kind.as_deref())?;
 
     let (citizen_id, created_via) = if auth.can_submit_need_for_citizen() {
         let cid = body.citizen_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
@@ -670,21 +908,118 @@ pub async fn create_need(
         ));
     };
 
-    let service = svod::get_service_by_code(&state.db, &body.svod_code, true)
+    let qty = body.quantity as i64;
+
+    if lot_kind == "item" {
+        let item_code = body
+            .item_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| ExchangeError::BadRequest("item_code required for kind=item".into()))?
+            .to_string();
+        let (_, unit_svod) = shop::item_id_by_code(&state.db, &item_code)
+            .await
+            .map_err(ExchangeError::BadRequest)?;
+        if unit_svod <= 0 {
+            return Err(ExchangeError::BadRequest(
+                "item price_kvazi must be > 0 for exchange listing".into(),
+            ));
+        }
+
+        let need_id = format!("exneed_{}", Uuid::new_v4());
+        let ts = now();
+        sqlx::query(
+            "INSERT INTO exchange_needs
+             (id, citizen_id, svod_code, item_code, quantity, status, unit_svod, created_via,
+              created_at, updated_at, lot_kind)
+             VALUES ($1,$2,NULL,$3,$4,'pending',$5,$6,$7,$7,'item')",
+        )
+        .bind(&need_id)
+        .bind(&citizen_id)
+        .bind(&item_code)
+        .bind(qty)
+        .bind(unit_svod)
+        .bind(&created_via)
+        .bind(ts)
+        .execute(&state.db)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        emit_event(
+            &state,
+            "ExchangeNeedCreated",
+            &auth.citizen_name,
+            "Потребность в предмете на бирже",
+            format!("{qty} x item:{item_code} for {citizen_id}"),
+            &format!("evt_{need_id}"),
+            json!({
+                "need_id": need_id,
+                "citizen_id": citizen_id,
+                "kind": "item",
+                "item_code": item_code,
+                "quantity": qty,
+                "unit_svod": unit_svod,
+                "created_via": created_via,
+            }),
+        )
+        .await?;
+
+        let (listing_id, reserve_balance) = exchange_agent_list_item_need(
+            &state,
+            &need_id,
+            &citizen_id,
+            &item_code,
+            qty,
+            unit_svod,
+            &auth.citizen_name,
+            body.shelf_life_secs,
+        )
+        .await?;
+
+        return Ok(Json(ApiResponse::success(json!({
+            "need_id": need_id,
+            "citizen_id": citizen_id,
+            "kind": "item",
+            "item_code": item_code,
+            "quantity": qty,
+            "unit_svod": unit_svod,
+            "unit_buyer_price": buyer_unit_price(unit_svod),
+            "status": "listed",
+            "listing_id": listing_id,
+            "seller_id": STATE_RESERVE_ID,
+            "seller_name": FOUNDER_DISPLAY_NAME,
+            "reserve_balance": reserve_balance,
+            "shelf_life_secs": body.shelf_life_secs.unwrap_or_else(default_shelf_life_secs),
+            "expires_at": resolve_expires_at(body.shelf_life_secs, now()),
+            "agent": "exchange",
+            "next": format!("POST /exchange/listings/{listing_id}/buy"),
+            "note": "Исполнение предметного лота: мэр/Айя/Секретарь → +склад узла",
+        }))));
+    }
+
+    let svod_code = body
+        .svod_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| ExchangeError::BadRequest("svod_code required for kind=action".into()))?
+        .to_string();
+
+    let service = svod::get_service_by_code(&state.db, &svod_code, true)
         .await
         .map_err(|e| ExchangeError::BadRequest(e.to_string()))?;
     let unit_svod = service.base_price;
     if unit_svod <= 0 {
         return Err(ExchangeError::BadRequest("invalid svod base_price".into()));
     }
-    let qty = body.quantity as i64;
 
     let need_id = format!("exneed_{}", Uuid::new_v4());
     let ts = now();
     sqlx::query(
         "INSERT INTO exchange_needs
-         (id, citizen_id, svod_code, quantity, status, unit_svod, created_via, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$7)",
+         (id, citizen_id, svod_code, quantity, status, unit_svod, created_via, created_at, updated_at, lot_kind)
+         VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$7,'action')",
     )
     .bind(&need_id)
     .bind(&citizen_id)
@@ -707,6 +1042,7 @@ pub async fn create_need(
         json!({
             "need_id": need_id,
             "citizen_id": citizen_id,
+            "kind": "action",
             "svod_code": service.code,
             "quantity": qty,
             "unit_svod": unit_svod,
@@ -737,6 +1073,7 @@ pub async fn create_need(
     Ok(Json(ApiResponse::success(json!({
         "need_id": need_id,
         "citizen_id": citizen_id,
+        "kind": "action",
         "svod_code": service.code,
         "quantity": qty,
         "unit_svod": unit_svod,
@@ -751,6 +1088,142 @@ pub async fn create_need(
         "agent": "exchange",
         "next": format!("POST /exchange/listings/{listing_id}/buy"),
         "note": "Сделка завершается после подтверждения Агентом СБ",
+    }))))
+}
+
+/// GET /exchange/board — единая витрина: действия (ordered/completed) + предметы (created/total/on_node).
+pub async fn list_board(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Query(q): Query<ListQuery>,
+) -> ExchangeResult<Json<ApiResponse>> {
+    if auth.is_node {
+        return Err(ExchangeError::Unauthorized(
+            "Node credentials cannot browse exchange board".into(),
+        ));
+    }
+
+    let kind_filter = q
+        .kind
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("all");
+    if !matches!(kind_filter, "all" | "action" | "actions" | "item" | "items") {
+        return Err(ExchangeError::BadRequest(
+            "kind must be all|action|item".into(),
+        ));
+    }
+    let include_actions = matches!(kind_filter, "all" | "action" | "actions");
+    let include_items = matches!(kind_filter, "all" | "item" | "items");
+
+    let view_node = q
+        .node_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(state.node_id.as_str())
+        .to_string();
+
+    let mut rows = Vec::new();
+
+    if include_actions {
+        let svod_code = q
+            .svod_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let action_rows: Vec<(String, String, i64, String, String, i64, i64)> = sqlx::query_as(
+            "SELECT svod_code, title, unit_svod, work_kind, lot_scope, ordered_qty, completed_qty
+             FROM exchange_action_board
+             WHERE ($1::text IS NULL OR svod_code = $1)
+             ORDER BY svod_code",
+        )
+        .bind(svod_code)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        for (code, title, unit, wk, scope, ordered, completed) in action_rows {
+            rows.push(json!({
+                "kind": "action",
+                "code": code,
+                "svod_code": code,
+                "title": title,
+                "unit_svod": unit,
+                "work_kind": wk,
+                "lot_scope": scope,
+                "ordered": ordered,
+                "completed": completed,
+            }));
+        }
+    }
+
+    if include_items {
+        let item_code = q
+            .item_code
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let item_rows: Vec<(String, String, String, String, i64, i64, i64)> = sqlx::query_as(
+            "SELECT b.item_code, b.title, b.category, b.unit, b.unit_svod, b.created_qty, b.total_qty
+             FROM exchange_item_board b
+             WHERE ($1::text IS NULL OR b.item_code = $1)
+             ORDER BY b.item_code",
+        )
+        .bind(item_code)
+        .fetch_all(&state.db)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        for (code, title, category, unit, unit_svod, created, total) in item_rows {
+            let on_node: i64 = sqlx::query_scalar(
+                "SELECT COALESCE(w.quantity, 0)
+                 FROM shop_items i
+                 LEFT JOIN shop_warehouse w ON w.item_id = i.id AND w.node_id = $1
+                 WHERE i.code = $2",
+            )
+            .bind(&view_node)
+            .bind(&code)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
+            .unwrap_or(0);
+
+            let active_listing: Option<(String, i64)> = sqlx::query_as(
+                "SELECT id, qty_remaining FROM exchange_listings
+                 WHERE lot_kind = 'item' AND item_code = $1 AND status = 'active'
+                   AND qty_remaining > 0
+                 ORDER BY created_at DESC LIMIT 1",
+            )
+            .bind(&code)
+            .fetch_optional(&state.db)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+            rows.push(json!({
+                "kind": "item",
+                "code": code,
+                "item_code": code,
+                "title": title,
+                "category": category,
+                "unit": unit,
+                "unit_svod": unit_svod,
+                "created": created,
+                "total": total,
+                "on_node": on_node,
+                "node_id": view_node,
+                "listing_id": active_listing.as_ref().map(|l| l.0.clone()),
+                "qty_remaining": active_listing.map(|l| l.1),
+            }));
+        }
+    }
+
+    Ok(Json(ApiResponse::success(json!({
+        "node_id": view_node,
+        "kind": kind_filter,
+        "count": rows.len(),
+        "rows": rows,
     }))))
 }
 
@@ -781,7 +1254,7 @@ pub async fn list_needs(
     type NeedRow = (
         String,
         String,
-        String,
+        Option<String>,
         i64,
         String,
         Option<String>,
@@ -790,6 +1263,8 @@ pub async fn list_needs(
         String,
         i64,
         String,
+        String,
+        Option<String>,
     );
 
     let rows: Vec<NeedRow> = if auth.can_submit_need_for_citizen()
@@ -799,7 +1274,9 @@ pub async fn list_needs(
         sqlx::query_as(
             "SELECT n.id, n.citizen_id, n.svod_code, n.quantity, n.status, n.listing_id,
                     n.unit_svod, n.reason, n.created_via, n.created_at,
-                    COALESCE(s.work_kind, 'implementation') AS work_kind
+                    COALESCE(s.work_kind, 'implementation') AS work_kind,
+                    COALESCE(n.lot_kind, 'action') AS lot_kind,
+                    n.item_code
              FROM exchange_needs n
              LEFT JOIN service_catalog s ON s.code = n.svod_code
              WHERE ($1::text IS NULL OR COALESCE(s.work_kind, 'implementation') = $1)
@@ -815,7 +1292,9 @@ pub async fn list_needs(
         sqlx::query_as(
             "SELECT n.id, n.citizen_id, n.svod_code, n.quantity, n.status, n.listing_id,
                     n.unit_svod, n.reason, n.created_via, n.created_at,
-                    COALESCE(s.work_kind, 'implementation') AS work_kind
+                    COALESCE(s.work_kind, 'implementation') AS work_kind,
+                    COALESCE(n.lot_kind, 'action') AS lot_kind,
+                    n.item_code
              FROM exchange_needs n
              LEFT JOIN service_catalog s ON s.code = n.svod_code
              WHERE n.citizen_id = $1
@@ -847,6 +1326,8 @@ pub async fn list_needs(
                 "created_at": r.9,
                 "work_kind": r.10,
                 "work_kind_label": svod::work_kind_label(&r.10),
+                "kind": r.11,
+                "item_code": r.12,
                 "mode": "needs",
                 "agent": "exchange",
             })
@@ -1382,6 +1863,7 @@ pub async fn list_listings(
              FROM exchange_listings l
              LEFT JOIN service_catalog s ON s.code = l.svod_code
              WHERE l.status = $1
+               AND COALESCE(l.lot_kind, 'action') = 'action'
                AND COALESCE(l.lot_scope, 'global') = 'global'
                AND l.qty_remaining > 0
                AND (l.expires_at IS NULL OR l.expires_at > $5)
@@ -1405,6 +1887,7 @@ pub async fn list_listings(
                 "id": r.0,
                 "request_id": r.1,
                 "seller_id": r.2,
+                "kind": "action",
                 "svod_code": r.3,
                 "qty_total": r.4,
                 "qty_remaining": r.5,
@@ -1882,6 +2365,7 @@ pub async fn background_listing_expiry(state: Arc<AppState>) {
 }
 
 /// POST /exchange/listings/:id/buy — partial buy: debit buyer immediately + event.
+/// Item lots (`lot_kind=item`): only mayor/Aiya/Agent/Founder; fulfillment → node warehouse.
 pub async fn buy_listing(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -1908,7 +2392,7 @@ pub async fn buy_listing(
         String,
         String,
         String,
-        String,
+        Option<String>,
         i64,
         i64,
         i64,
@@ -1916,10 +2400,14 @@ pub async fn buy_listing(
         String,
         bool,
         String,
+        String,
+        Option<String>,
     )> = sqlx::query_as(
         "SELECT id, request_id, seller_id, svod_code, qty_remaining, unit_svod,
                 unit_buyer_price, unit_seller_price, status, is_state_agent,
-                COALESCE(lot_scope, 'global')
+                COALESCE(lot_scope, 'global'),
+                COALESCE(lot_kind, 'action'),
+                item_code
          FROM exchange_listings WHERE id = $1 FOR UPDATE",
     )
     .bind(&listing_id)
@@ -1931,7 +2419,7 @@ pub async fn buy_listing(
         lid,
         request_id,
         seller_id,
-        svod_code,
+        svod_code_opt,
         qty_remaining,
         unit_svod,
         unit_buyer,
@@ -1939,6 +2427,8 @@ pub async fn buy_listing(
         status,
         is_state_agent,
         lot_scope,
+        lot_kind,
+        item_code_opt,
     )) = listing
     else {
         return Err(ExchangeError::NotFound("listing not found".into()));
@@ -1948,7 +2438,6 @@ pub async fn buy_listing(
             "listing status is {status}"
         )));
     }
-    // Expiry check (shelf_life)
     let expires_at: Option<i64> = sqlx::query_scalar(
         "SELECT expires_at FROM exchange_listings WHERE id = $1",
     )
@@ -1967,6 +2456,174 @@ pub async fn buy_listing(
     if seller_id == buyer_id {
         return Err(ExchangeError::BadRequest("cannot buy own listing".into()));
     }
+
+    // --- Item procurement: stock node warehouse ---
+    if lot_kind == "item" {
+        let item_code = item_code_opt.ok_or_else(|| {
+            ExchangeError::BadRequest("item listing missing item_code".into())
+        })?;
+        let elevated = can_procure_items(&auth);
+        let is_mayor = is_active_mayor(&state.db, &buyer_id)
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        if !elevated && !is_mayor {
+            return Err(ExchangeError::Unauthorized(
+                "Исполнение предметного лота: только мэр узла (или Айя/Секретарь/Founder)".into(),
+            ));
+        }
+        if qty > qty_remaining {
+            return Err(ExchangeError::BadRequest("quantity exceeds remaining".into()));
+        }
+        let debit = unit_buyer.saturating_mul(qty);
+        let buyer_bal = lock_balance(&mut tx, &buyer_id).await?;
+        if buyer_bal < debit {
+            return Err(ExchangeError::InsufficientBalance);
+        }
+        let reserve_bal = lock_balance(&mut tx, STATE_RESERVE_ID).await?;
+        set_balance(&mut tx, &buyer_id, buyer_bal - debit).await?;
+        set_balance(&mut tx, STATE_RESERVE_ID, reserve_bal + debit).await?;
+
+        let new_remaining = qty_remaining - qty;
+        let listing_status = if new_remaining == 0 { "filled" } else { "active" };
+        let ts = now();
+        sqlx::query(
+            "UPDATE exchange_listings SET qty_remaining = $1, status = $2, updated_at = $3 WHERE id = $4",
+        )
+        .bind(new_remaining)
+        .bind(listing_status)
+        .bind(ts)
+        .bind(&lid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        let (node, item_id, prev, new_qty) =
+            fulfill_item_to_warehouse(&mut tx, &item_code, qty, ts).await?;
+
+        let deal_id = format!("exdeal_{}", Uuid::new_v4());
+        let task_id = format!("extask_{}", Uuid::new_v4());
+        sqlx::query(
+            "INSERT INTO exchange_deals
+             (id, listing_id, request_id, buyer_id, seller_id, svod_code, item_code, qty,
+              unit_svod, unit_buyer_price, unit_seller_price, escrow_amount, status,
+              security_task_id, created_at, updated_at, lot_scope, confirm_mode, lot_kind)
+             VALUES ($1,$2,$3,$4,$5,NULL,$6,$7,$8,$9,$10,$11,'completed',$12,$13,$13,$14,'agent_sb','item')",
+        )
+        .bind(&deal_id)
+        .bind(&lid)
+        .bind(&request_id)
+        .bind(&buyer_id)
+        .bind(STATE_RESERVE_ID)
+        .bind(&item_code)
+        .bind(qty)
+        .bind(unit_svod)
+        .bind(unit_buyer)
+        .bind(unit_seller)
+        .bind(debit)
+        .bind(&task_id)
+        .bind(ts)
+        .bind(&lot_scope)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        sqlx::query(
+            "INSERT INTO exchange_security_tasks
+             (id, deal_id, from_citizen, to_citizen, svod_code, qty, status,
+              created_at, updated_at, confirm_mode, confirmed_by)
+             VALUES ($1,$2,$3,$4,$5,$6,'confirmed',$7,$7,'agent_sb','agent_sb')",
+        )
+        .bind(&task_id)
+        .bind(&deal_id)
+        .bind(STATE_RESERVE_ID)
+        .bind(&buyer_id)
+        .bind(&item_code)
+        .bind(qty)
+        .bind(ts)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        sqlx::query(
+            "UPDATE exchange_needs SET status = 'dealt', updated_at = $1
+             WHERE listing_id = $2 AND status = 'listed'",
+        )
+        .bind(ts)
+        .bind(&lid)
+        .execute(&mut *tx)
+        .await
+        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+
+        emit_event(
+            &state,
+            "ExchangeItemProcured",
+            &auth.citizen_name,
+            "Предмет обеспечен на склад узла через биржу",
+            format!("buy {qty} x item:{item_code} → warehouse {node}"),
+            &format!("evt_item_deal_{deal_id}"),
+            json!({
+                "deal_id": deal_id,
+                "listing_id": lid,
+                "kind": "item",
+                "item_code": item_code,
+                "item_id": item_id,
+                "quantity": qty,
+                "escrow_amount": debit,
+                "buyer_id": buyer_id,
+                "node_id": node,
+                "warehouse_previous": prev,
+                "warehouse_quantity": new_qty,
+                "source": "exchange",
+                "agent": "exchange",
+            }),
+        )
+        .await?;
+
+        let _ = chain_events::emit_signed_event(
+            &state,
+            "ShopWarehouseStocked",
+            &buyer_id,
+            "Shop warehouse stocked via exchange",
+            &format!("node={node} item={item_code} qty={new_qty}"),
+            Some(&format!("shop_stock_ex_{deal_id}")),
+            json!({
+                "node_id": node,
+                "item_id": item_id,
+                "item_code": item_code,
+                "quantity": new_qty,
+                "previous": prev,
+                "by": buyer_id,
+                "source": "exchange",
+                "deal_id": deal_id,
+            }),
+        )
+        .await;
+
+        return Ok(Json(ApiResponse::success(json!({
+            "deal_id": deal_id,
+            "security_task_id": task_id,
+            "kind": "item",
+            "item_code": item_code,
+            "escrow_amount": debit,
+            "status": "completed",
+            "listing_id": lid,
+            "listing_qty_remaining": new_remaining,
+            "node_id": node,
+            "warehouse_quantity": new_qty,
+            "warehouse_previous": prev,
+            "seller_id": STATE_RESERVE_ID,
+            "seller_name": FOUNDER_DISPLAY_NAME,
+            "agent": "exchange",
+        }))));
+    }
+
+    let svod_code = svod_code_opt.ok_or_else(|| {
+        ExchangeError::BadRequest("action listing missing svod_code".into())
+    })?;
 
     // --- Агент Биржи: эскроу → СБ по иерархии доступа лота (канон v3) ---
     if is_state_agent {
@@ -2021,7 +2678,6 @@ pub async fn buy_listing(
         let deal_id = format!("exdeal_{}", Uuid::new_v4());
         let task_id = format!("extask_{}", Uuid::new_v4());
         let ts = now();
-        // Авто-СБ, если активная роль заявителя соответствует уровню доступа лота.
         let auto_sb = auth.role.meets_access_level(&required_level);
         let confirm_mode = if auto_sb { "agent_sb" } else { "live_guardian" };
         let deal_status = if auto_sb { "completed" } else { "escrowed" };
@@ -2036,8 +2692,8 @@ pub async fn buy_listing(
             "INSERT INTO exchange_deals
              (id, listing_id, request_id, buyer_id, seller_id, svod_code, qty,
               unit_svod, unit_buyer_price, unit_seller_price, escrow_amount, status,
-              security_task_id, created_at, updated_at, lot_scope, confirm_mode)
-             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16)",
+              security_task_id, created_at, updated_at, lot_scope, confirm_mode, lot_kind)
+             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,$16,'action')",
         )
         .bind(&deal_id)
         .bind(&lid)
@@ -2117,6 +2773,7 @@ pub async fn buy_listing(
             json!({
                 "deal_id": deal_id,
                 "listing_id": lid,
+                "kind": "action",
                 "svod_code": svod_code,
                 "quantity": qty,
                 "escrow_amount": debit,
@@ -2135,6 +2792,7 @@ pub async fn buy_listing(
         return Ok(Json(ApiResponse::success(json!({
             "deal_id": deal_id,
             "security_task_id": task_id,
+            "kind": "action",
             "escrow_amount": debit,
             "status": deal_status,
             "listing_id": lid,
@@ -2187,8 +2845,8 @@ pub async fn buy_listing(
         "INSERT INTO exchange_deals
          (id, listing_id, request_id, buyer_id, seller_id, svod_code, qty,
           unit_svod, unit_buyer_price, unit_seller_price, escrow_amount, status,
-          security_task_id, created_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'escrowed',$12,$13,$13)",
+          security_task_id, created_at, updated_at, lot_kind)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'escrowed',$12,$13,$13,'action')",
     )
     .bind(&deal_id)
     .bind(&lid)
@@ -2238,6 +2896,7 @@ pub async fn buy_listing(
             "deal_id": deal_id,
             "listing_id": lid,
             "request_id": request_id,
+            "kind": "action",
             "svod_code": svod_code,
             "quantity": qty,
             "escrow_amount": escrow,
@@ -2252,6 +2911,7 @@ pub async fn buy_listing(
     Ok(Json(ApiResponse::success(json!({
         "deal_id": deal_id,
         "security_task_id": task_id,
+        "kind": "action",
         "escrow_amount": escrow,
         "status": "escrowed",
         "listing_qty_remaining": new_remaining,
@@ -2492,8 +3152,21 @@ pub async fn confirm_delivery(
         set_balance(&mut tx, &seller_id, seller_bal + pay_seller).await?;
     }
 
-    // Credit buyer inventory (not when state is the buyer)
-    if !state_buys {
+    // Credit buyer inventory for action lots (not when state is the buyer; not for items).
+    let deal_meta: Option<(String, Option<String>)> = sqlx::query_as(
+        "SELECT COALESCE(lot_kind, 'action'), item_code FROM exchange_deals WHERE id = $1",
+    )
+    .bind(&deal_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+    let (deal_kind, deal_item) = deal_meta.unwrap_or_else(|| ("action".into(), None));
+    if deal_kind == "item" {
+        if let Some(item_code) = deal_item {
+            let ts_now = now();
+            let _ = fulfill_item_to_warehouse(&mut tx, &item_code, qty, ts_now).await?;
+        }
+    } else if !state_buys {
         let buyer_inv = lock_inventory(&mut tx, &buyer_id, &svod_code).await?;
         set_inventory(&mut tx, &buyer_id, &svod_code, buyer_inv + qty).await?;
     }

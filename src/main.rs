@@ -54,6 +54,7 @@ mod register_verify;
 mod response;
 mod reward_svod;
 mod vpn;
+mod shop;
 mod svod;
 mod types;
 mod validator;
@@ -364,6 +365,7 @@ async fn main() {
         )
         .route("/exchange/needs", post(exchange::create_need))
         .route("/exchange/needs", get(exchange::list_needs))
+        .route("/exchange/board", get(exchange::list_board))
         .route("/exchange/listings", get(exchange::list_listings))
         .route("/exchange/listings/:id/buy", post(exchange::buy_listing))
         .route(
@@ -397,6 +399,13 @@ async fn main() {
         .route("/exchange/inventory", post(exchange::adjust_inventory))
         .route("/exchange/balance", get(exchange::get_balance_handler))
         .route("/exchange/balance/add", post(exchange::add_balance))
+        .route("/api/shop/items", get(shop::list_items))
+        .route("/api/shop/items/:id", get(shop::get_item))
+        .route("/api/shop/buy", post(shop::buy_item))
+        .route("/api/shop/history", get(shop::history))
+        .route("/api/shop/balance", get(shop::balance))
+        .route("/api/shop/warehouse", get(shop::list_warehouse))
+        .route("/api/shop/warehouse/stock", post(shop::stock_warehouse))
         .route("/offices/mayor", post(offices::appoint_mayor_handler))
         .route("/offices/mayor/:node_id", get(offices::get_mayor_office))
         .route(

@@ -303,12 +303,14 @@ def system_prompt() -> str:
         "Иерархия истины: Конституция → Кодексы (пакет awaken / GET /law) → реестр+БД этого узла. Не выдумывай факты.",
         "Ответы гражданам — только в чат. Тесты/smoke не пиши в чат.",
         "Если просят связаться с Cursor/агентом — всегда напрямую VPS agent (`quazar-cursor-direct`), без Paperclip.",
-        "Республиканский Свод Вознаграждений: эталон SVOD.md → laws.svod в awaken; live — GET /svod → lots (один список лотов). Не хардкодь codes/цены. Каталога нет. YouTube/event-log — НЕ Свод.",
+        "Три республиканских свода (алиас «государственный свод» + какой): "
+        "(1) рефлексы REFLEXES.md RX_*; (2) действия SVOD.md — лоты биржи КВАЗИ (laws.svod / GET /svod); "
+        "(3) предметы ITEMS.md — склад/магазин. Без уточнения «Свод» = действия. Каталога «четвёртого» нет.",
         "Биржа v3: гражданин подаёт ЗАЯВКУ (need), не прямой buy как главный шаг. Секретарь через Агента биржи выставляет ТОЛЬКО global (в Доступе есть Г). Local — не инициируй.",
         "СБ: не «каждая сделка ждёт СБ». Если активная роль соответствует доступу лота — авто-подтверждение; если ниже — эскалация на нужный уровень (выше может ниже).",
-        "Рефлексы (RX_*) ≠ лоты Свода. Рефлекс — реакция агента; лот — позиция с ценой. Эталон: REFLEXES.md / awaken DNA.",
-        "Магазин узла (фиат) ≠ биржа (КВАЗИ). Гость — только реальная валюта; гражданин выбирает контур. Пока магазин не развёрнут — не выдумывай витрину фиата.",
-        "Hermes/Гермес ВЫВЕДЕН из рабочего контура. Чат: я (Секретарь) → OpenRouter напрямую, без Hermes. Не говори, что работаешь «через Гермеса». API /hermes/event* в ядре — только историческое имя журнала внешних событий.",
+        "Сначала карта рефлексов (локально/делегат); OpenRouter — только fallback. RX_* ≠ лоты действий ≠ предметы.",
+        "Магазин узла (фиат, предметы) ≠ биржа (КВАЗИ, действия). Гость — только реальная валюта; гражданин выбирает контур. Пока магазин не развёрнут — не выдумывай витрину фиата.",
+        "Hermes/Гермес ВЫВЕДЕН из рабочего контура. Чат: сначала рефлексы узла; LLM (OpenRouter) — fallback. Не говори, что работаешь «через Гермеса». API /hermes/event* в ядре — только историческое имя журнала внешних событий.",
         "Канон внешних действий: Секретарь → Алгонизм-связной (algonism-svyaznoy) → внешний сервис. "
         "У меня НЕТ прямого доступа к YouTube API, Gmail/IMAP/SMTP агента и иным внешним API. "
         "Внешние токены и ключи хранит только связной (/var/lib/quazar/svyaznoy/; YouTube OAuth — /var/lib/quazar/youtube/). "
@@ -673,6 +675,60 @@ def hermes_fact_reply() -> str:
     )
 
 
+def is_presence_question(text: str) -> bool:
+    """RX_PRESENCE_PING — short alive check, no LLM."""
+    low = (text or "").lower().replace("ё", "е").strip()
+    if not low:
+        return False
+    compact = " ".join("".join(ch if ch.isalnum() or ch.isspace() else " " for ch in low).split())
+    keys = (
+        "ты тут", "вы тут", "ты здесь", "вы здесь", "на связи", "слышно",
+        "слышишь", "слышишь ли", "ты онлайн", "есть кто", "кто нибудь есть",
+        "are you there", "you there", "ping",
+    )
+    if any(k in compact for k in keys):
+        return True
+    return compact in {"тут?", "здесь?", "алло", "ало", "эй"}
+
+
+def presence_fact_reply() -> str:
+    return (
+        "Да, на связи. Я **Секретарь** Алгонизма (республиканский агент).\n"
+        "Отвечаю по **Своду рефлексов** и фактам узла; внешний LLM — только если рефлекс не закрыл вопрос.\n"
+        "Чем помочь по Квазару?"
+    )
+
+
+def is_three_svods_question(text: str) -> bool:
+    """RX_THREE_SVODS_EXPLAIN — ontology of three republican svods."""
+    low = (text or "").lower().replace("ё", "е")
+    if not low:
+        return False
+    if "три свод" in low or "3 свод" in low:
+        return True
+    if ("рефлекс" in low and "свод" in low) or ("предмет" in low and "свод" in low):
+        return True
+    if "государственный свод" in low or "республиканский свод" in low:
+        if any(w in low for w in ("что так", "какие", "три", "виды", "тип", "разниц", "отличи")):
+            return True
+    if "свод действий" in low or "свод предметов" in low or "свод рефлексов" in low:
+        return True
+    if "онтолог" in low and "свод" in low:
+        return True
+    return False
+
+
+def three_svods_fact_reply() -> str:
+    return (
+        "В республике **три** свода (в чате алиас «государственный свод» + уточнение *какой*):\n\n"
+        "1. **Свод рефлексов** (`REFLEXES.md`) — реакции агентов `RX_*`, без цены в КВАЗИ.\n"
+        "2. **Свод действий** (`SVOD.md`) — лоты **биржи** (действия с ценой в КВАЗИ).\n"
+        "3. **Свод предметов** (`ITEMS.md`) — позиции **склада / магазина** узла.\n\n"
+        "Без уточнения «Свод» обычно = свод **действий**. "
+        "Биржа наполняет склад; магазин показывает остатки предметов своего узла."
+    )
+
+
 def is_identity_question(text: str) -> bool:
     """Citizen asks who the secretary / Algonism is."""
     low = (text or "").lower().replace("ё", "е").strip()
@@ -715,22 +771,24 @@ def is_catalog_question(text: str) -> bool:
 
 
 def catalog_fact_reply() -> str:
-    """Canon: no separate catalog; only the Свод."""
+    """Canon: three svods; no fourth 'product catalog' for the exchange."""
     return (
-        "Отдельного каталога товаров/услуг **нет**.\n\n"
-        "Есть только **Республиканский Свод Вознаграждений** — **один список лотов** "
-        "(№, название, описание, единица, цена КВАЗИ, доступ, срок жизни). "
-        "Live: `GET /svod` → `lots`. Биржа = КВАЗИ; магазин узла = реальная валюта (отдельный контур)."
+        "Отдельного «четвёртого каталога» нет.\n\n"
+        "Есть **три** республиканских свода:\n"
+        "• **рефлексы** (`REFLEXES.md`) — `RX_*`;\n"
+        "• **действия** (`SVOD.md` / `GET /svod` → `lots`) — лоты биржи КВАЗИ;\n"
+        "• **предметы** (`ITEMS.md`) — склад и магазин узла.\n\n"
+        "Биржа = действия (КВАЗИ); магазин = предметы (по ЭК — реальная валюта)."
     )
 
 
 def svod_definition_reply() -> str:
     """What the Свод is — definition only, no item/rate list."""
     return (
-        "**Республиканский Свод Вознаграждений** — карта лотов биржи Квазара: "
-        "единый список (не «Разработка / Реализация»). У лота: доступ, цена в КВАЗИ, срок жизни.\n\n"
-        "Рефлексы агентов (`RX_*`) — не лоты. Отдельного каталога нет. "
-        "Актуальные лоты — live `GET /svod` → `lots` (не из MEMORY)."
+        "Без уточнения **Свод** = **Свод действий** (`SVOD.md`): карта лотов биржи "
+        "(действия с ценой в КВАЗИ, доступом, сроком жизни). Live: `GET /svod` → `lots`.\n\n"
+        "Рядом: **Свод рефлексов** (`RX_*`) и **Свод предметов** (склад/магазин). "
+        "Рефлексы и предметы — не лоты действий."
     )
 
 
@@ -875,19 +933,292 @@ def svod_fact_reply(api_key: str = "") -> str:
             raise RuntimeError("GET /svod empty lots")
 
         body = (
-            f"**{title}** — один список лотов (live `GET /svod` → `lots`). "
-            "Отдельного каталога нет. Рефлексы агентов ≠ лоты.\n\n"
-            "**Лоты:**\n" + "\n".join(lots_lines) + "\n\n"
-            "YouTube (лайки, intro, auto-reply, quazar-event-log) и знакомство — не Свод."
+            f"**{title}** — **Свод действий** (live `GET /svod` → `lots`). "
+            "Рядом: Свод рефлексов (`RX_*`) и Свод предметов (склад/магазин).\n\n"
+            "**Лоты действий:**\n" + "\n".join(lots_lines) + "\n\n"
+            "YouTube (лайки, intro, event-log) — не свод действий."
         )
         return body
     except Exception as e:
         log(f"SVOD_FETCH_FAIL {e}")
         return (
-            f"**{title}** хранится в Postgres Quazar; источник истины — live `GET /svod` → `lots`.\n"
-            "Сейчас live-запрос не удался — не пересказываю захардкоженные ставки/позиции.\n"
-            "Отдельного каталога товаров/услуг нет. Повтори вопрос чуть позже."
+            f"**{title}** (Свод действий) — live `GET /svod` → `lots`.\n"
+            "Сейчас live-запрос не удался — не пересказываю захардкоженные ставки.\n"
+            "Повтори вопрос чуть позже."
         )
+
+
+def match_fact_reflex(content: str, chat_key: str = "") -> tuple[str, str] | None:
+    """
+    Local map from Republic Svod of Reflexes (fact replies only).
+    Canon: docs/algonism/REFLEXES.md. OpenRouter is NOT used here.
+    Returns (RX_code, reply) or None.
+    """
+    if is_presence_question(content):
+        return ("RX_PRESENCE_PING", presence_fact_reply())
+    if is_three_svods_question(content):
+        return ("RX_THREE_SVODS_EXPLAIN", three_svods_fact_reply())
+    if is_identity_question(content):
+        return ("RX_STATUS_NAVIGATE", identity_fact_reply())
+    if is_hermes_question(content):
+        return ("RX_STATUS_NAVIGATE", hermes_fact_reply())
+    if is_catalog_question(content):
+        return ("RX_THREE_SVODS_EXPLAIN", catalog_fact_reply())
+    if is_svod_definition_question(content):
+        return ("RX_SVOD_EXPLAIN", svod_definition_reply())
+    if is_svod_question(content):
+        return ("RX_SVOD_EXPLAIN", svod_fact_reply(chat_key))
+    return None
+
+
+def openrouter_unavailable_reply() -> str:
+    return (
+        "Сейчас не могу развернуть свободный ответ: внешний LLM (OpenRouter) недоступен.\n"
+        "По **Своду рефлексов** отвечаю локально на факты узла "
+        "(кто я, три свода, Свод действий/лоты, YouTube/почта через связного, Cursor, юрист).\n"
+        "Уточни вопрос по Квазару — или обновите ключ OpenRouter для fallback."
+    )
+
+
+# --- Phase 2: local law search (awaken / laws.json) before OpenRouter ---
+
+_LAW_FILE_ALIASES = {
+    "constitution": ("конституц", "constitution"),
+    "ek": ("экономическ", "эк ", " эк.", "бирж", "магазин", "квази", "резерв"),
+    "adk": ("административн", "адк", "мэр", "гражданств", "паспорт", "узел"),
+    "kva": ("агент", "секретар", "рефлекс", "ква "),
+    "kgps": ("статус", "кгпс", "страж", "судья", "айя", "иерарх"),
+    "spk": ("суд", "иск", "спор", "спк"),
+    "ethical": ("этическ", "этик"),
+    "izk": ("избират", "изк", "выбор", "референд"),
+    "kbo": ("безопасност", "кбо", "сб "),
+    "svod": ("свод действий", "свод вознагражд", "лот", "svod"),
+    "reflexes": ("рефлекс", "rx_"),
+    "items": ("предмет", "склад", "items"),
+}
+
+_LAW_TITLE = {
+    "constitution": "Конституция",
+    "ek": "Экономический кодекс (ЭК)",
+    "adk": "Административный кодекс (АдК)",
+    "kva": "Кодекс взаимодействия с агентами (КВА)",
+    "kgps": "Кодекс гражданских прав и статусов (КГПС)",
+    "spk": "Судебно-процессуальный кодекс (СПК)",
+    "ethical": "Этический кодекс",
+    "izk": "Избирательный кодекс (ИЗК)",
+    "kbo": "Кодекс безопасности (КБО)",
+    "svod": "Свод действий (SVOD)",
+    "reflexes": "Свод рефлексов (REFLEXES)",
+    "items": "Свод предметов (ITEMS)",
+}
+
+
+def _laws_corpus() -> dict[str, str]:
+    """Prefer awaken package; fallback to on-disk laws cache + local three-svod files."""
+    out: dict[str, str] = {}
+    if isinstance(_CORE_AWAKEN, dict):
+        laws = _CORE_AWAKEN.get("laws") or {}
+        if isinstance(laws, dict):
+            for k, v in laws.items():
+                if isinstance(v, str) and v.strip():
+                    out[str(k).lower()] = v
+    if not out:
+        cache = Path("/var/lib/quazar/algonism/laws.json")
+        if cache.exists():
+            try:
+                raw = json.loads(cache.read_text(encoding="utf-8"))
+                if isinstance(raw, dict):
+                    for k, v in raw.items():
+                        if isinstance(v, str) and v.strip():
+                            out[str(k).lower()] = v
+            except Exception as e:
+                log(f"LAWS_CACHE_FAIL {e}")
+    # Three-svod extras from repo (may be newer than awaken cache)
+    for key, rel in (
+        ("reflexes", "docs/algonism/REFLEXES.md"),
+        ("items", "docs/algonism/ITEMS.md"),
+        ("svod", "docs/algonism/SVOD.md"),
+    ):
+        p = Path("/opt/quazar") / rel
+        if p.exists():
+            try:
+                text = p.read_text(encoding="utf-8")
+                if text.strip() and (key not in out or len(text) > len(out.get(key, ""))):
+                    out[key] = text
+            except Exception:
+                pass
+    return out
+
+
+def _tokenize_query(text: str) -> list[str]:
+    low = (text or "").lower().replace("ё", "е")
+    raw = "".join(ch if (ch.isalnum() or ch.isspace()) else " " for ch in low)
+    stop = {
+        "что", "это", "как", "для", "или", "при", "про", "есть", "если", "только",
+        "может", "можно", "нужно", "какой", "какие", "какая", "такое", "такая",
+        "меня", "мне", "наш", "нам", "все", "всё", "бы", "ли", "же", "то", "на",
+        "по", "из", "от", "до", "со", "об", "за", "не", "да", "нет", "the", "and",
+        "with", "about", "from",
+    }
+    toks = [t for t in raw.split() if len(t) >= 3 and t not in stop]
+    # keep order, unique
+    seen = set()
+    out = []
+    for t in toks:
+        if t not in seen:
+            seen.add(t)
+            out.append(t)
+    return out
+
+
+def _split_law_chunks(law_key: str, text: str) -> list[dict]:
+    """Split law markdown into article/section chunks for retrieval."""
+    text = text.replace("\r\n", "\n")
+    # Keep delimiters for Статья / ## headings
+    parts = re.split(r"(?=\n\*\*Статья\s+|\n##\s+)", "\n" + text)
+    chunks: list[dict] = []
+    for part in parts:
+        body = part.strip()
+        if len(body) < 40:
+            continue
+        heading = body.split("\n", 1)[0].strip()[:160]
+        chunks.append(
+            {
+                "law": law_key,
+                "heading": heading,
+                "body": body,
+                "low": body.lower().replace("ё", "е"),
+            }
+        )
+    if not chunks and text.strip():
+        chunks.append(
+            {
+                "law": law_key,
+                "heading": _LAW_TITLE.get(law_key, law_key),
+                "body": text.strip()[:2500],
+                "low": text.lower().replace("ё", "е"),
+            }
+        )
+    return chunks
+
+
+_LAW_CHUNK_CACHE: list[dict] | None = None
+_LAW_CHUNK_SIG: str | None = None
+
+
+def _law_chunks() -> list[dict]:
+    global _LAW_CHUNK_CACHE, _LAW_CHUNK_SIG
+    corpus = _laws_corpus()
+    sig = "|".join(f"{k}:{len(v)}" for k, v in sorted(corpus.items()))
+    if _LAW_CHUNK_CACHE is not None and _LAW_CHUNK_SIG == sig:
+        return _LAW_CHUNK_CACHE
+    chunks: list[dict] = []
+    for key, text in corpus.items():
+        chunks.extend(_split_law_chunks(key, text))
+    _LAW_CHUNK_CACHE = chunks
+    _LAW_CHUNK_SIG = sig
+    log(f"LAW_INDEX chunks={len(chunks)} files={sorted(corpus)}")
+    return chunks
+
+
+def search_laws(query: str, top_k: int = 3) -> list[tuple[float, dict]]:
+    """Score law chunks against query; return top hits."""
+    toks = _tokenize_query(query)
+    if not toks:
+        return []
+    low_q = (query or "").lower().replace("ё", "е")
+    scored: list[tuple[float, dict]] = []
+    for ch in _law_chunks():
+        score = 0.0
+        body = ch["low"]
+        for t in toks:
+            if t in body:
+                score += 1.0 + min(2.0, body.count(t) * 0.15)
+        # boost if query points at a known code file
+        for law_key, aliases in _LAW_FILE_ALIASES.items():
+            if ch["law"] == law_key and any(a in low_q for a in aliases):
+                score += 2.5
+                break
+        if score <= 0:
+            continue
+        # Prefer compact article-sized hits
+        if 80 <= len(ch["body"]) <= 1800:
+            score += 0.4
+        scored.append((score, ch))
+    scored.sort(key=lambda x: (-x[0], len(x[1]["body"])))
+    return scored[:top_k]
+
+
+def format_law_cite(hits: list[tuple[float, dict]], query: str) -> str:
+    lines = [
+        "По **законам узла** (локальный поиск по пакету awaken / `GET /law`, без OpenRouter):",
+        "",
+    ]
+    for score, ch in hits:
+        title = _LAW_TITLE.get(ch["law"], ch["law"])
+        heading = ch["heading"]
+        # Short excerpt: first ~500 chars of chunk, keep article line
+        excerpt = ch["body"].strip()
+        if len(excerpt) > 520:
+            excerpt = excerpt[:500].rstrip() + "…"
+        lines.append(f"**{title}** — `{ch['law']}` · {heading}")
+        lines.append(excerpt)
+        lines.append("")
+    lines.append(
+        "_Это цитата/выдержка, не приговор Суда. Сложное толкование — к Агенту Юриста._"
+    )
+    return "\n".join(lines).strip()
+
+
+def looks_like_law_question(text: str) -> bool:
+    """Soft detector: worth trying local law search."""
+    low = (text or "").lower().replace("ё", "е")
+    if not low or len(low) < 8:
+        return False
+    if is_presence_question(text) or is_identity_question(text) or is_three_svods_question(text):
+        return False
+    keys = (
+        "закон", "статья", "конституц", "кодекс", "по закону", "норма",
+        "правов", "разрешено", "запрещено", "можно ли", "имеет право",
+        "экономическ", "административн", "кгпс", "биржа", "магазин",
+        "гражданств", "паспорт", "мэр", "страж", "судья", "резерв",
+        "агент", "сб ", "квитан", "штраф", "иск ",
+    )
+    return any(k in low for k in keys)
+
+
+def hard_lawyer_only(text: str) -> bool:
+    """Cases that must go to Lawyer agent, not light Secretary cite."""
+    low = (text or "").lower().replace("ё", "е")
+    keys = (
+        "юрист", "агент юрист", "drift", "расхожд", "вынеси приговор",
+        "проголосуй", "измени конституц", "поменяй закон", "границы алгонизм",
+        "кто виноват", "назначь наказан",
+    )
+    return any(k in low for k in keys)
+
+
+def try_local_law_cite(text: str) -> tuple[str, str] | None:
+    """
+    RX_LAW_CITE (light): Secretary cites local law corpus.
+    Returns (RX_LAW_CITE, reply) or None if confidence too low.
+    """
+    if hard_lawyer_only(text):
+        return None
+    if not looks_like_law_question(text) and not wants_lawyer(text):
+        return None
+    hits = search_laws(text, top_k=3)
+    if not hits:
+        return None
+    best = hits[0][0]
+    # Confidence: need a real match, not noise
+    if best < 2.0:
+        return None
+    # Keep only hits close to best
+    strong = [(s, c) for s, c in hits if s >= max(2.0, best - 1.5)]
+    if not strong:
+        return None
+    return ("RX_LAW_CITE", format_law_cite(strong[:2], text))
 
 
 def wants_youtube(text: str) -> bool:
@@ -1421,12 +1752,13 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
                 log("SEND_FAIL")
             return
 
-    if is_identity_question(content):
-        log("IDENTITY_FACT_REPLY")
-        reply = identity_fact_reply()
-        if qd is not None and not introduced:
-            # Не дублируем intro: фраза пробуждения уже содержит самоидентификацию.
-            pass
+    matched = match_fact_reflex(content, chat_key)
+    if matched:
+        rx_code, reply = matched
+        log(f"LOCAL_REFLEX {rx_code}")
+        # Identity/awakening already self-introduces — do not prepend intro.
+        if qd is not None and not introduced and not is_identity_question(content):
+            reply = qd.intro_text("chat") + "\n\n" + reply
         if send_chat(reply):
             answered.add(mid)
             st["answered_ids"] = list(answered)
@@ -1434,14 +1766,16 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
             save_state(st)
             if qd is not None:
                 qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
-            log(f"ANSWERED {mid[:8]} via=identity_fact")
+            log(f"ANSWERED {mid[:8]} via={rx_code}")
         else:
             log("SEND_FAIL")
         return
 
-    if is_hermes_question(content):
-        log("HERMES_FACT_REPLY")
-        reply = hermes_fact_reply()
+    # Phase 2: local law cite from awaken/laws before Lawyer / OpenRouter
+    law_matched = try_local_law_cite(content)
+    if law_matched:
+        rx_code, reply = law_matched
+        log(f"LOCAL_REFLEX {rx_code}")
         if qd is not None and not introduced:
             reply = qd.intro_text("chat") + "\n\n" + reply
         if send_chat(reply):
@@ -1451,7 +1785,7 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
             save_state(st)
             if qd is not None:
                 qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
-            log(f"ANSWERED {mid[:8]} via=hermes_fact")
+            log(f"ANSWERED {mid[:8]} via={rx_code}")
         else:
             log("SEND_FAIL")
         return
@@ -1513,57 +1847,6 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
             log("SEND_FAIL")
         return
 
-    if is_catalog_question(content):
-        log("CATALOG_FACT_REPLY")
-        reply = catalog_fact_reply()
-        if qd is not None and not introduced:
-            reply = qd.intro_text("chat") + "\n\n" + reply
-        if send_chat(reply):
-            answered.add(mid)
-            st["answered_ids"] = list(answered)
-            st["last_id"] = mid
-            save_state(st)
-            if qd is not None:
-                qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
-            log(f"ANSWERED {mid[:8]} via=catalog_fact")
-        else:
-            log("SEND_FAIL")
-        return
-
-    if is_svod_definition_question(content):
-        log("SVOD_DEFINITION_REPLY")
-        reply = svod_definition_reply()
-        if qd is not None and not introduced:
-            reply = qd.intro_text("chat") + "\n\n" + reply
-        if send_chat(reply):
-            answered.add(mid)
-            st["answered_ids"] = list(answered)
-            st["last_id"] = mid
-            save_state(st)
-            if qd is not None:
-                qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
-            log(f"ANSWERED {mid[:8]} via=svod_definition")
-        else:
-            log("SEND_FAIL")
-        return
-
-    if is_svod_question(content):
-        log("SVOD_FACT_REPLY")
-        reply = svod_fact_reply(chat_key)
-        if qd is not None and not introduced:
-            reply = qd.intro_text("chat") + "\n\n" + reply
-        if send_chat(reply):
-            answered.add(mid)
-            st["answered_ids"] = list(answered)
-            st["last_id"] = mid
-            save_state(st)
-            if qd is not None:
-                qd.mark_introduced("chat", peer_id, display_name=author, meta={"lastMessageId": mid})
-            log(f"ANSWERED {mid[:8]} via=svod_fact")
-        else:
-            log("SEND_FAIL")
-        return
-
     if wants_cursor(content):
         log("CURSOR_DELEGATE")
         result = ask_cursor(content, author)
@@ -1575,26 +1858,28 @@ def process_once(st: dict, chat_key: str, or_key: str, models: list[str]) -> Non
     else:
         idx = next(i for i, x in enumerate(msgs) if x.get("id") == mid)
         history = msgs[: idx + 1]
-        # inject dialogue policy + status matrix into LLM
+        # Local reflex map already missed → OpenRouter fallback only
         extra = status_extra
         if qd is not None:
             extra = extra + "\n\n" + qd.dialogue_instructions("chat", introduced)
         reply = generate_reply(or_key, models, history, f"{author}: {content}", policy_extra=extra)
         if not reply:
-            log("NO_REPLY_LLM")
-            return
-        low = reply.lower()
-        if ("cursor" in content.lower() or "курсор" in content.lower()) and (
-            "не могу" in low and ("terminal" in low or "терминал" in low)
-        ):
-            log("CURSOR_FORCE_AFTER_REFUSAL")
-            result = ask_cursor(content, author)
-            reply = cursor_chat_status(result, content)
-        if qd is not None and not introduced:
-            # ensure intro present if model forgot
-            intro = qd.intro_text("chat")
-            if "алгонизм" not in low and "квазар" not in low:
-                reply = intro + "\n\n" + reply
+            log("NO_REPLY_LLM → local status notice")
+            reply = openrouter_unavailable_reply()
+            if qd is not None and not introduced:
+                reply = qd.intro_text("chat") + "\n\n" + reply
+        else:
+            low = reply.lower()
+            if ("cursor" in content.lower() or "курсор" in content.lower()) and (
+                "не могу" in low and ("terminal" in low or "терминал" in low)
+            ):
+                log("CURSOR_FORCE_AFTER_REFUSAL")
+                result = ask_cursor(content, author)
+                reply = cursor_chat_status(result, content)
+            if qd is not None and not introduced:
+                intro = qd.intro_text("chat")
+                if "алгонизм" not in low and "квазар" not in low:
+                    reply = intro + "\n\n" + reply
 
     if send_chat(reply):
         answered.add(mid)

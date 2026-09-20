@@ -81,6 +81,27 @@ impl EventValidator {
             .ok_or_else(|| ValidationError::MissingRequiredField(field.to_string()))
     }
 
+    /// Action lots use `svod_code`; item lots use `item_code` (exchange dual-svod board).
+    fn require_svod_or_item(data: &Value) -> Result<(), ValidationError> {
+        let has_svod = data
+            .get("svod_code")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some();
+        let has_item = data
+            .get("item_code")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .is_some();
+        if has_svod || has_item {
+            Ok(())
+        } else {
+            Err(ValidationError::MissingRequiredField(
+                "svod_code|item_code".into(),
+            ))
+        }
+    }
+
     pub fn validate_citizen_name(name: &str, existing_names: &[String]) -> Result<(), ValidationError> {
         let normalized = normalize_and_validate_citizen_name(name)
             .map_err(|msg| ValidationError::InvalidCitizenName(msg.to_string()))?;
@@ -507,50 +528,51 @@ impl EventValidator {
             | QuazarEventType::ExchangeRequestVerified
             | QuazarEventType::ExchangeRequestRejected => {
                 Self::require_str(data, "request_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::ExchangeListingOpened => {
                 Self::require_str(data, "listing_id")?;
                 Self::require_str(data, "request_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::ExchangeDealOpened
             | QuazarEventType::ExchangeDealCancelled
             | QuazarEventType::ExchangeDeliveryConfirmed
-            | QuazarEventType::ExchangeSettled => {
+            | QuazarEventType::ExchangeSettled
+            | QuazarEventType::ExchangeItemProcured => {
                 Self::require_str(data, "deal_id")?;
                 Self::require_str(data, "listing_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::ExchangeInventoryAdjusted => {
                 Self::require_str(data, "citizen_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::ExchangeNeedCreated => {
                 Self::require_str(data, "need_id")?;
                 Self::require_str(data, "citizen_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::ExchangeAgentListed => {
                 Self::require_str(data, "need_id")?;
                 Self::require_str(data, "listing_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::ExchangeAgentDeal => {
                 Self::require_str(data, "deal_id")?;
                 Self::require_str(data, "listing_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::LotExpired => {
                 Self::require_str(data, "listing_id")?;
-                Self::require_str(data, "svod_code")?;
+                Self::require_svod_or_item(data)?;
                 Ok(())
             }
             QuazarEventType::SvodServiceCreated

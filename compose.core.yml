@@ -6,7 +6,7 @@
 # Equivalent default today: docker compose -f docker-compose.yml up -d
 # (this file is the explicit “core install” entrypoint + shared network name).
 
-name: quazar-core
+name: quazar
 
 services:
   postgres:
