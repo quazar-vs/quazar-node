@@ -2039,7 +2039,8 @@ body.modal-open { overflow: hidden; }
         <a href="#about">О нас</a>
         <a href="#citizens" id="citizensNavLink">Граждане</a>
         <a href="#chat">Чат</a>
-        <a href="/constitution.html" class="constitution-link">Конституция</a>
+        <a href="/documents.html#constitution" class="constitution-link">Конституция</a>
+        <a href="/documents.html">Документы</a>
         <a href="#apply">Заявки</a>
         <a href="#register" class="nav-register" id="registerLink">Авторизоваться</a>
       </nav>
@@ -2055,7 +2056,7 @@ body.modal-open { overflow: hidden; }
           <p class="hero-subtitle">«Объединяя усилия, создаем будущее» — подтвердите доступ и войдите в Квазар.</p>
           <div class="hero-cta">
             <a href="#apply" class="btn btn-primary cta-apply">Войти / подать заявку</a>
-            <a href="/constitution.html" class="btn btn-secondary constitution-link">Читать Конституцию</a>
+            <a href="/documents.html#constitution" class="btn btn-secondary constitution-link">Читать Конституцию</a>
           </div>
           <div class="citizen-counter" style="position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0,0,0,0)" aria-hidden="true">
             <span class="count" id="citizenCount">—</span>
@@ -2429,8 +2430,9 @@ body.modal-open { overflow: hidden; }
         </div>
         <div class="footer-links">
           <a href="/status" rel="noopener">Статус узла</a>
-          <a href="/constitution.html" class="constitution-link">Конституция</a>
-          <a href="/algonism/identity" rel="noopener">алгонизм</a>
+          <a href="/documents.html#constitution" class="constitution-link">Конституция</a>
+          <a href="/documents.html">Документы</a>
+          <a href="/documents.html#dna">ДНК Алгонизма</a>
           <a href="#apply">Портал заявок</a>
           <a href="mailto:quazardr@gmail.com">quazardr@gmail.com</a>
         </div>
@@ -2457,7 +2459,7 @@ body.modal-open { overflow: hidden; }
             <div class="form-group">
               <div class="checkbox-group">
                 <input type="checkbox" id="regConsent" name="consent" value="yes" required>
-                <label for="regConsent">Я согласен(на) с <a href="/constitution.html" class="constitution-link" target="_blank" rel="noopener noreferrer">Конституцией Квазара</a> и обработкой данных</label>
+                <label for="regConsent">Я согласен(на) с <a href="/documents.html#constitution" class="constitution-link" target="_blank" rel="noopener noreferrer">Конституцией Квазара</a> и обработкой данных</label>
               </div>
               <div class="error-msg" id="regConsentError">Необходимо дать согласие</div>
             </div>
@@ -2509,7 +2511,7 @@ body.modal-open { overflow: hidden; }
         <div class="constitution-content" id="constitutionContent" hidden></div>
       </div>
       <div class="constitution-footer">
-        <a href="/constitution.html">На портале</a> · <a href="/CONSTITUTION_QUAZAR.md">CONSTITUTION_QUAZAR.md</a> · <a href="https://github.com/successful707440/constitution" target="_blank" rel="noopener noreferrer">репозиторий</a>
+        <a href="/documents.html">Все документы</a> · <a href="/documents.html#constitution">Конституция с узла</a>
       </div>
     </div>
   </div>
@@ -3006,11 +3008,28 @@ body.modal-open { overflow: hidden; }
         : null;
 
       function loadConstitution() {
-        if (constitutionCache) {
-          showContent(constitutionCache);
-        } else {
-          showStatus('Текст Конституции не найден.', true);
-        }
+        showStatus('Загружаю Конституцию с узла…', false);
+        fetch('/algonism/documents/constitution', {
+          headers: { Accept: 'text/markdown, text/plain, */*' }
+        })
+          .then(function (r) {
+            if (!r.ok) throw new Error('HTTP ' + r.status);
+            return r.text();
+          })
+          .then(function (md) {
+            constitutionCache = parseMarkdown(md);
+            showContent(constitutionCache);
+          })
+          .catch(function () {
+            if (constitutionCache || (constitutionSource && constitutionSource.textContent.trim())) {
+              if (!constitutionCache && constitutionSource) {
+                constitutionCache = parseMarkdown(constitutionSource.textContent.trim());
+              }
+              showContent(constitutionCache);
+            } else {
+              showStatus('Не удалось загрузить Конституцию с узла. Откройте раздел Документы.', true);
+            }
+          });
       }
 
       function openConstitution(e) {
@@ -3046,13 +3065,13 @@ body.modal-open { overflow: hidden; }
       function goToConstitutionFile() {
         nav.classList.remove('open');
         menuToggle.textContent = '☰';
-        window.location.href = '/constitution.html';
+        window.location.href = '/documents.html#constitution';
       }
 
       document.querySelectorAll('.constitution-link').forEach(function (link) {
         link.addEventListener('click', function (e) {
           var href = link.getAttribute('href') || '';
-          if (href.indexOf('constitution.html') !== -1 || href.indexOf('CONSTITUTION_QUAZAR.md') !== -1) {
+          if (href.indexOf('documents.html') !== -1 || href.indexOf('constitution.html') !== -1 || href.indexOf('CONSTITUTION_QUAZAR.md') !== -1) {
             nav.classList.remove('open');
             menuToggle.textContent = '☰';
             return;

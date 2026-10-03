@@ -320,6 +320,11 @@ async fn main() {
         .route("/health", get(health_handler))
         .route("/algonism/identity", get(algonism::identity_handler))
         .route("/algonism/awaken", get(algonism::awaken_handler))
+        .route("/algonism/documents", get(algonism::documents_catalog_handler))
+        .route(
+            "/algonism/documents/:id",
+            get(algonism::document_body_handler),
+        )
         .route("/law/:filename", get(algonism::law_handler))
         .route("/citizen/apply", post(apply_for_citizenship))
         .route("/citizen/apply/citizenship", post(apply_for_citizenship))

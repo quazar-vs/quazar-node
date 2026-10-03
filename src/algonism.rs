@@ -55,6 +55,51 @@ const LAW_KEY_FILES: &[(&str, &str)] = &[
     ("svod", "SVOD.md"),
 ];
 
+/// Public catalog titles (acquaintance on the website — not private GitHub).
+const DOC_TITLES: &[(&str, &str)] = &[
+    ("constitution", "Конституция Квазара"),
+    ("dna", "ДНК Алгонизма"),
+    ("adk", "Административно-процедурный кодекс (АДК)"),
+    ("ek", "Экономический кодекс (ЭК)"),
+    ("ethical", "Этический кодекс"),
+    ("izk", "Избирательный кодекс (ИЗК)"),
+    ("kbo", "Кодекс безопасности обороны (КБО)"),
+    ("kgps", "Кодекс гражданства и публичного статуса (КГПС)"),
+    ("kva", "Кодекс взаимодействия агентов (КВА)"),
+    ("spk", "Судебно-процессуальный кодекс (СПК)"),
+    ("svod", "Республиканский свод действий (SVOD)"),
+];
+
+fn doc_title(id: &str) -> String {
+    DOC_TITLES
+        .iter()
+        .find(|(k, _)| *k == id)
+        .map(|(_, t)| (*t).to_string())
+        .unwrap_or_else(|| id.to_string())
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentEntry {
+    pub id: String,
+    pub title: String,
+    pub filename: String,
+    pub kind: String,
+    pub bytes: usize,
+    pub sha256: String,
+    /// Same-origin path to fetch markdown body.
+    pub content_path: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct DocumentsCatalogResponse {
+    pub identity: String,
+    pub source: String,
+    pub dna_sha: String,
+    pub laws_sha: String,
+    pub timestamp: i64,
+    pub documents: Vec<DocumentEntry>,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct IdentityResponse {
     pub identity: String,
@@ -619,6 +664,110 @@ pub async fn identity_handler(State(state): State<Arc<AppState>>) -> Response {
         })
         .into_response(),
         Err(e) => response::service_unavailable(e),
+    }
+}
+
+/// GET /algonism/documents — public catalog of active law + DNA (node cache, not private GitHub).
+pub async fn documents_catalog_handler(State(state): State<Arc<AppState>>) -> Response {
+    let pkg = match ensure_package(&state).await {
+        Ok(p) => p,
+        Err(e) => return response::service_unavailable(e),
+    };
+
+    let mut documents = Vec::new();
+    // Constitution first for acquaintance UX.
+    let order = [
+        "constitution",
+        "dna",
+        "adk",
+        "ek",
+        "ethical",
+        "izk",
+        "kbo",
+        "kgps",
+        "kva",
+        "spk",
+        "svod",
+    ];
+    for id in order {
+        if id == "dna" {
+            documents.push(DocumentEntry {
+                id: "dna".into(),
+                title: doc_title("dna"),
+                filename: "DNA_ALGONISM.md".into(),
+                kind: "dna".into(),
+                bytes: pkg.dna.len(),
+                sha256: pkg.dna_sha.clone(),
+                content_path: "/algonism/documents/dna".into(),
+            });
+            continue;
+        }
+        let Some(text) = pkg.laws.get(id) else {
+            continue;
+        };
+        let filename = LAW_KEY_FILES
+            .iter()
+            .find(|(k, _)| *k == id)
+            .map(|(_, f)| (*f).to_string())
+            .unwrap_or_else(|| format!("{id}.md"));
+        documents.push(DocumentEntry {
+            id: id.to_string(),
+            title: doc_title(id),
+            filename,
+            kind: "law".into(),
+            bytes: text.len(),
+            sha256: sha256_hex(text),
+            content_path: format!("/algonism/documents/{id}"),
+        });
+    }
+
+    Json(DocumentsCatalogResponse {
+        identity: "Алгонизм".into(),
+        source: pkg.source,
+        dna_sha: pkg.dna_sha,
+        laws_sha: pkg.laws_sha,
+        timestamp: pkg.timestamp,
+        documents,
+    })
+    .into_response()
+}
+
+/// GET /algonism/documents/:id — markdown body of one catalog document.
+pub async fn document_body_handler(
+    State(state): State<Arc<AppState>>,
+    AxumPath(id): AxumPath<String>,
+) -> Response {
+    let id = id.trim().to_lowercase();
+    if id.is_empty()
+        || !id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+    {
+        return response::bad_request("Invalid document id");
+    }
+
+    let pkg = match ensure_package(&state).await {
+        Ok(p) => p,
+        Err(e) => return response::service_unavailable(e),
+    };
+
+    let text = if id == "dna" {
+        Some(pkg.dna)
+    } else {
+        pkg.laws.get(&id).cloned()
+    };
+
+    match text {
+        Some(body) if !body.trim().is_empty() => (
+            [(
+                axum::http::header::CONTENT_TYPE,
+                "text/markdown; charset=utf-8",
+            )],
+            body,
+        )
+            .into_response(),
+        Some(_) => response::not_found(format!("Document empty: {id}")),
+        None => response::not_found(format!("Document not found: {id}")),
     }
 }
 
