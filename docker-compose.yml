@@ -32,6 +32,7 @@ services:
     restart: always
     ports:
       - "127.0.0.1:8080:8080"
+      - "8443:8443/udp"
     volumes:
       - /var/lib/quazar/algonism:/var/lib/quazar/algonism
       - /var/lib/quazar/ss:/var/lib/quazar/ss
@@ -54,6 +55,9 @@ services:
       QUAZAR_CORS_ORIGINS: ${QUAZAR_CORS_ORIGINS:-https://quazar.website}
       QUAZAR_NETWORK_URL: ${QUAZAR_NETWORK_URL:-}
       QUAZAR_BOOTSTRAP_PEERS: ${QUAZAR_BOOTSTRAP_PEERS:-}
+      QUAZAR_QUIC_PORT: ${QUAZAR_QUIC_PORT:-8443}
+      QUAZAR_QUIC_ADVERTISE: ${QUAZAR_QUIC_ADVERTISE:-}
+      QUAZAR_PUBLIC_URL: ${QUAZAR_PUBLIC_URL:-}
       RUST_LOG: ${RUST_LOG:-info}
       SMTP_HOST: ${SMTP_HOST:-}
       SMTP_PORT: ${SMTP_PORT:-587}

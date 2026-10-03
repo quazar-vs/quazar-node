@@ -62,8 +62,14 @@ impl NodeRegistry {
             INSERT INTO nodes (id, url, public_key, status, last_seen, version, created_at)
             VALUES ($1, $2, $3, $4, $5, $6, COALESCE((SELECT created_at FROM nodes WHERE id = $1), $7))
             ON CONFLICT (id) DO UPDATE SET
-                url = EXCLUDED.url,
-                public_key = EXCLUDED.public_key,
+                url = CASE
+                    WHEN EXCLUDED.url IS NULL OR TRIM(EXCLUDED.url) = '' THEN nodes.url
+                    ELSE EXCLUDED.url
+                END,
+                public_key = CASE
+                    WHEN EXCLUDED.public_key IS NULL OR TRIM(EXCLUDED.public_key) = '' THEN nodes.public_key
+                    ELSE EXCLUDED.public_key
+                END,
                 status = EXCLUDED.status,
                 last_seen = EXCLUDED.last_seen,
                 version = EXCLUDED.version

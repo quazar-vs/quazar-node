@@ -251,7 +251,6 @@ fn allows_online_citizen(path: &str) -> bool {
         // Shop browse (buy still requires status=active inside handler)
         || path == "/api/shop/items"
         || path.starts_with("/api/shop/items/")
-        || path == "/api/shop/balance"
         || path == "/api/shop/warehouse"
 }
 
@@ -342,20 +341,31 @@ pub async fn auth_middleware(
         let node_allowed = *method == Method::GET
             && (path == "/events"
                 || path == "/blocks"
-                || path == "/keys/internal/export")
+                || path == "/keys/internal/export"
+                || path == "/p2p/trusted"
+                || path.starts_with("/p2p/tip/")
+                || path == "/api/shop/warehouse"
+                || path == "/api/shop/items"
+                || path.starts_with("/api/shop/items/"))
             || *method == Method::POST
                 && (path == "/events/gossip"
                     || path == "/chat/gossip"
                     || path == "/keys/internal/upsert"
                     || path == "/keys/internal/revoke"
-                    || path == "/algonism/dna/reload");
+                    || path == "/algonism/dna/reload"
+                    || path == "/p2p/announce"
+                    || path == "/p2p/relay"
+                    || path == "/api/shop/warehouse/debit"
+                    || path == "/api/shop/warehouse/stock");
         if node_allowed {
             tracing::debug!(path = %path, "node secret accepted");
             req.extensions_mut().insert(AuthContext::node());
             return next.run(req).await;
         }
         tracing::warn!(path = %path, method = %method, "node secret rejected for route");
-        return response::forbidden("Node secret valid only for GET /events, GET /blocks, GET /keys/internal/export and POST /events/gossip, /chat/gossip, /keys/internal/*, /algonism/dna/reload");
+        return response::forbidden(
+            "Node secret: peer sync (/events,/blocks,/p2p/*,gossip,keys/internal,dna/reload) or shop warehouse APIs",
+        );
     }
 
     let key_data = KeyStore::validate_key(&state.db, &api_key).await;

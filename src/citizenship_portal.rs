@@ -757,9 +757,9 @@ async fn update_application_review_status(
             sqlx::query(
                 r#"
                 INSERT INTO citizens
-                    (id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email, email_verified)
+                    (id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email, email_verified, home_node_id)
                 VALUES
-                    ($1, $2, $3, $4, $5, $6, TRUE, $7, FALSE, $8, TRUE)
+                    ($1, $2, $3, $4, $5, $6, TRUE, $7, FALSE, $8, TRUE, $9)
                 "#,
             )
             .bind(&citizen_id)
@@ -770,17 +770,36 @@ async fn update_application_review_status(
             .bind(now_ts)
             .bind(expires_at)
             .bind(&email)
+            .bind(&state.node_id)
             .execute(&mut *tx)
             .await?;
 
             sqlx::query(
                 r#"
-                INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid)
-                VALUES ($1, $2, $3, $4, TRUE)
+                INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid, home_node_id)
+                VALUES ($1, $2, $3, $4, TRUE, $5)
                 "#,
             )
             .bind(&passport_id)
             .bind(&citizen_id)
+            .bind(now_ts)
+            .bind(expires_at)
+            .bind(&state.node_id)
+            .execute(&mut *tx)
+            .await?;
+
+            sqlx::query(
+                r#"
+                INSERT INTO city_passes (
+                    id, citizen_id, passport_id, node_id, kind, status, issued_by, issued_at, expires_at
+                ) VALUES ($1, $2, $3, $4, 'home', 'active', $5, $6, $7)
+                "#,
+            )
+            .bind(format!("pass_home_{passport_id}"))
+            .bind(&citizen_id)
+            .bind(&passport_id)
+            .bind(&state.node_id)
+            .bind(&auth.citizen_name)
             .bind(now_ts)
             .bind(expires_at)
             .execute(&mut *tx)
@@ -854,6 +873,7 @@ async fn update_application_review_status(
             &login,
             now_ts,
             expires_at,
+            &state.node_id,
             &auth.citizen_name,
             now_ts,
         );

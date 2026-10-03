@@ -29,6 +29,7 @@ mod chat;
 mod candidate_chat;
 mod client_ip;
 mod citizen;
+mod city_pass;
 mod citizenship_application;
 mod citizenship_portal;
 mod db;
@@ -45,6 +46,9 @@ mod mayor;
 mod models;
 mod node_generator;
 mod nodes;
+mod network_seeds;
+mod p2p;
+mod p2p_quic;
 mod offices;
 mod agents;
 mod pending;
@@ -218,11 +222,17 @@ async fn main() {
                 version: "0.7.0".to_string(),
             };
             match node_registry.upsert_node(&peer).await {
-                Ok(()) => tracing::info!(peer_id = %id, url = %url, "bootstrap peer registered"),
+                Ok(()) => {
+                    tracing::info!(peer_id = %id, url = %url, "bootstrap peer registered");
+                    let _ = p2p::upsert_endpoint(&pool, id, url, "env_bootstrap").await;
+                }
                 Err(e) => tracing::warn!(peer_id = %id, error = %e, "failed to register bootstrap peer"),
             }
         }
     }
+
+    // GitHub / local seeds.json — outbound bootstrap without a privileged capital.
+    network_seeds::load_and_apply_seeds(&node_registry, &pool, &node_id).await;
 
     let trusted_proxies = client_ip::TrustedProxyCache::new(pool.clone());
     let dna = algonism::DnaMemory::new();
@@ -241,6 +251,24 @@ async fn main() {
 
     // GitHub → node cache poll (DNA + laws). Never gossiped over P2P.
     algonism::spawn_reference_poller(state.clone());
+
+    let state_bootstrap = state.clone();
+    tokio::spawn(async move {
+        // Outbound: pull trusted tips from any reachable seed, then normal sync.
+        tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+        p2p::bootstrap_pull_once(&state_bootstrap).await;
+    });
+
+    let state_announce = state.clone();
+    let announce_url = node_url.clone();
+    tokio::spawn(async move {
+        p2p::background_announce(state_announce, announce_url).await;
+    });
+
+    let state_quic = state.clone();
+    tokio::spawn(async move {
+        p2p_quic::run_listener(state_quic).await;
+    });
 
     let state_clone = state.clone();
     tokio::spawn(async move {
@@ -350,6 +378,10 @@ async fn main() {
         .route("/nodes", get(handlers::get_nodes))
         .route("/peers", post(handlers::add_peer))
         .route("/peers/network", post(handlers::add_peer_to_network))
+        .route("/p2p/announce", post(p2p::announce_handler))
+        .route("/p2p/tip/:node_id", get(p2p::tip_handler))
+        .route("/p2p/trusted", get(p2p::trusted_handler))
+        .route("/p2p/relay", post(p2p_quic::relay_http_handler))
         .route("/online", post(handlers::online_handler))
         .route("/offline", post(handlers::offline_handler))
         .route("/citizens/online", get(handlers::list_online_citizens))
@@ -406,6 +438,7 @@ async fn main() {
         .route("/api/shop/balance", get(shop::balance))
         .route("/api/shop/warehouse", get(shop::list_warehouse))
         .route("/api/shop/warehouse/stock", post(shop::stock_warehouse))
+        .route("/api/shop/warehouse/debit", post(shop::debit_warehouse))
         .route("/offices/mayor", post(offices::appoint_mayor_handler))
         .route("/offices/mayor/:node_id", get(offices::get_mayor_office))
         .route(
@@ -485,7 +518,17 @@ async fn main() {
         .route("/citizen/:id/verify", post(verify_agent))
         .route("/citizen/:id/approve", post(approve_citizen))
         .route("/citizen/:id/passport", post(issue_passport))
+        .route("/citizen/:id/passport", get(city_pass::get_passport_book_handler))
         .route("/citizen/:id/passport/revoke", post(revoke_passport))
+        .route("/city/:node_id/passes", post(city_pass::issue_visit_pass_handler))
+        .route(
+            "/city/:node_id/passes/:pass_id/revoke",
+            post(city_pass::revoke_pass_handler),
+        )
+        .route(
+            "/city/:node_id/access/:citizen_id",
+            get(city_pass::check_city_access_handler),
+        )
         .route("/candidacy/nominate", post(nominate_handler))
         // vote body: {"vote": "For" | "Against"}
         .route("/candidacy/:id/vote", post(vote_handler))

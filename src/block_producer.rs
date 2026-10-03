@@ -242,9 +242,14 @@ pub async fn sync_blocks_from_peers(state: &Arc<AppState>) {
             continue;
         }
 
-        tracing::debug!(peer_id = %peer.id, url = %peer.url, "fetching blocks from peer");
+        let Some(base) = crate::p2p::resolve_base_url(&pool, &peer.id).await else {
+            tracing::debug!(peer_id = %peer.id, "block sync skip: no dial endpoint");
+            continue;
+        };
+
+        tracing::debug!(peer_id = %peer.id, url = %base, "fetching blocks from peer");
         let response = match client
-            .get(format!("{}/blocks", peer.url))
+            .get(format!("{}/blocks", base.trim_end_matches('/')))
             .header("Authorization", format!("Bearer {}", node_secret()))
             .timeout(Duration::from_secs(5))
             .send()
@@ -252,7 +257,7 @@ pub async fn sync_blocks_from_peers(state: &Arc<AppState>) {
         {
             Ok(resp) => resp,
             Err(e) => {
-                tracing::warn!(peer = %peer.url, error = %e, "failed to connect to peer");
+                tracing::warn!(peer = %base, error = %e, "failed to connect to peer");
                 continue;
             }
         };
@@ -260,7 +265,7 @@ pub async fn sync_blocks_from_peers(state: &Arc<AppState>) {
         let body = match response.json::<ApiResponse>().await {
             Ok(body) => body,
             Err(e) => {
-                tracing::warn!(peer = %peer.url, error = %e, "failed to parse peer blocks response");
+                tracing::warn!(peer = %base, error = %e, "failed to parse peer blocks response");
                 continue;
             }
         };

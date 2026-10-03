@@ -125,34 +125,118 @@ async fn apply_passport_issued(
         .and_then(|v| v.as_i64())
         .unwrap_or(event.timestamp);
     let expires_at = require_i64(&event.data, "expires_at")?;
+    let home_node_id = event
+        .data
+        .get("home_node_id")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("QZ-NODE-1");
+    let issued_by = event.initiator.as_str();
 
     sqlx::query(
-        "INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid)
-         VALUES ($1, $2, $3, $4, TRUE)
+        "INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid, home_node_id)
+         VALUES ($1, $2, $3, $4, TRUE, $5)
          ON CONFLICT (id) DO UPDATE SET
             expires_at = EXCLUDED.expires_at,
-            is_valid = TRUE",
+            is_valid = TRUE,
+            home_node_id = COALESCE(EXCLUDED.home_node_id, passports.home_node_id)",
     )
     .bind(passport_id)
     .bind(citizen_id)
     .bind(issued_at)
     .bind(expires_at)
+    .bind(home_node_id)
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("PassportIssued projection failed for {}: {}", passport_id, e))?;
 
     sqlx::query(
-        "UPDATE citizens SET passport_issued = TRUE, passport_expires = $1, status = 'active' WHERE id = $2",
+        "UPDATE citizens SET passport_issued = TRUE, passport_expires = $1, status = 'active',
+            home_node_id = COALESCE(NULLIF(btrim(home_node_id), ''), $2)
+         WHERE id = $3",
     )
     .bind(expires_at)
+    .bind(home_node_id)
     .bind(citizen_id)
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("PassportIssued citizen update failed for {}: {}", citizen_id, e))?;
 
+    // Home city pass (пропуск города прописки).
+    sqlx::query(
+        r#"
+        UPDATE city_passes
+        SET status = 'revoked', revoked_at = $1
+        WHERE citizen_id = $2 AND kind = 'home' AND status = 'active' AND node_id <> $3
+        "#,
+    )
+    .bind(issued_at)
+    .bind(citizen_id)
+    .bind(home_node_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("PassportIssued home-pass revoke failed: {e}"))?;
+
+    let home_pass_id = format!("pass_home_{passport_id}");
+    sqlx::query(
+        r#"
+        INSERT INTO city_passes (
+            id, citizen_id, passport_id, node_id, kind, status, issued_by, issued_at, expires_at
+        ) VALUES ($1, $2, $3, $4, 'home', 'active', $5, $6, $7)
+        ON CONFLICT (id) DO NOTHING
+        "#,
+    )
+    .bind(&home_pass_id)
+    .bind(citizen_id)
+    .bind(passport_id)
+    .bind(home_node_id)
+    .bind(issued_by)
+    .bind(issued_at)
+    .bind(expires_at)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("PassportIssued home-pass insert failed: {e}"))?;
+
+    // If conflict on unique (citizen, node) active — ignore by ensuring one active.
+    let has_active: bool = sqlx::query_scalar(
+        r#"
+        SELECT EXISTS(
+            SELECT 1 FROM city_passes
+            WHERE citizen_id = $1 AND node_id = $2 AND status = 'active'
+        )
+        "#,
+    )
+    .bind(citizen_id)
+    .bind(home_node_id)
+    .fetch_one(&mut **tx)
+    .await
+    .unwrap_or(true);
+    if !has_active {
+        let alt_id = format!("pass_home_{}_{}", passport_id, issued_at);
+        sqlx::query(
+            r#"
+            INSERT INTO city_passes (
+                id, citizen_id, passport_id, node_id, kind, status, issued_by, issued_at, expires_at
+            ) VALUES ($1, $2, $3, $4, 'home', 'active', $5, $6, $7)
+            "#,
+        )
+        .bind(&alt_id)
+        .bind(citizen_id)
+        .bind(passport_id)
+        .bind(home_node_id)
+        .bind(issued_by)
+        .bind(issued_at)
+        .bind(expires_at)
+        .execute(&mut **tx)
+        .await
+        .map_err(|e| format!("PassportIssued home-pass retry failed: {e}"))?;
+    }
+
     tracing::info!(
         citizen_id = %citizen_id,
         passport_id = %passport_id,
+        home_node_id = %home_node_id,
         event_id = %event.event_id,
         "PassportIssued projected to SQL"
     );
@@ -180,6 +264,19 @@ async fn apply_passport_revoked(
     .execute(&mut **tx)
     .await
     .map_err(|e| format!("PassportRevoked citizen update failed for {}: {}", citizen_id, e))?;
+
+    sqlx::query(
+        r#"
+        UPDATE city_passes
+        SET status = 'revoked', revoked_at = $1
+        WHERE passport_id = $2 AND status = 'active'
+        "#,
+    )
+    .bind(event.timestamp)
+    .bind(passport_id)
+    .execute(&mut **tx)
+    .await
+    .map_err(|e| format!("PassportRevoked passes failed: {e}"))?;
 
     tracing::info!(
         citizen_id = %citizen_id,

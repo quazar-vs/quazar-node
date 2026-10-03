@@ -78,6 +78,7 @@ pub fn build_passport_issued_event(
     citizen_name: &str,
     issued_at: i64,
     expires_at: i64,
+    home_node_id: &str,
     initiator: &str,
     timestamp: i64,
 ) -> Event {
@@ -93,6 +94,7 @@ pub fn build_passport_issued_event(
             "citizen_id": citizen_id,
             "issued_at": issued_at,
             "expires_at": expires_at,
+            "home_node_id": home_node_id,
         }),
         previous_hash: "0".to_string(),
         signatures: vec![],
@@ -295,6 +297,7 @@ pub fn build_signed_passport_issued_event(
     citizen_name: &str,
     issued_at: i64,
     expires_at: i64,
+    home_node_id: &str,
     initiator: &str,
     timestamp: i64,
 ) -> Event {
@@ -305,6 +308,7 @@ pub fn build_signed_passport_issued_event(
         citizen_name,
         issued_at,
         expires_at,
+        home_node_id,
         initiator,
         timestamp,
     ))

@@ -42,3 +42,8 @@ bcrypt = "0.16"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "native-tls"] }
 # Prefer maintained spin; flume still pins spin 0.9 transitively (audit note if needed).
 spin = "0.12"
+quinn = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
+rcgen = "0.13"
+bytes = "1"
+

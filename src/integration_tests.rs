@@ -100,6 +100,7 @@ async fn activate_citizen_with_passport(pool: &PgPool, citizen_id: &str, citizen
         citizen_name,
         1_700_000_050,
         1_800_000_050,
+        "QZ-NODE-1",
         "system",
         1_700_000_050,
     );
@@ -283,6 +284,7 @@ async fn passport_issue_and_revoke_projection() {
         "carol",
         1_700_000_011,
         1_800_000_011,
+        "QZ-NODE-1",
         "system",
         1_700_000_011,
     );

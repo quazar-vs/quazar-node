@@ -1,0 +1,15 @@
+{
+  "version": 1,
+  "network": "quazar",
+  "updated_at": "2026-09-27",
+  "comment": "Bootstrap seeds only: trusted nodes with inbound reachability. Trust-of-record is the registry (PeerListUpdate), not this file. NAT home nodes need not appear here. Include quic:// tip when UDP 8443 is open.",
+  "seeds": [
+    {
+      "node_id": "QZ-NODE-1",
+      "endpoints": [
+        "https://quazar.website",
+        "quic://quazar.website:8443"
+      ]
+    }
+  ]
+}

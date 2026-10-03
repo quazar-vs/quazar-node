@@ -112,6 +112,8 @@ pub struct Citizen {
     pub candidate_type: Option<CandidateType>,
     /// For citizenship: `Citizen` (or unset). For role: exact elevated role.
     pub target_role: Option<String>,
+    /// City of registration (прописка).
+    pub home_node_id: Option<String>,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -128,6 +130,7 @@ struct CitizenRow {
     email_verified: bool,
     candidate_type: Option<String>,
     target_role: Option<String>,
+    home_node_id: Option<String>,
 }
 
 impl TryFrom<CitizenRow> for Citizen {
@@ -152,6 +155,9 @@ impl TryFrom<CitizenRow> for Citizen {
             candidate_type,
             target_role: row
                 .target_role
+                .filter(|s| !s.trim().is_empty()),
+            home_node_id: row
+                .home_node_id
                 .filter(|s| !s.trim().is_empty()),
         })
     }
@@ -201,6 +207,8 @@ pub struct CitizenResponse {
     pub candidate_type: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_role: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub home_node_id: Option<String>,
 }
 
 impl From<Citizen> for CitizenResponse {
@@ -218,6 +226,7 @@ impl From<Citizen> for CitizenResponse {
             email_verified: c.email_verified,
             candidate_type: c.candidate_type.map(|t| t.as_str().to_string()),
             target_role: c.target_role,
+            home_node_id: c.home_node_id,
         }
     }
 }
@@ -544,7 +553,7 @@ fn permission_denied(auth: &AuthContext) -> (StatusCode, Json<ApiResponse>) {
 }
 
 const CITIZEN_SELECT: &str =
-    "SELECT id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email_verified, candidate_type, target_role";
+    "SELECT id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email_verified, candidate_type, target_role, home_node_id";
 
 fn parse_applicant_type(raw: &str) -> Option<(String, bool)> {
     match raw.trim().to_lowercase().as_str() {
@@ -852,6 +861,7 @@ pub async fn register_citizen(
         email_verified: false,
         candidate_type: None,
         target_role: None,
+        home_node_id: None,
     };
 
     (
@@ -1118,6 +1128,7 @@ pub async fn issue_passport(
         &citizen.name,
         now,
         expires_at,
+        &state.node_id,
         &auth.citizen_name,
         now,
     );
@@ -1884,6 +1895,7 @@ pub async fn apply_for_citizenship(
                 email_verified,
                 candidate_type: cand_type.map(|s| s.to_string()),
                 target_role: cand_target.map(|s| s.to_string()),
+                home_node_id: None,
             },
             application_id,
             message,
@@ -2363,18 +2375,33 @@ pub async fn approve_citizen(
 
     if let Err(e) = sqlx::query(
         r#"
-        INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid)
-        VALUES ($1, $2, $3, $4, TRUE)
+        INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid, home_node_id)
+        VALUES ($1, $2, $3, $4, TRUE, $5)
         "#,
     )
     .bind(&passport_id)
     .bind(&citizen.id)
     .bind(now.timestamp())
     .bind(expires_at)
+    .bind(&state.node_id)
     .execute(&state.db)
     .await
     {
         return CitizenError::DatabaseError(e.to_string()).to_response();
+    }
+
+    if let Err(e) = crate::city_pass::ensure_home_registration(
+        &state.db,
+        &citizen.id,
+        &passport_id,
+        &state.node_id,
+        now.timestamp(),
+        expires_at,
+        &auth.citizen_name,
+    )
+    .await
+    {
+        return CitizenError::DatabaseError(e).to_response();
     }
 
     let _ = sqlx::query(
@@ -2408,6 +2435,7 @@ pub async fn approve_citizen(
         &citizen.name,
         now.timestamp(),
         expires_at,
+        &state.node_id,
         &auth.citizen_name,
         now.timestamp(),
     );
@@ -2634,6 +2662,7 @@ mod status_tests {
             email_verified: true,
             candidate_type: None,
             target_role: None,
+            home_node_id: None,
         };
         assert!(digital.is_digital);
         assert!(!Citizen {
@@ -2664,6 +2693,7 @@ mod status_tests {
             email_verified: false,
             candidate_type: Some(crate::types::CandidateType::Citizenship),
             target_role: Some("Citizen".into()),
+            home_node_id: None,
         };
         assert!(human.role == Role::Candidate);
         assert!(!human.is_digital);

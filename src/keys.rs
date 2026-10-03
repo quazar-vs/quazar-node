@@ -225,10 +225,10 @@ pub async fn push_key_to_peers(state: &AppState, key: &str, role: Role, citizen_
         if peer.id == state.node_id {
             continue;
         }
-        let url = format!(
-            "{}/keys/internal/upsert",
-            peer.url.trim_end_matches('/')
-        );
+        let Some(base) = crate::p2p::resolve_base_url(&state.db, &peer.id).await else {
+            continue;
+        };
+        let url = format!("{}/keys/internal/upsert", base.trim_end_matches('/'));
         match client
             .post(&url)
             .header("Authorization", format!("Bearer {}", node_secret()))
@@ -269,10 +269,10 @@ async fn push_key_revoke_to_peers(state: &AppState, key: &str) {
         if peer.id == state.node_id {
             continue;
         }
-        let url = format!(
-            "{}/keys/internal/revoke",
-            peer.url.trim_end_matches('/')
-        );
+        let Some(base) = crate::p2p::resolve_base_url(&state.db, &peer.id).await else {
+            continue;
+        };
+        let url = format!("{}/keys/internal/revoke", base.trim_end_matches('/'));
         let _ = client
             .post(&url)
             .header("Authorization", format!("Bearer {}", node_secret()))
@@ -294,10 +294,10 @@ pub async fn sync_keys_from_peers(state: &AppState) {
         if peer.id == state.node_id {
             continue;
         }
-        let url = format!(
-            "{}/keys/internal/export",
-            peer.url.trim_end_matches('/')
-        );
+        let Some(base) = crate::p2p::resolve_base_url(&state.db, &peer.id).await else {
+            continue;
+        };
+        let url = format!("{}/keys/internal/export", base.trim_end_matches('/'));
         let Ok(resp) = client
             .get(&url)
             .header("Authorization", format!("Bearer {}", node_secret()))
