@@ -224,6 +224,8 @@ pub enum QuazarEventType {
     ExchangeAgentListed,
     ExchangeAgentDeal,
     ExchangeItemProcured,
+    /// Агент Биржи: эмиссия КВАЗИ за созданное действие/предмет по Своду.
+    ExchangeEmission,
     LotExpired,
     SvodServiceCreated,
     SvodServiceUpdated,
@@ -309,6 +311,7 @@ impl QuazarEventType {
             "ExchangeAgentListed" => Ok(QuazarEventType::ExchangeAgentListed),
             "ExchangeAgentDeal" => Ok(QuazarEventType::ExchangeAgentDeal),
             "ExchangeItemProcured" => Ok(QuazarEventType::ExchangeItemProcured),
+            "ExchangeEmission" => Ok(QuazarEventType::ExchangeEmission),
             "LotExpired" => Ok(QuazarEventType::LotExpired),
             "SvodServiceCreated" => Ok(QuazarEventType::SvodServiceCreated),
             "SvodServiceUpdated" => Ok(QuazarEventType::SvodServiceUpdated),
@@ -338,7 +341,7 @@ impl QuazarEventType {
             "ExchangeRequestCreated","ExchangeRequestVerified","ExchangeRequestRejected",
             "ExchangeListingOpened","ExchangeDealOpened","ExchangeDealCancelled",
             "ExchangeDeliveryConfirmed","ExchangeSettled","ExchangeInventoryAdjusted",
-            "ExchangeNeedCreated","ExchangeAgentListed","ExchangeAgentDeal","ExchangeItemProcured","LotExpired",
+            "ExchangeNeedCreated","ExchangeAgentListed","ExchangeAgentDeal","ExchangeItemProcured","ExchangeEmission","LotExpired",
             "SvodServiceCreated","SvodServiceUpdated","SvodServiceDeactivated",
             "LawyerAction",
         ]

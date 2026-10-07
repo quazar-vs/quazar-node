@@ -73,13 +73,13 @@ impl IntoResponse for ExchangeError {
     }
 }
 
-type ExchangeResult<T> = Result<T, ExchangeError>;
+pub(crate) type ExchangeResult<T> = Result<T, ExchangeError>;
 
-fn buyer_unit_price(svod: i64) -> i64 {
+pub(crate) fn buyer_unit_price(svod: i64) -> i64 {
     (svod * 11 + 9) / 10
 }
 
-fn seller_unit_price(svod: i64) -> i64 {
+pub(crate) fn seller_unit_price(svod: i64) -> i64 {
     (svod * 9) / 10
 }
 
@@ -238,7 +238,7 @@ fn export_status_for_step(step: i32) -> Option<&'static str> {
     EXPORT_STATUSES.get((step - 1) as usize).copied()
 }
 
-async fn ensure_active_citizen(pool: &PgPool, citizen_id: &str) -> ExchangeResult<()> {
+pub(crate) async fn ensure_active_citizen(pool: &PgPool, citizen_id: &str) -> ExchangeResult<()> {
     let status: Option<String> = sqlx::query_scalar("SELECT status FROM citizens WHERE id = $1")
         .bind(citizen_id)
         .fetch_optional(pool)
@@ -256,7 +256,7 @@ async fn ensure_active_citizen(pool: &PgPool, citizen_id: &str) -> ExchangeResul
     }
 }
 
-async fn get_balance(pool: &PgPool, citizen_id: &str) -> ExchangeResult<i64> {
+pub(crate) async fn get_balance(pool: &PgPool, citizen_id: &str) -> ExchangeResult<i64> {
     let amount: Option<i64> =
         sqlx::query_scalar("SELECT amount FROM balances WHERE citizen_id = $1")
             .bind(citizen_id)
@@ -274,7 +274,7 @@ async fn get_balance(pool: &PgPool, citizen_id: &str) -> ExchangeResult<i64> {
     Ok(0)
 }
 
-async fn lock_balance(
+pub(crate) async fn lock_balance(
     tx: &mut Transaction<'_, Postgres>,
     citizen_id: &str,
 ) -> ExchangeResult<i64> {
@@ -293,7 +293,7 @@ async fn lock_balance(
         .map_err(|e| ExchangeError::DatabaseError(e.to_string()))
 }
 
-async fn set_balance(
+pub(crate) async fn set_balance(
     tx: &mut Transaction<'_, Postgres>,
     citizen_id: &str,
     amount: i64,
@@ -366,7 +366,7 @@ async fn set_inventory(
     Ok(())
 }
 
-async fn emit_event(
+pub(crate) async fn emit_event(
     state: &Arc<AppState>,
     event_type: &str,
     initiator: &str,
@@ -2382,6 +2382,11 @@ pub async fn buy_listing(
     }
     let qty = body.quantity as i64;
 
+    // Canon market lot (offer_a → listing): buy opens deal B pending SB.
+    if crate::exchange_market::listing_has_offer_deal(&state.db, &listing_id).await? {
+        return crate::exchange_market::buy_republic_lot(&state, &auth, &listing_id, qty).await;
+    }
+
     let mut tx = state
         .db
         .begin()
@@ -3093,6 +3098,45 @@ pub async fn confirm_delivery(
         )));
     }
 
+    // Canon two-deal market: offer_a / buy_b.
+    let market_role = crate::exchange_market::deal_role_of(&mut tx, &deal_id).await?;
+    if market_role.as_deref() == Some("offer_a") {
+        let payload =
+            crate::exchange_market::confirm_offer_a(&state, &auth, &mut tx, &tid, &deal_id).await?;
+        tx.commit()
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        emit_event(
+            &state,
+            "ExchangeOfferAccepted",
+            &auth.citizen_name,
+            "SB accepted citizen offer → republic warehouse + lot",
+            format!("offer {deal_id}"),
+            &format!("evt_offer_ok_{tid}"),
+            payload.clone(),
+        )
+        .await?;
+        return Ok(Json(ApiResponse::success(payload)));
+    }
+    if market_role.as_deref() == Some("buy_b") {
+        let payload =
+            crate::exchange_market::confirm_buy_b(&state, &auth, &mut tx, &tid, &deal_id).await?;
+        tx.commit()
+            .await
+            .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
+        emit_event(
+            &state,
+            "ExchangeBuySettled",
+            &auth.citizen_name,
+            "SB confirmed buy → item to buyer, payout to seller",
+            format!("buy {deal_id}"),
+            &format!("evt_buy_ok_{tid}"),
+            payload.clone(),
+        )
+        .await?;
+        return Ok(Json(ApiResponse::success(payload)));
+    }
+
     // Иерархия: Страж не подтверждает лот Судьи; Судья может подтвердить лот Стража.
     let access_roles: Vec<String> = sqlx::query_scalar(
         "SELECT COALESCE(access_roles, ARRAY[]::text[]) FROM service_catalog WHERE code = $1",
@@ -3344,18 +3388,33 @@ pub async fn get_inventory_handler(
     } else {
         me
     };
-    let rows = sqlx::query_as::<_, (String, String, i64, i64)>(
-        "SELECT citizen_id, svod_code, quantity, updated_at FROM exchange_inventory
-         WHERE citizen_id = $1 ORDER BY svod_code",
+    // Canon: item inventory (ITEMS). Prefer /exchange/inventory/items.
+    let items = sqlx::query_as::<_, (String, String, i64, i64)>(
+        "SELECT i.item_code, COALESCE(s.title, i.item_code), i.quantity, i.updated_at
+         FROM citizen_item_inventory i
+         LEFT JOIN shop_items s ON s.code = i.item_code
+         WHERE i.citizen_id = $1 AND i.quantity > 0
+         ORDER BY i.item_code",
     )
     .bind(&citizen_id)
     .fetch_all(&state.db)
     .await
     .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?
     .into_iter()
-    .map(|r| json!({"citizen_id": r.0, "svod_code": r.1, "quantity": r.2, "updated_at": r.3}))
+    .map(|r| {
+        json!({
+            "item_code": r.0,
+            "title": r.1,
+            "quantity": r.2,
+            "updated_at": r.3,
+        })
+    })
     .collect::<Vec<_>>();
-    Ok(Json(ApiResponse::success(rows)))
+    Ok(Json(ApiResponse::success(json!({
+        "citizen_id": citizen_id,
+        "inventory": items,
+        "note": "Инвентарь — предметы Свода предметов. См. также GET /exchange/inventory/items",
+    }))))
 }
 
 /// POST /exchange/inventory — Aiya/SB adjust inventory (admin seed).
@@ -4073,191 +4132,46 @@ pub async fn list_node_lots(
     Ok(Json(ApiResponse::success(items)))
 }
 
+/// Body for sell-to-state / offer: `item_code` required; `svod_code` = действие (опц.).
 #[derive(Debug, Deserialize)]
 pub struct SellToStateBody {
-    pub svod_code: String,
+    /// Предмет из Свода предметов (обязателен для канона).
+    pub item_code: Option<String>,
+    /// Действие из Свода действий (как взаимодействует гражданин).
+    pub svod_code: Option<String>,
     pub quantity: u64,
+    pub shelf_life_secs: Option<i64>,
 }
 
-/// POST /exchange/sell-to-state — гражданин продаёт республике (−10%); ждёт СБ.
+/// POST /exchange/sell-to-state — предложение предмета республике (сделка A → СБ → лот).
 pub async fn sell_to_state(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Json(body): Json<SellToStateBody>,
 ) -> ExchangeResult<Json<ApiResponse>> {
-    if auth.is_node {
-        return Err(ExchangeError::Unauthorized("Node cannot sell".into()));
-    }
-    if !auth.can_open_state_deal() {
-        return Err(ExchangeError::Unauthorized(
-            "Продажа республике доступна гражданам и выше".into(),
-        ));
-    }
-    if body.quantity == 0 {
-        return Err(ExchangeError::BadRequest("quantity must be > 0".into()));
-    }
-    let seller_id = auth.resolve_account_id(&state.db).await;
-    ensure_active_citizen(&state.db, &seller_id).await?;
-    let service = svod::get_service_by_code(&state.db, &body.svod_code, true)
-        .await
-        .map_err(|e| ExchangeError::BadRequest(e.to_string()))?;
-    let unit_svod = service.base_price;
-    let qty = body.quantity as i64;
-    let unit_seller = seller_unit_price(unit_svod);
-    let unit_buyer = buyer_unit_price(unit_svod);
-    let payout = unit_seller.saturating_mul(qty);
-    let lot_scope = if service.lot_scope.is_empty() {
-        "global".to_string()
-    } else {
-        service.lot_scope.clone()
-    };
-    // Продажа республике всегда ждёт живого Стража (проверка инвентаря).
-    let confirm_mode = "live_guardian";
-
-    let mut tx = state
-        .db
-        .begin()
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-
-    let inv = lock_inventory(&mut tx, &seller_id, &service.code).await?;
-    if inv < qty {
-        return Err(ExchangeError::InsufficientInventory);
-    }
-    set_inventory(&mut tx, &seller_id, &service.code, inv - qty).await?;
-
-    let reserve = lock_balance(&mut tx, STATE_RESERVE_ID).await?;
-    if reserve < payout {
-        return Err(ExchangeError::BadRequest(
-            "Недостаточный резерв республики для выкупа".into(),
-        ));
-    }
-
-    let request_id = format!("exreq_{}", Uuid::new_v4());
-    let listing_id = format!("exlist_{}", Uuid::new_v4());
-    let deal_id = format!("exdeal_{}", Uuid::new_v4());
-    let task_id = format!("extask_{}", Uuid::new_v4());
-    let ts = now();
-
-    sqlx::query(
-        "INSERT INTO exchange_requests
-         (id, citizen_id, side, svod_code, qty_total, qty_remaining, unit_svod, status, listing_id, created_at, updated_at)
-         VALUES ($1,$2,'sell',$3,$4,0,$5,'accepted',$6,$7,$7)",
-    )
-    .bind(&request_id)
-    .bind(&seller_id)
-    .bind(&service.code)
-    .bind(qty)
-    .bind(unit_svod)
-    .bind(&listing_id)
-    .bind(ts)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-
-    sqlx::query(
-        "INSERT INTO exchange_listings
-         (id, request_id, seller_id, svod_code, qty_total, qty_remaining,
-          unit_svod, unit_buyer_price, unit_seller_price, status, created_at, updated_at,
-          is_state_agent, lot_scope)
-         VALUES ($1,$2,$3,$4,$5,0,$6,$7,$8,'filled',$9,$9,FALSE,$10)",
-    )
-    .bind(&listing_id)
-    .bind(&request_id)
-    .bind(&seller_id)
-    .bind(&service.code)
-    .bind(qty)
-    .bind(unit_svod)
-    .bind(unit_buyer)
-    .bind(unit_seller)
-    .bind(ts)
-    .bind(&lot_scope)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-
-    // Hold payout in escrow conceptually: debit reserve now, credit seller on SB confirm
-    set_balance(&mut tx, STATE_RESERVE_ID, reserve - payout).await?;
-    // Park payout on treasury same account then pay on confirm — use escrow_amount
-    // Money held by reducing reserve; on confirm add to seller.
-
-    sqlx::query(
-        "INSERT INTO exchange_deals
-         (id, listing_id, request_id, buyer_id, seller_id, svod_code, qty,
-          unit_svod, unit_buyer_price, unit_seller_price, escrow_amount, status,
-          security_task_id, created_at, updated_at, lot_scope, confirm_mode)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'escrowed',$12,$13,$13,$14,$15)",
-    )
-    .bind(&deal_id)
-    .bind(&listing_id)
-    .bind(&request_id)
-    .bind(STATE_RESERVE_ID)
-    .bind(&seller_id)
-    .bind(&service.code)
-    .bind(qty)
-    .bind(unit_svod)
-    .bind(unit_buyer)
-    .bind(unit_seller)
-    .bind(payout)
-    .bind(&task_id)
-    .bind(ts)
-    .bind(&lot_scope)
-    .bind(confirm_mode)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-
-    sqlx::query(
-        "INSERT INTO exchange_security_tasks
-         (id, deal_id, from_citizen, to_citizen, svod_code, qty, status, created_at, updated_at,
-          confirm_mode)
-         VALUES ($1,$2,$3,$4,$5,$6,'open',$7,$7,$8)",
-    )
-    .bind(&task_id)
-    .bind(&deal_id)
-    .bind(&seller_id)
-    .bind(STATE_RESERVE_ID)
-    .bind(&service.code)
-    .bind(qty)
-    .bind(ts)
-    .bind(confirm_mode)
-    .execute(&mut *tx)
-    .await
-    .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-
-    tx.commit()
-        .await
-        .map_err(|e| ExchangeError::DatabaseError(e.to_string()))?;
-
-    emit_event(
-        &state,
-        "ExchangeDealOpened",
-        &auth.citizen_name,
-        "Sell to state pending SB",
-        format!("sell {qty} x {} @ {unit_seller}", service.code),
-        &format!("evt_sell_{deal_id}"),
-        json!({
-            "deal_id": deal_id,
-            "security_task_id": task_id,
-            "svod_code": service.code,
-            "quantity": qty,
-            "unit_seller_price": unit_seller,
-            "payout": payout,
-            "seller_id": seller_id,
-            "buyer_id": STATE_RESERVE_ID,
-            "pending_sb": true,
+    let item_code = body
+        .item_code
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            ExchangeError::BadRequest(
+                "Укажите item_code (предмет из Свода предметов). Инвентарь — только предметы."
+                    .into(),
+            )
+        })?;
+    crate::exchange_market::offer_item_to_republic(
+        State(state),
+        Extension(auth),
+        Json(crate::exchange_market::OfferItemBody {
+            item_code,
+            quantity: body.quantity,
+            svod_code: body.svod_code,
+            shelf_life_secs: body.shelf_life_secs,
         }),
     )
-    .await?;
-
-    Ok(Json(ApiResponse::success(json!({
-        "deal_id": deal_id,
-        "security_task_id": task_id,
-        "status": "escrowed",
-        "payout": payout,
-        "unit_seller_price": unit_seller,
-        "pending_sb": true,
-    }))))
+    .await
 }
 
 // --- Temporary compatibility for Passport apps still on P2P paths ---

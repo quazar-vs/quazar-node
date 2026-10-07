@@ -59,6 +59,7 @@ mod response;
 mod reward_svod;
 mod vpn;
 mod shop;
+mod exchange_market;
 mod svod;
 mod types;
 mod validator;
@@ -410,6 +411,26 @@ async fn main() {
             post(exchange::extend_listing),
         )
         .route("/exchange/sell-to-state", post(exchange::sell_to_state))
+        .route(
+            "/exchange/offer-item",
+            post(exchange_market::offer_item_to_republic),
+        )
+        .route(
+            "/exchange/inventory/items",
+            get(exchange_market::list_item_inventory),
+        )
+        .route(
+            "/exchange/inventory/items",
+            post(exchange_market::adjust_item_inventory),
+        )
+        .route(
+            "/exchange/republic-warehouse",
+            get(exchange_market::list_republic_warehouse),
+        )
+        .route(
+            "/exchange/create-item",
+            post(exchange_market::create_item_handler),
+        )
         .route("/exchange/reserve/dispose", post(exchange::dispose_reserve))
         .route("/exchange/transfers", post(exchange::create_lot_transfer))
         .route(

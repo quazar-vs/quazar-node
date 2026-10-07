@@ -27,9 +27,8 @@ use crate::blockchain::{
 use crate::models::Event;
 use crate::pending;
 use crate::register_verify::{
-    clear_recent_email_verification, consume_verification_code, email_belongs_to_citizen,
-    issue_verification_code, is_valid_email, normalize_email, peek_recent_email_verification,
-    citizen_use_app_forbidden,
+    consume_verification_code, issue_verification_code, is_valid_email, normalize_email,
+    peek_recent_email_verification,
 };
 use crate::response::ApiResponse;
 use crate::types::{is_role_candidacy_target, CandidateType};
@@ -1536,7 +1535,7 @@ pub struct PublicCitizensResponse {
 /// POST /api/citizens — list passport holders for a verified email session.
 ///
 /// Auth mirrors `/api/my-applications`: `email` + `email_already_verified: true` and a live
-/// in-memory register-verify mark. Citizens are refused (`citizen_use_app`).
+/// in-memory register-verify mark. Open to guest, candidate, and citizen portal sessions.
 pub async fn session_citizens_handler(
     State(state): State<Arc<AppState>>,
     Json(req): Json<ListCitizensSessionRequest>,
@@ -1548,22 +1547,6 @@ pub async fn session_citizens_handler(
             Json(ApiResponse::error("Введите корректный email-адрес")),
         )
             .into_response();
-    }
-
-    match email_belongs_to_citizen(&state.db, &email).await {
-        Ok(true) => {
-            clear_recent_email_verification(&email);
-            return citizen_use_app_forbidden();
-        }
-        Ok(false) => {}
-        Err(e) => {
-            tracing::error!(error = %e, "failed to check citizen email for /api/citizens");
-            return (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                Json(ApiResponse::error("Database error")),
-            )
-                .into_response();
-        }
     }
 
     let client_claims_verified = req.email_already_verified.unwrap_or(false);

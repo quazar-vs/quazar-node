@@ -274,14 +274,12 @@ async fn record_ledger(
     Ok(())
 }
 
-/// Award КВАЗИ for an action using current rates from the Республиканский Свод Вознаграждений.
-pub async fn award_for_action(
+/// Compute reward amount for an action (no side effects).
+pub async fn compute_action_reward(
     pool: &PgPool,
-    citizen_id: &str,
     action: &str,
     units: u64,
-    ref_id: Option<&str>,
-) -> Result<(u64, u64), String> {
+) -> Result<u64, String> {
     let row = get_reward_row(pool, action)
         .await
         .map_err(|e| e.to_string())?;
@@ -293,22 +291,35 @@ pub async fn award_for_action(
             ACTION_VIDEO_VIEW => default_video_view_reward(),
             _ => 0,
         });
-    let amount = get_reward_with_rate(action, units, rate);
+    Ok(get_reward_with_rate(action, units, rate))
+}
+
+/// Credit ledger + balance (internal). Prefer [`award_for_action`] — эмиссия через Агента Биржи.
+pub async fn credit_reward_ledger(
+    pool: &PgPool,
+    citizen_id: &str,
+    action: &str,
+    units: u64,
+    amount: u64,
+    ref_id: Option<&str>,
+) -> Result<u64, String> {
     if amount == 0 {
-        return Ok((0, 0));
+        return Ok(0);
     }
     let new_balance = credit_balance(pool, citizen_id, amount).await?;
     record_ledger(pool, citizen_id, action, units, amount, ref_id).await?;
-    tracing::info!(
-        citizen_id = %citizen_id,
-        action = %action,
-        units,
-        amount,
-        ref_id = ref_id.unwrap_or(""),
-        new_balance,
-        "svod: awarded QUAZI reward"
-    );
-    Ok((amount, new_balance))
+    Ok(new_balance)
+}
+
+/// Award КВАЗИ for an action — **эмиссия Агента Биржи** (реестр `ExchangeEmission`).
+pub async fn award_for_action(
+    state: &Arc<AppState>,
+    citizen_id: &str,
+    action: &str,
+    units: u64,
+    ref_id: Option<&str>,
+) -> Result<(u64, u64), String> {
+    crate::exchange_market::agent_emit_for_action(state, citizen_id, action, units, ref_id).await
 }
 
 /// POST /svod/admin/reward — Aiya/Founder updates a rate in the Республиканский Свод Вознаграждений.
@@ -445,7 +456,7 @@ pub async fn create_video_handler(
     };
 
     let award = award_for_action(
-        &state.db,
+        &state,
         &citizen_id,
         ACTION_VIDEO_CREATE,
         1,
@@ -513,7 +524,7 @@ pub async fn view_video_handler(
     let mut balance = 0u64;
     if batches_earned > 0 {
         match award_for_action(
-            &state.db,
+            &state,
             &video.citizen_id,
             ACTION_VIDEO_VIEW,
             batches_earned * VIDEO_VIEW_BATCH,

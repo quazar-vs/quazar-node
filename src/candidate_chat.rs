@@ -1,8 +1,11 @@
-//! Candidate chat via verified-email session (no citizen API key in the browser).
+//! Portal chat via verified-email session (no citizen API key in the browser).
 //!
 //! Auth mirrors `/api/my-applications`: client sends `email` + `email_already_verified: true`,
 //! server peeks the in-memory register-verify mark. Sending a message refreshes the mark TTL.
+//!
+//! Open to guest (verified email), candidate (application), and citizen (real passport holder).
 
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use axum::{
@@ -22,10 +25,9 @@ use crate::chat::{
     ListMessagesQuery, SYSTEM_BOT_ID,
 };
 use crate::register_verify::{
-    clear_recent_email_verification, email_belongs_to_citizen, email_has_candidate_application,
-    is_valid_email, normalize_email, peek_recent_email_verification,
-    refresh_recent_email_verification, recent_email_verification_expires_in,
-    CITIZEN_USE_APP_MESSAGE,
+    email_has_candidate_application, is_valid_email, normalize_email,
+    peek_recent_email_verification, refresh_recent_email_verification,
+    recent_email_verification_expires_in,
 };
 use crate::response::{self, ApiResponse};
 use crate::types::Role;
@@ -33,8 +35,6 @@ use crate::AppState;
 
 const CANDIDATE_CHAT_FORBIDDEN: &str =
     "Сначала подтвердите email через вход на сайте, затем повторите запрос";
-const CANDIDATE_CHAT_NO_APPLICATION: &str =
-    "Чат доступен после подачи заявки на сайте";
 
 #[derive(Debug, Deserialize)]
 pub struct CandidateChatAuthBody {
@@ -58,16 +58,67 @@ pub struct CandidateSendMessageRequest {
 }
 
 #[derive(Debug, Serialize)]
-pub struct CandidateSendMessageResponse {
+pub struct PortalChatMessageView {
     #[serde(flatten)]
     pub message: ChatMessageRow,
+    pub chat_role: String,
+    pub status_label: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CandidateSendMessageResponse {
+    #[serde(flatten)]
+    pub message: PortalChatMessageView,
     pub expires_in_secs: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ChatRole {
+    Guest,
+    Candidate,
+    Citizen,
+}
+
+impl ChatRole {
+    fn as_str(self) -> &'static str {
+        match self {
+            ChatRole::Guest => "guest",
+            ChatRole::Candidate => "candidate",
+            ChatRole::Citizen => "citizen",
+        }
+    }
+
+    fn status_label(self) -> &'static str {
+        match self {
+            ChatRole::Guest => "Гость",
+            ChatRole::Candidate => "Кандидат",
+            ChatRole::Citizen => "Гражданин",
+        }
+    }
+
+    fn from_db(status: &str, role: &str, citizen_id: &str) -> Self {
+        if citizen_id.starts_with("guest-") {
+            return ChatRole::Guest;
+        }
+        if citizen_id.starts_with("cand-")
+            || status == "applicant"
+            || role == Role::Candidate.as_str()
+        {
+            return ChatRole::Candidate;
+        }
+        if matches!(status, "active" | "online" | "pending") {
+            // Governance roles still chat as citizens on the portal.
+            return ChatRole::Citizen;
+        }
+        ChatRole::Guest
+    }
+}
+
 #[derive(Debug, Clone)]
-struct CandidateIdentity {
+struct PortalIdentity {
     citizen_id: String,
     display_name: String,
+    chat_role: ChatRole,
 }
 
 fn require_verified_email_session(
@@ -97,7 +148,7 @@ fn display_name_from_email(email: &str) -> String {
         .next()
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .unwrap_or("кандидат")
+        .unwrap_or("гость")
         .chars()
         .take(40)
         .collect()
@@ -105,18 +156,50 @@ fn display_name_from_email(email: &str) -> String {
 
 fn placeholder_public_key(email: &str) -> String {
     let hash = email_hash_hex(email);
-    // 64 hex chars (citizens.public_key is free-form text; match system_bot style length).
     format!("{}{}", &hash[..32], &hash[32..64])
 }
 
-async fn find_citizen_by_email(
+async fn find_real_citizen_by_email(
+    pool: &PgPool,
+    email: &str,
+) -> Result<Option<(String, String, String, String)>, sqlx::Error> {
+    sqlx::query_as::<_, (String, String, String, String)>(
+        r#"
+        SELECT
+            id,
+            COALESCE(NULLIF(BTRIM(display_name), ''), name) AS name,
+            status,
+            COALESCE(role, '') AS role
+        FROM citizens
+        WHERE lower(email) = lower($1)
+          AND id NOT LIKE 'cand-%'
+          AND id NOT LIKE 'guest-%'
+          AND NOT (
+            status = 'applicant'
+            AND COALESCE(role, '') = 'Candidate'
+          )
+        ORDER BY
+          CASE
+            WHEN status IN ('active', 'online') THEN 0
+            WHEN status = 'pending' THEN 1
+            ELSE 2
+          END,
+          created_at DESC
+        LIMIT 1
+        "#,
+    )
+    .bind(email)
+    .fetch_optional(pool)
+    .await
+}
+
+async fn find_candidate_placeholder_by_email(
     pool: &PgPool,
     email: &str,
 ) -> Result<Option<(String, String)>, sqlx::Error> {
-    // Only Candidate/applicant placeholders — real citizens are blocked separately.
     sqlx::query_as::<_, (String, String)>(
         r#"
-        SELECT id, name
+        SELECT id, COALESCE(NULLIF(BTRIM(display_name), ''), name) AS name
         FROM citizens
         WHERE lower(email) = lower($1)
           AND status = 'applicant'
@@ -162,10 +245,11 @@ async fn ensure_placeholder_citizen(
     pool: &PgPool,
     citizen_id: &str,
     email: &str,
+    status: &str,
+    role: Option<&str>,
 ) -> Result<(), ChatError> {
     let now = Utc::now().timestamp();
     let public_key = placeholder_public_key(email);
-    // Unique name must not collide with application login (approve creates a real citizen).
     let name = citizen_id.to_string();
     sqlx::query(
         r#"
@@ -173,15 +257,16 @@ async fn ensure_placeholder_citizen(
             (id, name, public_key, status, role, created_at, passport_issued,
              email, email_verified, candidate_type, target_role)
         VALUES
-            ($1, $2, $3, 'applicant', $4, $5, FALSE,
-             $6, TRUE, 'citizenship', 'Citizen')
+            ($1, $2, $3, $4, $5, $6, FALSE,
+             $7, TRUE, 'citizenship', 'Citizen')
         ON CONFLICT (id) DO NOTHING
         "#,
     )
     .bind(citizen_id)
     .bind(&name)
     .bind(&public_key)
-    .bind(Role::Candidate.as_str())
+    .bind(status)
+    .bind(role)
     .bind(now)
     .bind(email)
     .execute(pool)
@@ -190,76 +275,173 @@ async fn ensure_placeholder_citizen(
     Ok(())
 }
 
-/// Resolve chat identity for a verified email: application placeholder only (not citizens).
-async fn resolve_candidate_identity(
+/// Resolve chat identity for a verified email: citizen → candidate → guest.
+async fn resolve_portal_identity(
     pool: &PgPool,
     email: &str,
-) -> Result<CandidateIdentity, ChatError> {
-    match email_belongs_to_citizen(pool, email).await {
-        Ok(true) => {
-            clear_recent_email_verification(email);
-            return Err(ChatError::Forbidden(CITIZEN_USE_APP_MESSAGE.to_string()));
+) -> Result<PortalIdentity, ChatError> {
+    if let Some((id, name, status, role)) = find_real_citizen_by_email(pool, email)
+        .await
+        .map_err(|e| ChatError::Database(e.to_string()))?
+    {
+        if id != SYSTEM_BOT_ID {
+            let chat_role = ChatRole::from_db(&status, &role, &id);
+            return Ok(PortalIdentity {
+                citizen_id: id,
+                display_name: name,
+                chat_role,
+            });
         }
-        Ok(false) => {}
-        Err(e) => return Err(ChatError::Database(e.to_string())),
     }
 
     let has_app = email_has_candidate_application(pool, email)
         .await
         .map_err(|e| ChatError::Database(e.to_string()))?;
-    if !has_app {
-        return Err(ChatError::Forbidden(CANDIDATE_CHAT_NO_APPLICATION.to_string()));
-    }
 
-    if let Some((id, name)) = find_citizen_by_email(pool, email)
-        .await
-        .map_err(|e| ChatError::Database(e.to_string()))?
-    {
-        // Never post as the system bot via email session.
-        if id != SYSTEM_BOT_ID {
-            return Ok(CandidateIdentity {
-                citizen_id: id,
-                display_name: name,
+    if has_app {
+        if let Some((id, name)) = find_candidate_placeholder_by_email(pool, email)
+            .await
+            .map_err(|e| ChatError::Database(e.to_string()))?
+        {
+            if id != SYSTEM_BOT_ID {
+                return Ok(PortalIdentity {
+                    citizen_id: id,
+                    display_name: name,
+                    chat_role: ChatRole::Candidate,
+                });
+            }
+        }
+
+        if let Some((app_id, login)) = find_citizenship_application(pool, email)
+            .await
+            .map_err(|e| ChatError::Database(e.to_string()))?
+        {
+            let citizen_id = format!("cand-app-{app_id}");
+            ensure_placeholder_citizen(
+                pool,
+                &citizen_id,
+                email,
+                "applicant",
+                Some(Role::Candidate.as_str()),
+            )
+            .await?;
+            let display_name = login
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| display_name_from_email(email));
+            return Ok(PortalIdentity {
+                citizen_id,
+                display_name,
+                chat_role: ChatRole::Candidate,
+            });
+        }
+
+        if let Some((app_id, login)) = find_mayor_application(pool, email)
+            .await
+            .map_err(|e| ChatError::Database(e.to_string()))?
+        {
+            let citizen_id = format!("cand-mayor-{app_id}");
+            ensure_placeholder_citizen(
+                pool,
+                &citizen_id,
+                email,
+                "applicant",
+                Some(Role::Candidate.as_str()),
+            )
+            .await?;
+            let display_name = login
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or_else(|| display_name_from_email(email));
+            return Ok(PortalIdentity {
+                citizen_id,
+                display_name,
+                chat_role: ChatRole::Candidate,
             });
         }
     }
 
-    if let Some((app_id, login)) = find_citizenship_application(pool, email)
-        .await
-        .map_err(|e| ChatError::Database(e.to_string()))?
-    {
-        let citizen_id = format!("cand-app-{app_id}");
-        ensure_placeholder_citizen(pool, &citizen_id, email).await?;
-        let display_name = login
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| display_name_from_email(email));
-        return Ok(CandidateIdentity {
-            citizen_id,
-            display_name,
-        });
-    }
-
-    if let Some((app_id, login)) = find_mayor_application(pool, email)
-        .await
-        .map_err(|e| ChatError::Database(e.to_string()))?
-    {
-        let citizen_id = format!("cand-mayor-{app_id}");
-        ensure_placeholder_citizen(pool, &citizen_id, email).await?;
-        let display_name = login
-            .filter(|s| !s.trim().is_empty())
-            .unwrap_or_else(|| display_name_from_email(email));
-        return Ok(CandidateIdentity {
-            citizen_id,
-            display_name,
-        });
-    }
-
-    Err(ChatError::Forbidden(CANDIDATE_CHAT_NO_APPLICATION.to_string()))
+    // Verified email without application / citizenship → guest portal chat.
+    let hash = email_hash_hex(email);
+    let citizen_id = format!("guest-{}", &hash[..24]);
+    ensure_placeholder_citizen(pool, &citizen_id, email, "pending", None).await?;
+    Ok(PortalIdentity {
+        citizen_id,
+        display_name: display_name_from_email(email),
+        chat_role: ChatRole::Guest,
+    })
 }
 
-async fn insert_candidate_message(
+async fn load_status_map(
+    pool: &PgPool,
+    citizen_ids: &[String],
+) -> Result<HashMap<String, (String, String)>, sqlx::Error> {
+    if citizen_ids.is_empty() {
+        return Ok(HashMap::new());
+    }
+    let rows = sqlx::query_as::<_, (String, String, String)>(
+        r#"
+        SELECT id, status, COALESCE(role, '') AS role
+        FROM citizens
+        WHERE id = ANY($1)
+        "#,
+    )
+    .bind(citizen_ids)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(id, status, role)| (id, (status, role)))
+        .collect())
+}
+
+fn enrich_message(row: ChatMessageRow, status_map: &HashMap<String, (String, String)>) -> PortalChatMessageView {
+    if row.citizen_id == SYSTEM_BOT_ID {
+        return PortalChatMessageView {
+            message: row,
+            chat_role: "secretary".to_string(),
+            status_label: "Секретарь".to_string(),
+        };
+    }
+    let chat_role = match status_map.get(&row.citizen_id) {
+        Some((status, role)) => ChatRole::from_db(status, role, &row.citizen_id),
+        None => {
+            if row.citizen_id.starts_with("guest-") {
+                ChatRole::Guest
+            } else if row.citizen_id.starts_with("cand-") {
+                ChatRole::Candidate
+            } else {
+                ChatRole::Citizen
+            }
+        }
+    };
+    PortalChatMessageView {
+        message: row,
+        chat_role: chat_role.as_str().to_string(),
+        status_label: chat_role.status_label().to_string(),
+    }
+}
+
+async fn enrich_messages(
+    pool: &PgPool,
+    rows: Vec<ChatMessageRow>,
+) -> Result<Vec<PortalChatMessageView>, ChatError> {
+    let ids: Vec<String> = rows
+        .iter()
+        .map(|r| r.citizen_id.clone())
+        .collect::<std::collections::HashSet<_>>()
+        .into_iter()
+        .collect();
+    let status_map = load_status_map(pool, &ids)
+        .await
+        .map_err(|e| ChatError::Database(e.to_string()))?;
+    Ok(rows
+        .into_iter()
+        .map(|row| enrich_message(row, &status_map))
+        .collect())
+}
+
+async fn insert_portal_message(
     state: &Arc<AppState>,
-    identity: &CandidateIdentity,
+    identity: &PortalIdentity,
     content: &str,
 ) -> Result<ChatMessageRow, ChatError> {
     let session_id = get_or_create_session(state, &identity.citizen_id).await?;
@@ -317,7 +499,7 @@ pub async fn candidate_list_messages_handler(
         Err(resp) => return resp,
     };
 
-    let identity = match resolve_candidate_identity(&state.db, &email).await {
+    let identity = match resolve_portal_identity(&state.db, &email).await {
         Ok(id) => id,
         Err(e) => return e.into_api_response(),
     };
@@ -334,14 +516,19 @@ pub async fn candidate_list_messages_handler(
     )
     .await
     {
-        Ok(rows) => Json(ApiResponse::success(serde_json::json!({
-            "messages": rows,
-            "total": rows.len(),
-            "citizen_id": identity.citizen_id,
-            "citizen_name": identity.display_name,
-            "expires_in_secs": expires_in_secs,
-        })))
-        .into_response(),
+        Ok(rows) => match enrich_messages(&state.db, rows).await {
+            Ok(messages) => Json(ApiResponse::success(serde_json::json!({
+                "messages": messages,
+                "total": messages.len(),
+                "citizen_id": identity.citizen_id,
+                "citizen_name": identity.display_name,
+                "chat_role": identity.chat_role.as_str(),
+                "status_label": identity.chat_role.status_label(),
+                "expires_in_secs": expires_in_secs,
+            })))
+            .into_response(),
+            Err(e) => e.into_api_response(),
+        },
         Err(e) => e.into_api_response(),
     }
 }
@@ -366,32 +553,38 @@ pub async fn candidate_send_message_handler(
         Err(e) => return e.into_api_response(),
     };
 
-    let identity = match resolve_candidate_identity(&state.db, &email).await {
+    let identity = match resolve_portal_identity(&state.db, &email).await {
         Ok(id) => id,
         Err(e) => return e.into_api_response(),
     };
 
-    let row = match insert_candidate_message(&state, &identity, &content).await {
+    let row = match insert_portal_message(&state, &identity, &content).await {
         Ok(r) => r,
         Err(e) => return e.into_api_response(),
     };
 
     let Some(expires_in_secs) = refresh_recent_email_verification(&email) else {
-        // Message already stored; mark vanished between peek and refresh — rare race.
         return response::forbidden(CANDIDATE_CHAT_FORBIDDEN);
     };
 
     tracing::info!(
         email = %email,
         citizen_id = %identity.citizen_id,
+        chat_role = %identity.chat_role.as_str(),
         message_id = %row.id,
-        "candidate chat message sent"
+        "portal chat message sent"
     );
+
+    let view = PortalChatMessageView {
+        message: row,
+        chat_role: identity.chat_role.as_str().to_string(),
+        status_label: identity.chat_role.status_label().to_string(),
+    };
 
     (
         StatusCode::CREATED,
         Json(ApiResponse::success(CandidateSendMessageResponse {
-            message: row,
+            message: view,
             expires_in_secs,
         })),
     )

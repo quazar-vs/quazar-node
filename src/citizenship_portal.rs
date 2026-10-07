@@ -207,13 +207,16 @@ pub struct MyApplicationSummary {
 pub struct MyApplicationsResponse {
     pub citizenship: Option<MyApplicationSummary>,
     pub mayor: Option<MyApplicationSummary>,
+    /// True when this email already belongs to a real citizen (portal chat OK; apply blocked).
+    #[serde(default)]
+    pub is_citizen: bool,
 }
 
 /// POST /api/my-applications — latest citizenship + legacy street-mayor apps for a verified email.
 ///
 /// Requires `email_already_verified: true` and a live in-memory register-verify mark (peek).
 /// Does not consume the mark, so a subsequent apply can still auto-confirm.
-/// Citizens are refused (web login is for candidates only).
+/// Citizens get `is_citizen: true` (session kept for portal chat; apply UI should not resubmit).
 pub async fn my_applications(
     State(state): State<Arc<AppState>>,
     Json(req): Json<MyApplicationsRequest>,
@@ -223,22 +226,26 @@ pub async fn my_applications(
         return response::bad_request("Введите корректный email-адрес");
     }
 
-    match email_belongs_to_citizen(&state.db, &email).await {
-        Ok(true) => {
-            clear_recent_email_verification(&email);
-            return citizen_use_app_forbidden();
-        }
-        Ok(false) => {}
-        Err(e) => {
-            return response::internal_error(format!("Failed to check citizen email: {e}"));
-        }
-    }
-
     let client_claims_verified = req.email_already_verified.unwrap_or(false);
     if !client_claims_verified || !peek_recent_email_verification(&email) {
         return response::forbidden(
             "Сначала подтвердите email через вход на сайте, затем повторите запрос",
         );
+    }
+
+    let is_citizen = match email_belongs_to_citizen(&state.db, &email).await {
+        Ok(v) => v,
+        Err(e) => {
+            return response::internal_error(format!("Failed to check citizen email: {e}"));
+        }
+    };
+    if is_citizen {
+        return Json(ApiResponse::success(MyApplicationsResponse {
+            citizenship: None,
+            mayor: None,
+            is_citizen: true,
+        }))
+        .into_response();
     }
 
     let citizenship = match crate::candidates::latest_by_email_kind(
@@ -282,6 +289,7 @@ pub async fn my_applications(
     Json(ApiResponse::success(MyApplicationsResponse {
         citizenship,
         mayor,
+        is_citizen: false,
     }))
     .into_response()
 }

@@ -2376,8 +2376,8 @@ body.modal-open { overflow: hidden; }
       <div class="container">
         <div class="section-header">
           <span class="tag">Сообщество</span>
-          <h2>Чат граждан</h2>
-          <p>После входа пишите секретарю как гость; после заявки на гражданство — как кандидат. Ответы приходят автоматически. В интерфейсе — сообщения за последние 15 минут.</p>
+          <h2>Чат с секретарём</h2>
+          <p>После входа пишите секретарю: гость, кандидат или гражданин. В сообщениях видны имя и статус. Ответы приходят автоматически. В интерфейсе — сообщения за последние 15 минут.</p>
         </div>
         <div id="chatLoginGate" class="chat-login-gate">
           <p>Для доступа в чат нужно авторизоваться на портале</p>
@@ -2387,7 +2387,7 @@ body.modal-open { overflow: hidden; }
           <aside class="chat-auth-panel">
             <h3>Доступ к чату</h3>
             <div id="chatCandidateAuth">
-              <p id="chatEmailSessionHint">Вы вошли — можно писать секретарю как гость. После заявки на гражданство режим станет «кандидат».</p>
+              <p id="chatEmailSessionHint">Вы вошли — можно писать секретарю. Статус определяется по вашему email.</p>
               <p class="chat-candidate-email" id="chatCandidateEmail"></p>
               <p class="chat-auth-hint" id="chatRoleBadge" hidden></p>
               <button type="button" class="btn btn-primary" id="chatCandidateConnectBtn">Открыть чат</button>
@@ -3429,16 +3429,6 @@ body.modal-open { overflow: hidden; }
           renderCitizensList((data && data.citizens) || []);
         }).catch(function (err) {
           if (seq !== citizensLoadSeq) return;
-          if (isCitizenUseAppError(err)) {
-            clearVerifiedEmail();
-            setCitizensLocked();
-            if (status) {
-              status.hidden = false;
-              status.className = 'citizens-error';
-              status.textContent = CITIZEN_USE_APP_MSG;
-            }
-            return;
-          }
           if (list) list.hidden = true;
           if (status) {
             status.hidden = false;
@@ -3807,11 +3797,9 @@ body.modal-open { overflow: hidden; }
           .catch(function (err) {
             clearPendingRegistration();
             clearVerifiedEmail();
-            var message = isCitizenUseAppError(err)
-              ? CITIZEN_USE_APP_MSG
-              : (err.name === 'AbortError'
-                ? 'Превышено время ожидания. Проверьте соединение и попробуйте снова.'
-                : (err.message || 'Не удалось отправить код. Попробуйте позже или напишите на quazardr@gmail.com'));
+            var message = err.name === 'AbortError'
+              ? 'Превышено время ожидания. Проверьте соединение и попробуйте снова.'
+              : (err.message || 'Не удалось отправить код. Попробуйте позже или напишите на quazardr@gmail.com');
             showRegisterError(registerError, message);
           })
           .finally(function () {
@@ -3862,14 +3850,6 @@ body.modal-open { overflow: hidden; }
             return sendConfirmationToAdmin(pending.email).catch(function () {});
           })
           .catch(function (err) {
-            if (isCitizenUseAppError(err)) {
-              clearVerifiedEmail();
-              clearPendingRegistration();
-              showRegisterStep(1);
-              showRegisterError(registerError, CITIZEN_USE_APP_MSG);
-              showRegisterError(verifyError, CITIZEN_USE_APP_MSG);
-              return;
-            }
             var message = err.message || 'Ошибка проверки кода';
             if (message.indexOf('истёк') !== -1 || message.indexOf('не найден') !== -1) {
               clearPendingRegistration();
@@ -4023,7 +4003,7 @@ body.modal-open { overflow: hidden; }
       var chatMessageTimers = new Map();
       var chatApiKey = null;
       var chatMode = null; // 'email' | 'apikey' | null
-      var emailChatRole = null; // 'guest' | 'candidate' | null
+      var emailChatRole = null; // 'guest' | 'candidate' | 'citizen' | null
       var myCitizenId = null;
 
       function getChatVerifiedEmail() {
@@ -4069,22 +4049,30 @@ body.modal-open { overflow: hidden; }
 
       function isChatSessionAuthError(status, data) {
         var msg = String((data && (data.error || data.message)) || '');
-        var code = data && data.data && data.data.code;
         return status === 403
-          || code === 'citizen_use_app'
-          || msg.indexOf('подтвердите email') !== -1
-          || msg.indexOf('Вход для граждан через приложение') !== -1;
-      }
-
-      function isCitizenChatError(err) {
-        var msg = String((err && err.message) || err || '');
-        return (err && err.code === 'citizen_use_app')
-          || msg.indexOf('Вход для граждан через приложение') !== -1;
+          || msg.indexOf('подтвердите email') !== -1;
       }
 
       function isNoApplicationChatError(err) {
         var msg = String((err && err.message) || err || '');
         return msg.indexOf('после подачи заявки') !== -1;
+      }
+
+      function chatRoleLabel(role) {
+        if (role === 'citizen') return 'гражданин';
+        if (role === 'candidate') return 'кандидат';
+        if (role === 'guest') return 'гость';
+        return 'гость';
+      }
+
+      function chatStatusLabel(msg) {
+        if (msg && msg.status_label) return String(msg.status_label);
+        if (msg && msg.chat_role === 'citizen') return 'Гражданин';
+        if (msg && msg.chat_role === 'candidate') return 'Кандидат';
+        if (msg && msg.chat_role === 'guest') return 'Гость';
+        if (msg && msg.citizen_id && String(msg.citizen_id).indexOf('guest-') === 0) return 'Гость';
+        if (msg && msg.citizen_id && String(msg.citizen_id).indexOf('cand-') === 0) return 'Кандидат';
+        return '';
       }
 
       function isChatMessageVisible(msg) {
@@ -4162,7 +4150,16 @@ body.modal-open { overflow: hidden; }
 
         var meta = document.createElement('span');
         meta.className = 'meta';
-        meta.textContent = msg.citizen_name || 'Гражданин';
+        meta.textContent = msg.citizen_name || (isBot ? 'Секретарь' : 'Участник');
+        if (!isBot) {
+          var statusText = chatStatusLabel(msg);
+          if (statusText) {
+            var statusBadge = document.createElement('span');
+            statusBadge.className = 'badge status-badge';
+            statusBadge.textContent = statusText;
+            meta.appendChild(statusBadge);
+          }
+        }
         if (msg.crossChannel && msg.crossChannel.sourceChannel) {
           var badge = document.createElement('span');
           badge.className = 'badge';
@@ -4231,22 +4228,23 @@ body.modal-open { overflow: hidden; }
         var hint = document.getElementById('chatEmailSessionHint');
         var badge = document.getElementById('chatRoleBadge');
         if (hint) {
-          if (emailChatRole === 'candidate') {
+          if (emailChatRole === 'citizen') {
+            hint.textContent = 'Вы гражданин — пишете секретарю с сайта. Сессия продлевается, пока вы пишете в чат.';
+          } else if (emailChatRole === 'candidate') {
             hint.textContent = 'Вы кандидат — пишете секретарю в режиме кандидата. Сессия продлевается, пока вы пишете в чат.';
+          } else if (emailChatRole === 'guest') {
+            hint.textContent = 'Вы гость — можно писать секретарю. После заявки на гражданство статус станет «кандидат».';
           } else {
-            hint.textContent = 'Вы вошли — можно писать секретарю как гость. После заявки на гражданство режим станет «кандидат».';
+            hint.textContent = 'Вы вошли — можно писать секретарю. Статус определяется по вашему email.';
           }
         }
         if (badge) {
-          if (emailChatRole === 'candidate') {
+          if (emailChatRole === 'citizen' || emailChatRole === 'candidate' || emailChatRole === 'guest') {
             badge.hidden = false;
-            badge.textContent = 'Режим: кандидат';
-          } else if (emailChatRole === 'guest') {
-            badge.hidden = false;
-            badge.textContent = 'Режим: гость';
+            badge.textContent = 'Статус: ' + chatRoleLabel(emailChatRole);
           } else if (loggedIn) {
             badge.hidden = false;
-            badge.textContent = 'Режим: гость (до подключения)';
+            badge.textContent = 'Статус: после открытия чата';
           } else {
             badge.hidden = true;
             badge.textContent = '';
@@ -4334,7 +4332,7 @@ body.modal-open { overflow: hidden; }
         }).then(function (data) {
           var payload = (data && data.data) || {};
           if (payload.citizen_id) myCitizenId = payload.citizen_id;
-          if (payload.chat_role === 'guest' || payload.chat_role === 'candidate') {
+          if (payload.chat_role === 'guest' || payload.chat_role === 'candidate' || payload.chat_role === 'citizen') {
             emailChatRole = payload.chat_role;
           }
           if (payload.expires_in_secs) {
@@ -4391,11 +4389,6 @@ body.modal-open { overflow: hidden; }
       function handleCandidateSessionExpired(err) {
         disconnectChat();
         updateChatAuthPanels();
-        if (isCitizenChatError(err)) {
-          clearChatEmailSession();
-          setChatStatus('error', 'Вход для граждан через приложение');
-          return;
-        }
         if (isNoApplicationChatError(err)) {
           // Legacy server response; keep email session and hint to reconnect.
           setChatStatus('error', 'Не удалось открыть чат. Обновите страницу или напишите снова.');
@@ -4425,8 +4418,7 @@ body.modal-open { overflow: hidden; }
         setChatStatus('', 'Подключение...');
         loadChatHistoryCandidate()
           .then(function () {
-            var roleLabel = emailChatRole === 'candidate' ? 'кандидат' : 'гость';
-            setChatStatus('live', 'Секретарь · ' + roleLabel);
+            setChatStatus('live', 'Секретарь · ' + chatRoleLabel(emailChatRole));
             startChatCandidatePoll();
             updateChatAuthPanels();
           })
@@ -4562,7 +4554,7 @@ body.modal-open { overflow: hidden; }
               refreshChatVerifiedExpires(payload.expires_in_secs);
             }
             myCitizenId = payload.citizen_id || myCitizenId;
-            if (payload.chat_role === 'guest' || payload.chat_role === 'candidate') {
+            if (payload.chat_role === 'guest' || payload.chat_role === 'candidate' || payload.chat_role === 'citizen') {
               emailChatRole = payload.chat_role;
               updateChatAuthPanels();
             }
@@ -4571,10 +4563,11 @@ body.modal-open { overflow: hidden; }
               citizen_id: payload.citizen_id,
               citizen_name: payload.citizen_name,
               content: payload.content,
-              created_at: payload.created_at
+              created_at: payload.created_at,
+              chat_role: payload.chat_role,
+              status_label: payload.status_label
             });
-            var roleLabel = emailChatRole === 'candidate' ? 'кандидат' : 'гость';
-            setChatStatus('live', 'Секретарь · ' + roleLabel);
+            setChatStatus('live', 'Секретарь · ' + chatRoleLabel(emailChatRole));
           }).catch(function (err) {
             if (err && err.status === 403) {
               handleCandidateSessionExpired(err);
@@ -4697,22 +4690,12 @@ body.modal-open { overflow: hidden; }
       function isSessionAuthError(err) {
         var status = err && err.status;
         var msg = String((err && err.message) || err || '');
-        var code = err && err.code;
         return status === 403
-          || code === 'citizen_use_app'
           || msg.indexOf('HTTP 403') !== -1
-          || msg.indexOf('подтвердите email') !== -1
-          || msg.indexOf('Вход для граждан через приложение') !== -1;
+          || msg.indexOf('подтвердите email') !== -1;
       }
 
-      function isCitizenSessionError(err) {
-        var msg = String((err && err.message) || err || '');
-        return (err && err.code === 'citizen_use_app')
-          || msg.indexOf('Вход для граждан через приложение') !== -1;
-      }
-
-      function sessionAuthUserMessage(err) {
-        if (isCitizenSessionError(err)) return 'Вход для граждан через приложение';
+      function sessionAuthUserMessage(_err) {
         return 'Сессия подтверждения email истекла. Войдите снова.';
       }
 
@@ -5166,6 +5149,16 @@ body.modal-open { overflow: hidden; }
           keepMessageOnNextRender = true;
           showMessage('Сессия подтверждения email истекла. Войдите снова.', 'info');
           renderApplyGate();
+          return;
+        }
+
+        if (mine && mine.is_citizen) {
+          VIEW.innerHTML = ''
+            + renderKindSwitcher('citizenship')
+            + '<div class="apply-muted-box">'
+            + '  <p style="margin:0 0 0.5rem"><strong>Вы уже гражданин Квазара.</strong></p>'
+            + '  <p class="field-hint" style="margin:0">Заявка не нужна. С секретарём можно общаться в <a href="#chat">чате на сайте</a>; биржа и паспорт — в приложении Passport.</p>'
+            + '</div>';
           return;
         }
 

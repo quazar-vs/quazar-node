@@ -552,6 +552,35 @@ impl EventValidator {
                 Self::require_svod_or_item(data)?;
                 Ok(())
             }
+            QuazarEventType::ExchangeEmission => {
+                Self::require_str(data, "citizen_id")?;
+                let amount_ok = data
+                    .get("amount")
+                    .and_then(|v| v.as_i64().or_else(|| v.as_u64().map(|u| u as i64)))
+                    .map(|n| n > 0)
+                    .unwrap_or(false);
+                if !amount_ok {
+                    return Err(ValidationError::MissingRequiredField(
+                        "amount (>0)".into(),
+                    ));
+                }
+                let has_action = data
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                let has_item = data
+                    .get("item_code")
+                    .and_then(|v| v.as_str())
+                    .map(|s| !s.is_empty())
+                    .unwrap_or(false);
+                if !has_action && !has_item {
+                    return Err(ValidationError::DataValidationFailed(
+                        "ExchangeEmission requires action or item_code".into(),
+                    ));
+                }
+                Ok(())
+            }
             QuazarEventType::ExchangeNeedCreated => {
                 Self::require_str(data, "need_id")?;
                 Self::require_str(data, "citizen_id")?;

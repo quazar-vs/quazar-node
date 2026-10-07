@@ -216,7 +216,9 @@ pub fn take_recent_email_verification(email: &str) -> bool {
     map.remove(&email).is_some()
 }
 
-/// True if `email` belongs to a real citizen (not a Candidate/applicant chat placeholder).
+/// True if `email` belongs to a real citizen (not a chat/portal placeholder).
+///
+/// Excludes applicant Candidates and synthetic portal chat rows (`cand-*`, `guest-*`).
 pub async fn email_belongs_to_citizen(pool: &PgPool, email: &str) -> Result<bool, sqlx::Error> {
     let email = normalize_email(email);
     sqlx::query_scalar(
@@ -224,6 +226,8 @@ pub async fn email_belongs_to_citizen(pool: &PgPool, email: &str) -> Result<bool
         SELECT EXISTS(
             SELECT 1 FROM citizens
             WHERE lower(email) = lower($1)
+              AND id NOT LIKE 'cand-%'
+              AND id NOT LIKE 'guest-%'
               AND NOT (
                 status = 'applicant'
                 AND COALESCE(role, '') = 'Candidate'
@@ -353,7 +357,7 @@ fn parse_json_body<T: for<'de> Deserialize<'de>>(body: &Bytes) -> Result<T, Resp
 }
 
 pub async fn send_code_handler(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     connect_info: Option<ConnectInfo<SocketAddr>>,
     body: Bytes,
 ) -> impl IntoResponse {
@@ -379,14 +383,7 @@ pub async fn send_code_handler(
         }
     }
 
-    match email_belongs_to_citizen(&state.db, &email).await {
-        Ok(true) => return citizen_use_app_forbidden(),
-        Ok(false) => {}
-        Err(e) => {
-            tracing::error!(error = %e, "failed to check citizen email on send-code");
-            return response::internal_error("Не удалось проверить email. Попробуйте позже.");
-        }
-    }
+    // Citizens may verify email for portal chat; apply/my-applications still gate separately.
 
     match issue_verification_code(&email, &ip).await {
         Ok(_code) => {
@@ -419,7 +416,7 @@ pub async fn send_code_handler(
 }
 
 pub async fn verify_code_handler(
-    State(state): State<Arc<AppState>>,
+    State(_state): State<Arc<AppState>>,
     body: Bytes,
 ) -> impl IntoResponse {
     let req: VerifyCodeRequest = match parse_json_body(&body) {
@@ -430,28 +427,11 @@ pub async fn verify_code_handler(
     let email = normalize_email(&req.email);
 
     match consume_verification_code(&email, &req.code) {
-        Ok(()) => {
-            match email_belongs_to_citizen(&state.db, &email).await {
-                Ok(true) => {
-                    // Do not leave a web session mark for citizens.
-                    clear_recent_email_verification(&email);
-                    return citizen_use_app_forbidden();
-                }
-                Ok(false) => {}
-                Err(e) => {
-                    clear_recent_email_verification(&email);
-                    tracing::error!(error = %e, "failed to check citizen email on verify-code");
-                    return response::internal_error(
-                        "Не удалось проверить email. Попробуйте позже.",
-                    );
-                }
-            }
-            Json(ApiResponse::success(VerifyCodeResponse {
-                message: "Email подтверждён".to_string(),
-                expires_in_secs: CODE_TTL.as_secs(),
-            }))
-            .into_response()
-        }
+        Ok(()) => Json(ApiResponse::success(VerifyCodeResponse {
+            message: "Email подтверждён".to_string(),
+            expires_in_secs: CODE_TTL.as_secs(),
+        }))
+        .into_response(),
         Err(message) => response::bad_request(message),
     }
 }
