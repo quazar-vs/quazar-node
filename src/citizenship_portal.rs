@@ -21,10 +21,8 @@ use crate::applications::{recaptcha_required, verify_recaptcha_with_ip};
 use crate::auth::{AuthContext, Role};
 use crate::block_producer;
 use crate::blockchain::{
-    build_citizen_added_event, build_signed_citizen_role_event, build_signed_passport_issued_event,
-    signed_pending_event_public,
+    build_citizen_added_event, build_signed_citizen_role_event, signed_pending_event_public,
 };
-use crate::citizen::hash_key;
 use crate::citizenship_application::{
     emit_citizen_application_rejected, emit_citizen_requested, lookup_citizenship_app_status,
     reject_message_for_status, CitizenshipAppChainStatus,
@@ -32,10 +30,9 @@ use crate::citizenship_application::{
 use crate::client_ip;
 use crate::email::{
     notify_email, send_citizenship_application, send_citizenship_confirmation,
-    send_citizenship_rejection, send_registration_credentials_soft, SmtpConfig,
+    send_citizenship_rejection, SmtpConfig,
 };
 use crate::gossip;
-use crate::keys::push_key_to_peers;
 use crate::models::Event;
 use crate::pending;
 use crate::register_verify::{
@@ -76,10 +73,6 @@ fn sha256_hex(value: &str) -> String {
 
 fn generate_temp_public_key_hex() -> String {
     format!("{}{}", Uuid::new_v4().simple(), Uuid::new_v4().simple())
-}
-
-fn generate_citizen_api_key() -> String {
-    format!("qz_citizen_{}", Uuid::new_v4().simple())
 }
 
 async fn submit_pending_event(
@@ -721,12 +714,6 @@ async fn update_application_review_status(
             .unwrap_or("")
             .to_string();
         let email = candidate.email.clone().unwrap_or_default();
-        let external_email = candidate
-            .payload
-            .get("external_email")
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .or_else(|| candidate.email.clone());
 
         if login.is_empty() {
             return response::bad_request("В заявке отсутствует логин");
@@ -747,14 +734,9 @@ async fn update_application_review_status(
         }
 
         let citizen_id = Uuid::new_v4().to_string();
-        let passport_id = Uuid::new_v4().to_string();
-        let api_key = generate_citizen_api_key();
-        let api_key_hash = hash_key(&api_key);
-        let api_key_id = Uuid::new_v4().to_string();
         let public_key = generate_temp_public_key_hex();
         let now = Utc::now();
         let now_ts = now.timestamp();
-        let expires_at = now_ts + 365 * 24 * 60 * 60;
 
         let mut tx: Transaction<'_, Postgres> = match state.db.begin().await {
             Ok(tx) => tx,
@@ -765,9 +747,9 @@ async fn update_application_review_status(
             sqlx::query(
                 r#"
                 INSERT INTO citizens
-                    (id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email, email_verified, home_node_id)
+                    (id, name, public_key, status, role, created_at, passport_issued, is_digital, email, email_verified)
                 VALUES
-                    ($1, $2, $3, $4, $5, $6, TRUE, $7, FALSE, $8, TRUE, $9)
+                    ($1, $2, $3, $4, $5, $6, FALSE, FALSE, $7, TRUE)
                 "#,
             )
             .bind(&citizen_id)
@@ -776,54 +758,7 @@ async fn update_application_review_status(
             .bind("active")
             .bind(Role::Citizen.as_str())
             .bind(now_ts)
-            .bind(expires_at)
             .bind(&email)
-            .bind(&state.node_id)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                r#"
-                INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid, home_node_id)
-                VALUES ($1, $2, $3, $4, TRUE, $5)
-                "#,
-            )
-            .bind(&passport_id)
-            .bind(&citizen_id)
-            .bind(now_ts)
-            .bind(expires_at)
-            .bind(&state.node_id)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                r#"
-                INSERT INTO city_passes (
-                    id, citizen_id, passport_id, node_id, kind, status, issued_by, issued_at, expires_at
-                ) VALUES ($1, $2, $3, $4, 'home', 'active', $5, $6, $7)
-                "#,
-            )
-            .bind(format!("pass_home_{passport_id}"))
-            .bind(&citizen_id)
-            .bind(&passport_id)
-            .bind(&state.node_id)
-            .bind(&auth.citizen_name)
-            .bind(now_ts)
-            .bind(expires_at)
-            .execute(&mut *tx)
-            .await?;
-
-            sqlx::query(
-                r#"
-                INSERT INTO api_keys (id, citizen_id, key_hash, role, created_at, expires_at, is_active, last_used)
-                VALUES ($1, $2, $3, $4, $5, NULL, TRUE, NULL)
-                "#,
-            )
-            .bind(&api_key_id)
-            .bind(&citizen_id)
-            .bind(&api_key_hash)
-            .bind(Role::Citizen.as_str())
-            .bind(now)
             .execute(&mut *tx)
             .await?;
 
@@ -874,19 +809,6 @@ async fn update_application_review_status(
         let citizen_added_event = signed_pending_event_public(citizen_added);
         let _ = submit_pending_event(state.clone(), citizen_added_event).await;
 
-        let passport_event = build_signed_passport_issued_event(
-            &format!("passport_issue_{}", passport_id),
-            &passport_id,
-            &citizen_id,
-            &login,
-            now_ts,
-            expires_at,
-            &state.node_id,
-            &auth.citizen_name,
-            now_ts,
-        );
-        let _ = submit_pending_event(state.clone(), passport_event).await;
-
         let role_event = build_signed_citizen_role_event(
             &format!("citizen_role_{}_{}", citizen_id, now_ts),
             &citizen_id,
@@ -897,24 +819,11 @@ async fn update_application_review_status(
         );
         let _ = submit_pending_event(state.clone(), role_event).await;
 
-        push_key_to_peers(&state, &api_key, Role::Citizen, &login).await;
-
-        send_registration_credentials_soft(
-            external_email.as_deref(),
-            &citizen_id,
-            &login,
-            &api_key,
-            &public_key,
-        )
-        .await;
-
         return Json(ApiResponse::success(serde_json::json!({
             "id": id.to_string(),
             "status": "approved",
             "citizen_id": citizen_id,
-            "passport_id": passport_id,
-            "api_key": api_key,
-            "message": "Заявка одобрена. Гражданин, паспорт и API-ключ созданы."
+            "message": "Заявка одобрена: гражданство даровано. Паспорт и API-ключ выдаются после верификации личности верифицированным гражданином (POST /citizen/:id/verify, затем /citizen/:id/passport)."
         })))
         .into_response();
     }

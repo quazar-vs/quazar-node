@@ -2289,6 +2289,25 @@ pub async fn approve_citizen(
         );
     }
 
+    // Canon: Aiya confirms fulfillment of a citizenship application — the
+    // application must exist and not be rejected.
+    let has_application: bool = sqlx::query_scalar(
+        "SELECT EXISTS(SELECT 1 FROM citizenship_applications \
+         WHERE citizen_id = $1 AND status <> 'Rejected')",
+    )
+    .bind(&citizen.id)
+    .fetch_one(&state.db)
+    .await
+    .unwrap_or(false);
+    if !has_application {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Нет заявки на гражданство: Айя подтверждает выполнение существующей заявки".to_string(),
+            )),
+        );
+    }
+
     let cand_type = citizen
         .candidate_type
         .clone()

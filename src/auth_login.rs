@@ -55,11 +55,12 @@ struct CitizenRow {
     name: String,
     role: String,
     status: String,
+    passport_issued: bool,
 }
 
 async fn find_citizen_by_name(pool: &sqlx::PgPool, name: &str) -> Option<CitizenRow> {
     sqlx::query_as::<_, CitizenRow>(
-        "SELECT id, name, role, status FROM citizens WHERE LOWER(name) = LOWER($1)",
+        "SELECT id, name, role, status, passport_issued FROM citizens WHERE LOWER(name) = LOWER($1)",
     )
     .bind(name)
     .fetch_optional(pool)
@@ -117,6 +118,12 @@ pub async fn login_handler(
             ));
         };
         return response::bad_request(message);
+    }
+
+    if !citizen.passport_issued {
+        return response::bad_request(
+            "Вход недоступен: паспорт ещё не выдан. Гражданство даровано — пройдите верификацию личности (POST /citizen/:id/verify) и получите паспорт.",
+        );
     }
 
     let Some(hash) = get_password_hash(&state.db, &citizen.id).await else {

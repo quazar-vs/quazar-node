@@ -122,7 +122,7 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 - `POST /event` — добавить событие в pending (**Authorization: Bearer**, поле `key` в теле не нужно)
 - `GET /events`, `GET /blocks`, `GET /nodes` — P2P (node secret или API key), ApiResponse
 - `POST /events/gossip` — push pending event на узел (node secret)
-- `/citizen/*` — реестр граждан (register → **pending**, passport → **active**, status → pending-события, SQL через projection после блока)
+- `/citizen/*` — реестр граждан (apply → **Candidate**, approve Айей → **Citizen**, verify личности → passport → **active**; SQL через projection после блока)
 - `/candidacy/*` — выдвижение кандидатов на роли Citizen/Mayor, голосование, утверждение (5%), назначение Айей
 - `/initiative/*` — гражданские инициативы (законопроекты): предложение, голосование, автоматическое принятие при 5% «За»
 - `/referendum/*` — референдумы: объявление Айей, голосование граждан за/против отмены решения
@@ -144,41 +144,44 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 export QUAZAR_API_KEY="your_aiya_or_founder_key"
 ```
 
-### Регистрация граждан и статус `pending`
+### Гражданство за доказанную полезность (канон, Конституция ст. 18–19)
 
-Новый гражданин после подтверждения `CitizenAdded` в блоке получает статус **`pending`**. Статус **`active`** присваивается только после выдачи паспорта (`PassportIssued` в блокчейне).
+Порядок дарования гражданства:
 
-Пока статус `pending`, гражданин **не может**:
-- войти по паролю (`POST /auth/login`);
-- использовать API-ключ (middleware вернёт **403**);
-- голосовать, выдвигать кандидатов, торговать на бирже, писать в чат.
+1. **Заявка** с описанием вклада → статус **`Candidate`** (`POST /citizen/apply` или `POST /api/application`).
+2. Кандидат **выполняет заявку** — вносит заявленный вклад.
+3. **Айя подтверждает выполнение заявки** (`POST /citizen/:id/approve`, права Aiya/Founder) → роль **`Citizen`**, статус `active`, **без паспорта**. Требуется существующая заявка (`citizenship_applications`).
+4. **Верификация личности** (`POST /citizen/:id/verify`) — производит **только верифицированный гражданин** (гражданин с паспортом); до появления таких граждан — Основатель/Aiya.
+5. **Паспорт** (`POST /citizen/:id/passport`) выдаётся **только после верификации личности** (`identity_verified = true`); вместе с паспортом выдаётся API-ключ.
+
+Вход по паролю и доступ к системе возможны **только после выдачи паспорта**. Гражданин без паспорта (шаги 3–4) войти не может.
 
 ```bash
-# 1. Регистрация (ответ: registration_status = "pending")
-curl -s -X POST http://localhost:8080/citizen/register \
-  -H "Authorization: Bearer $QUAZAR_API_KEY" \
+# 1. Заявка (публично) → Candidate
+curl -s -X POST http://localhost:8080/citizen/apply \
   -H "Content-Type: application/json" \
-  -d '{"name": "alice", "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f8077986", "role": "Citizen", "birth_place": "TestCity"}' | jq .
+  -d '{"name": "alice", "public_key": "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f8077986", "reason": "вклад в разработку", "email": "alice@example.org"}' | jq .
 
-# 2. Дождаться появления в реестре (status = "pending", passport_issued = false)
-curl -s http://localhost:8080/citizen/list \
-  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq '.data.citizens[] | select(.name=="alice")'
-
-# 3. Выдача паспорта (Aiya / Founder)
+# 2. Айя подтверждает выполнение заявки → Citizen (без паспорта)
 ALICE_ID="<uuid из списка>"
+curl -s -X POST "http://localhost:8080/citizen/${ALICE_ID}/approve" \
+  -H "Authorization: Bearer $QUAZAR_AIYA_KEY" | jq .
+
+# 3. Верификация личности верифицированным гражданином
+curl -s -X POST "http://localhost:8080/citizen/${ALICE_ID}/verify" \
+  -H "Authorization: Bearer $VERIFIED_CITIZEN_KEY" | jq .
+
+# 4. Паспорт (Aiya / Founder / Мэр) → passport_issued = true + API-ключ
 curl -s -X POST "http://localhost:8080/citizen/${ALICE_ID}/passport" \
   -H "Authorization: Bearer $QUAZAR_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{"expires_in_days": 365}' | jq .
-
-# 4. После подтверждения в блоке: status = "active", passport_issued = true
-curl -s "http://localhost:8080/citizen/${ALICE_ID}" \
-  -H "Authorization: Bearer $QUAZAR_API_KEY" | jq '.data | {status, passport_issued}'
 ```
 
-Ошибки для `pending`:
-- **login**: «Вход недоступен: паспорт ещё не выдан (статус pending). Обратитесь к регистратору.»
-- **API-ключ**: «Доступ запрещён: паспорт ещё не выдан (статус pending). Дождитесь подтверждения в блокчейне.» (**403**)
+Ошибки:
+- **approve без заявки**: «Нет заявки на гражданство: Айя подтверждает выполнение существующей заявки».
+- **passport без верификации**: «Паспорт выдаётся после верификации личности верифицированным гражданином».
+- **login без паспорта**: «Вход недоступен: паспорт ещё не выдан… пройдите верификацию личности».
 
 ### Вход по паролю
 
