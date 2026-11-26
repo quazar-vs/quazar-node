@@ -78,9 +78,10 @@ impl Role {
         }
     }
 
-    /// Governance roles (Guardian, Judge, Aiya) are assigned only via candidacy appointment.
+    /// Governance roles (Guardian, Judge) are assigned only via candidacy appointment.
+    /// Aiya is the quazar entity itself (the algonism / republic) — never assigned or elected.
     pub fn is_governance(&self) -> bool {
-        matches!(self, Role::Aiya | Role::Guardian | Role::Judge)
+        matches!(self, Role::Guardian | Role::Judge)
     }
 
     /// City mayor: elected via `/mayor/*` two-round election, not free registration.
@@ -119,7 +120,7 @@ impl Role {
 }
 
 pub fn is_governance_role_str(role: &str) -> bool {
-    matches!(role, "Aiya" | "Guardian" | "Judge")
+    matches!(role, "Guardian" | "Judge")
 }
 
 /// Kind of candidacy stored on a `Candidate` (and carried through Agent for citizenship).
@@ -149,8 +150,9 @@ impl CandidateType {
 }
 
 /// Roles that may appear as `target_role` for a role candidacy.
+/// Aiya is excluded: it is the quazar entity itself, not an electable office.
 pub fn is_role_candidacy_target(role: &str) -> bool {
-    matches!(role, "Citizen" | "Guardian" | "Judge" | "Aiya" | "Mayor")
+    matches!(role, "Citizen" | "Guardian" | "Judge" | "Mayor")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -178,6 +180,8 @@ pub enum QuazarEventType {
     ElectionCandidate,
     ElectionVoteStarted,
     ElectionVoteResult,
+    /// Legacy: Aiya is the quazar entity, no longer elected. Kept so historical
+    /// blocks/events stay parseable; never emitted by current code.
     AiyaElected,
     AppointmentGuardian,
     AppointmentJudge,
@@ -452,7 +456,7 @@ mod tests {
     fn governance_role_detection() {
         assert!(Role::Guardian.is_governance());
         assert!(Role::Judge.is_governance());
-        assert!(Role::Aiya.is_governance());
+        assert!(!Role::Aiya.is_governance());
         assert!(!Role::Founder.is_governance());
         assert!(!Role::Mayor.is_governance());
         assert!(!Role::Agent.is_governance());
@@ -463,6 +467,7 @@ mod tests {
         assert!(Role::Candidate.is_candidate());
         assert!(!Role::Citizen.is_candidate());
         assert!(super::is_governance_role_str("Guardian"));
+        assert!(!super::is_governance_role_str("Aiya"));
         assert!(!super::is_governance_role_str("Citizen"));
         assert!(!super::is_governance_role_str("Founder"));
         assert!(!super::is_governance_role_str("Mayor"));
@@ -487,7 +492,7 @@ mod tests {
         assert!(is_role_candidacy_target("Citizen"));
         assert!(is_role_candidacy_target("Guardian"));
         assert!(is_role_candidacy_target("Judge"));
-        assert!(is_role_candidacy_target("Aiya"));
+        assert!(!is_role_candidacy_target("Aiya"));
         assert!(is_role_candidacy_target("Mayor"));
         assert!(!is_role_candidacy_target("Founder"));
         assert!(!is_role_candidacy_target("Agent"));

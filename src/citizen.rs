@@ -785,6 +785,15 @@ pub async fn register_citizen(
         );
     }
 
+    if role == Role::Aiya {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Айя — сущность квазара (сам алгонизм, квазар, республика); роль не назначается и не избирается".to_string(),
+            )),
+        );
+    }
+
     if role.is_mayor() {
         return (
             StatusCode::BAD_REQUEST,
@@ -1918,7 +1927,7 @@ pub async fn apply_for_role(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "target_role must be Citizen, Guardian, Judge, Aiya, or Mayor".to_string(),
+                "target_role must be Citizen, Guardian, Judge, or Mayor (Aiya is the quazar entity, not an electable role)".to_string(),
             )),
         )
             .into_response();

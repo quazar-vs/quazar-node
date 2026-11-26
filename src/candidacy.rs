@@ -300,7 +300,7 @@ pub async fn nominate_candidate(
     let target_role = req.target_role.trim().to_string();
     if !is_role_candidacy_target(&target_role) {
         return Err(CandidacyError::bad_request(
-            "target_role must be Citizen, Guardian, Judge, Aiya, or Mayor",
+            "target_role must be Citizen, Guardian, Judge, or Mayor (Aiya is the quazar entity, not an electable role)",
         ));
     }
     if Role::from_str(&target_role).is_none() {
@@ -801,7 +801,7 @@ mod tests {
         assert!(is_role_candidacy_target("Citizen"));
         assert!(is_role_candidacy_target("Guardian"));
         assert!(is_role_candidacy_target("Judge"));
-        assert!(is_role_candidacy_target("Aiya"));
+        assert!(!is_role_candidacy_target("Aiya"));
         assert!(is_role_candidacy_target("Mayor"));
         assert!(!is_role_candidacy_target("Founder"));
     }

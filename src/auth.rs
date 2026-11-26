@@ -931,6 +931,10 @@ pub fn can_assign_role(
     target_role: Option<&str>,
     desired_role: &Role,
 ) -> bool {
+    // Aiya is the quazar entity itself (the algonism / republic) — never assigned.
+    if *desired_role == Role::Aiya {
+        return false;
+    }
     // Never assign above the assigner's own hierarchy.
     if !assigner.satisfies(desired_role) {
         return false;
@@ -1217,7 +1221,14 @@ mod tests {
             Some("Judge"),
             &Role::Aiya
         ));
-        assert!(can_assign_role(&aiya, Some(&ct), Some("Aiya"), &Role::Aiya));
+        // Aiya is the quazar entity — never assignable, even via a legacy target.
+        assert!(!can_assign_role(&aiya, Some(&ct), Some("Aiya"), &Role::Aiya));
+        assert!(!can_assign_role(
+            &Role::Founder,
+            Some(&ct),
+            Some("Aiya"),
+            &Role::Aiya
+        ));
     }
 
     #[test]

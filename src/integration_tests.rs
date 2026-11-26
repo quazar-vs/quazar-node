@@ -1371,3 +1371,117 @@ async fn api_keys_role_matches_citizens_after_sync() {
         .execute(&pool)
         .await;
 }
+
+#[tokio::test]
+async fn aiya_entity_single_holder_of_agent_functions() {
+    use crate::agents::{ensure_city_agents, ensure_state_agents, AIYA_CITIZEN_ID};
+
+    ensure_test_auth_secrets();
+
+    let Some(pool) = postgres_pool().await else {
+        eprintln!("skip aiya_entity_single_holder_of_agent_functions: PostgreSQL unavailable");
+        return;
+    };
+    db::run_migrations(&pool).await.expect("migrations");
+
+    ensure_state_agents(&pool)
+        .await
+        .expect("ensure Aiya entity + state functions");
+
+    let (role, status): (String, String) =
+        sqlx::query_as("SELECT role, status FROM citizens WHERE id = $1")
+            .bind(AIYA_CITIZEN_ID)
+            .fetch_one(&pool)
+            .await
+            .expect("Aiya entity exists");
+    assert_eq!(role, "Aiya");
+    assert_eq!(status, "active");
+
+    let state_kinds: Vec<String> = sqlx::query_scalar(
+        "SELECT agent_kind FROM algonism_agents WHERE scope = 'state' ORDER BY agent_kind",
+    )
+    .fetch_all(&pool)
+    .await
+    .expect("state function kinds");
+    assert_eq!(state_kinds, vec!["exchange", "lawyer", "sb", "secretary"]);
+
+    let n = uuid::Uuid::new_v4().simple().to_string();
+    ensure_city_agents(&pool, &format!("QZ-CITY-{n}"), &format!("city-{n}"), "mayor-id")
+        .await
+        .expect("city functions");
+
+    let holders: Vec<String> =
+        sqlx::query_scalar("SELECT DISTINCT citizen_id FROM algonism_agents")
+            .fetch_all(&pool)
+            .await
+            .expect("function holders");
+    assert_eq!(holders, vec![AIYA_CITIZEN_ID.to_string()]);
+}
+
+#[tokio::test]
+async fn aiya_not_a_candidacy_target() {
+    use std::sync::Arc;
+
+    use crate::auth::AuthContext;
+    use crate::candidacy::{nominate_candidate, NominateRequest};
+    use crate::nodes::NodeRegistry;
+    use crate::types::Role;
+    use crate::AppState;
+
+    ensure_test_auth_secrets();
+
+    let Some(pool) = postgres_pool().await else {
+        eprintln!("skip aiya_not_a_candidacy_target: PostgreSQL unavailable");
+        return;
+    };
+    db::run_migrations(&pool).await.expect("migrations");
+
+    let n = uuid::Uuid::new_v4().to_string();
+    let candidate_id = format!("aiya-target-{n}");
+    let nominator_id = format!("aiya-nom-{n}");
+
+    for (id, name) in [
+        (&candidate_id, format!("aiyat{n}")),
+        (&nominator_id, format!("aiyan{n}")),
+    ] {
+        let event = build_citizen_added_event(
+            &format!("citizen_add_{id}"),
+            id,
+            &name,
+            "8a88e3dd7409f195fd52db2d3cba5d72ca6709bf1d94121bf3748801b40f6f5c",
+            "AiyaCity",
+            "Citizen",
+            "system",
+            1_700_005_000,
+        );
+        let mut tx = pool.begin().await.expect("tx");
+        confirm_event_in_block_tx(&mut tx, &event).await.expect("confirm");
+        tx.commit().await.expect("commit");
+        activate_citizen_with_passport(&pool, id, &name).await;
+    }
+
+    let state = Arc::new(AppState {
+        db: pool.clone(),
+        node_registry: Arc::new(NodeRegistry::new(pool.clone())),
+        node_id: "TEST-NODE".to_string(),
+        channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
+        dna: crate::algonism::DnaMemory::new(),
+    });
+
+    let nominator_auth = AuthContext::from_api_key(format!("aiyan{n}"), Role::Citizen);
+    let err = nominate_candidate(
+        state,
+        &nominator_auth,
+        NominateRequest {
+            candidate_id: candidate_id.clone(),
+            target_role: "Aiya".to_string(),
+        },
+    )
+    .await
+    .expect_err("Aiya is the quazar entity — nomination must be rejected");
+    assert!(
+        err.to_string().contains("target_role"),
+        "unexpected error: {err}"
+    );
+}

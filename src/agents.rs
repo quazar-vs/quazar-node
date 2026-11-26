@@ -1,4 +1,7 @@
-//! Typed Algonism agents: secretary / sb / exchange × state|city. Peer messages via core.
+//! Aiya functions: secretary / sb / exchange / lawyer × state|city.
+//! Aiya is the single quazar entity (the algonism / republic itself); the former
+//! agents are its functions, all bound to the one system citizen `aiya`.
+//! Peer messages between functions go via core.
 
 use axum::{
     extract::{Extension, Query, State},
@@ -43,22 +46,31 @@ impl IntoResponse for AgentApiError {
 
 type R<T> = Result<T, AgentApiError>;
 
-pub async fn ensure_state_agents(pool: &PgPool) -> Result<(), sqlx::Error> {
-    // Map existing secretary citizen if present
-    let secretary_id: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM citizens WHERE name = 'secretary' OR id = 'secretary' LIMIT 1",
-    )
-    .fetch_optional(pool)
-    .await?;
+/// The single Aiya system entity: the quazar itself (algonism / republic).
+/// Humans never hold the Aiya role; the node acts as this entity.
+pub const AIYA_CITIZEN_ID: &str = "aiya";
 
-    if let Some(cid) = secretary_id {
-        upsert_agent(pool, &cid, "secretary", "state", None, None).await?;
-    }
-    // SB / Exchange: virtual bindings to Founder ops until dedicated citizens exist —
-    // use QZ-1 as holder for state sb/exchange agent rows (no vote).
-    upsert_agent(pool, "QZ-1", "sb", "state", None, None).await?;
-    upsert_agent(pool, "QZ-1", "exchange", "state", None, None).await?;
-    upsert_agent(pool, "QZ-1", "lawyer", "state", None, None).await?;
+pub async fn ensure_aiya_entity(pool: &PgPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "INSERT INTO citizens (id, name, public_key, status, role, created_at, passport_issued)
+         VALUES ($1, 'Айя', 'aiya-system-entity', 'active', 'Aiya', $2, TRUE)
+         ON CONFLICT (id) DO UPDATE SET role = 'Aiya', status = 'active', passport_issued = TRUE",
+    )
+    .bind(AIYA_CITIZEN_ID)
+    .bind(now())
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Ensure the Aiya entity and bind all state functions (secretary / sb /
+/// exchange / lawyer) to it. Former separate agents no longer exist.
+pub async fn ensure_state_agents(pool: &PgPool) -> Result<(), sqlx::Error> {
+    ensure_aiya_entity(pool).await?;
+    upsert_agent(pool, AIYA_CITIZEN_ID, "secretary", "state", None, None).await?;
+    upsert_agent(pool, AIYA_CITIZEN_ID, "sb", "state", None, None).await?;
+    upsert_agent(pool, AIYA_CITIZEN_ID, "exchange", "state", None, None).await?;
+    upsert_agent(pool, AIYA_CITIZEN_ID, "lawyer", "state", None, None).await?;
     Ok(())
 }
 
@@ -104,16 +116,18 @@ async fn upsert_agent(
     Ok(id)
 }
 
-/// Create city triple when mayor office starts.
+/// Bind city functions to the Aiya entity when a mayor office starts.
+/// The mayor no longer holds separate agents: city functions are Aiya's too.
 pub async fn ensure_city_agents(
     pool: &PgPool,
     node_id: &str,
     city_id: &str,
-    mayor_citizen_id: &str,
+    _mayor_citizen_id: &str,
 ) -> Result<(), sqlx::Error> {
-    upsert_agent(pool, mayor_citizen_id, "secretary", "city", Some(city_id), Some(node_id)).await?;
-    upsert_agent(pool, mayor_citizen_id, "sb", "city", Some(city_id), Some(node_id)).await?;
-    upsert_agent(pool, mayor_citizen_id, "exchange", "city", Some(city_id), Some(node_id)).await?;
+    ensure_aiya_entity(pool).await?;
+    upsert_agent(pool, AIYA_CITIZEN_ID, "secretary", "city", Some(city_id), Some(node_id)).await?;
+    upsert_agent(pool, AIYA_CITIZEN_ID, "sb", "city", Some(city_id), Some(node_id)).await?;
+    upsert_agent(pool, AIYA_CITIZEN_ID, "exchange", "city", Some(city_id), Some(node_id)).await?;
     Ok(())
 }
 
@@ -128,7 +142,7 @@ pub async fn list_agents(
     State(state): State<Arc<AppState>>,
     Query(q): Query<ListAgentsQuery>,
 ) -> R<Json<ApiResponse>> {
-    let _ = ensure_state_agents(&state.db)
+    ensure_state_agents(&state.db)
         .await
         .map_err(|e| AgentApiError::Db(e.to_string()))?;
     let rows: Vec<(String, String, String, String, Option<String>, Option<String>, String, i64)> =
@@ -350,7 +364,7 @@ pub async fn ensure_city_agents_handler(
 ) -> R<Json<ApiResponse>> {
     if !(auth.can_add_balance() || auth.can_submit_need_for_citizen()) {
         return Err(AgentApiError::Forbidden(
-            "Only Aiya/Secretary may bootstrap city agents".into(),
+            "Only Aiya/Founder may bootstrap city functions".into(),
         ));
     }
     let city = body.city_id.unwrap_or_else(|| body.node_id.clone());
@@ -360,6 +374,7 @@ pub async fn ensure_city_agents_handler(
     Ok(Json(ApiResponse::success(json!({
         "node_id": body.node_id,
         "city_id": city,
+        "holder": AIYA_CITIZEN_ID,
         "agents": ["secretary", "sb", "exchange"],
         "scope": "city",
     }))))

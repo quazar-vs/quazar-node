@@ -435,7 +435,9 @@ impl EventValidator {
                 Self::require_str(data, "target_role")?;
                 Self::require_str(data, "nominator_id")?;
                 let role = Self::require_str(data, "target_role")?;
-                if !is_role_candidacy_target(role) {
+                // "Aiya" accepted as legacy: pre-canon blocks may contain Aiya
+                // nominations; current code never emits them.
+                if !is_role_candidacy_target(role) && role != "Aiya" {
                     return Err(ValidationError::DataValidationFailed(format!(
                         "Invalid target_role for candidacy: {}",
                         role

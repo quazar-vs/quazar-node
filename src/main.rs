@@ -162,7 +162,7 @@ async fn main() {
         .await
         .expect("Failed to run database migrations");
     if let Err(e) = agents::ensure_state_agents(&pool).await {
-        tracing::warn!(error = %e, "failed to ensure state Algonism agents");
+        tracing::warn!(error = %e, "failed to ensure Aiya entity / state functions");
     }
     KeyStore::sync_from_env(&pool)
         .await
