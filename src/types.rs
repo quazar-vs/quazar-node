@@ -78,8 +78,9 @@ impl Role {
         }
     }
 
-    /// Governance roles (Guardian, Judge) are assigned only via candidacy appointment.
-    /// Aiya is the quazar entity itself (the algonism / republic) — never assigned or elected.
+    /// Legacy governance statuses (Guardian, Judge): abolished together with the
+    /// councils and the Court — justice and security are Aiya's functions.
+    /// Kept for chain-history validation; never assigned to anyone.
     pub fn is_governance(&self) -> bool {
         matches!(self, Role::Guardian | Role::Judge)
     }
@@ -150,9 +151,10 @@ impl CandidateType {
 }
 
 /// Roles that may appear as `target_role` for a role candidacy.
-/// Aiya is excluded: it is the quazar entity itself, not an electable office.
+/// Aiya is the quazar entity (not electable); Guardian/Judge are abolished
+/// (councils and Court removed). Only Citizen and Mayor remain.
 pub fn is_role_candidacy_target(role: &str) -> bool {
-    matches!(role, "Citizen" | "Guardian" | "Judge" | "Mayor")
+    matches!(role, "Citizen" | "Mayor")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -490,8 +492,8 @@ mod tests {
     #[test]
     fn role_candidacy_targets() {
         assert!(is_role_candidacy_target("Citizen"));
-        assert!(is_role_candidacy_target("Guardian"));
-        assert!(is_role_candidacy_target("Judge"));
+        assert!(!is_role_candidacy_target("Guardian"));
+        assert!(!is_role_candidacy_target("Judge"));
         assert!(!is_role_candidacy_target("Aiya"));
         assert!(is_role_candidacy_target("Mayor"));
         assert!(!is_role_candidacy_target("Founder"));

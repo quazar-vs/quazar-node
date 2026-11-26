@@ -619,7 +619,7 @@ pub async fn create_election(
 ) -> Result<MayorElection, MayorError> {
     if !auth.can_manage_mayor_elections() {
         return Err(MayorError::forbidden(
-            "Only Founder, Aiya, Mayor or Guardian can open mayor elections",
+            "Only Founder, Aiya or Mayor can open mayor elections",
         ));
     }
 
@@ -832,7 +832,7 @@ pub async fn start_round1(
 ) -> Result<MayorElection, MayorError> {
     if !auth.can_manage_mayor_elections() {
         return Err(MayorError::forbidden(
-            "Only Founder, Aiya, Mayor or Guardian can start voting",
+            "Only Founder, Aiya or Mayor can start voting",
         ));
     }
     let _ = resolve_auth_citizen(auth, &state.db).await?;
@@ -899,7 +899,7 @@ pub async fn cast_vote(
 ) -> Result<MayorVote, MayorError> {
     if !auth.can_vote_in_election() {
         return Err(MayorError::forbidden(
-            "Agent cannot vote in elections; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+            "Agent cannot vote in elections; only Citizen, Mayor, Aiya, Founder may vote",
         ));
     }
     let (voter_id, _, _) = resolve_auth_citizen(auth, &state.db).await?;
@@ -1004,7 +1004,7 @@ pub async fn finalize_round(
 ) -> Result<ElectionDetail, MayorError> {
     if !auth.can_manage_mayor_elections() {
         return Err(MayorError::forbidden(
-            "Only Founder, Aiya, Mayor or Guardian can finalize a round",
+            "Only Founder, Aiya or Mayor can finalize a round",
         ));
     }
     let _ = resolve_auth_citizen(auth, &state.db).await?;

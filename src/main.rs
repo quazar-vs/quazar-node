@@ -541,7 +541,7 @@ async fn main() {
         .route("/citizen/:id", get(get_citizen))
         .route("/citizen/:id/status", patch(update_status))
         .route("/citizen/:id/role", patch(update_role))
-        .route("/citizen/:id/verify", post(verify_agent))
+        .route("/citizen/:id/verify", post(verify_identity))
         .route("/citizen/:id/approve", post(approve_citizen))
         .route("/citizen/:id/passport", post(issue_passport))
         .route("/citizen/:id/passport", get(city_pass::get_passport_book_handler))

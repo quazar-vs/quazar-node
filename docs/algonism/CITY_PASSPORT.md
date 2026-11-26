@@ -13,8 +13,8 @@
 
 | Метод | Путь | Кто |
 |-------|------|-----|
-| GET | `/citizen/:id/passport` | сам гражданин / СБ / судья / manage |
-| POST | `/city/:node_id/passes` | Guardian/Judge/Aiya/Founder или Мэр этого `node_id` — body `{ citizen_id, expires_in_days? }` |
+| GET | `/citizen/:id/passport` | сам гражданин / manage (Айя/Founder/Мэр) |
+| POST | `/city/:node_id/passes` | Aiya/Founder или Мэр этого `node_id` — body `{ citizen_id, expires_in_days? }` |
 | POST | `/city/:node_id/passes/:pass_id/revoke` | те же |
 | GET | `/city/:node_id/access/:citizen_id` | проверка доступа |
 

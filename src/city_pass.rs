@@ -239,11 +239,8 @@ async fn can_issue_city_pass(
     auth: &AuthContext,
     node_id: &str,
 ) -> Result<bool, String> {
-    // Republic СБ / hub roles.
-    if matches!(
-        auth.role,
-        Role::Founder | Role::Aiya | Role::Guardian | Role::Judge
-    ) {
+    // Republic level: СБ — функция Айи.
+    if matches!(auth.role, Role::Founder | Role::Aiya) {
         return Ok(true);
     }
     // Мэр — только своего города (офис на node_id).
@@ -483,8 +480,7 @@ pub async fn get_passport_book_handler(
     Path(citizen_id): Path<String>,
 ) -> impl IntoResponse {
     let self_ok = auth.citizen_id.as_deref() == Some(citizen_id.as_str());
-    if !self_ok && !auth.can_manage_citizens() && !matches!(auth.role, Role::Judge | Role::Guardian)
-    {
+    if !self_ok && !auth.can_manage_citizens() {
         return (
             StatusCode::FORBIDDEN,
             Json(ApiResponse::error("Недостаточно прав".to_string())),
@@ -535,10 +531,7 @@ pub async fn check_city_access_handler(
     Path((node_id, citizen_id)): Path<(String, String)>,
 ) -> impl IntoResponse {
     let self_ok = auth.citizen_id.as_deref() == Some(citizen_id.as_str());
-    if !self_ok
-        && !auth.can_manage_citizens()
-        && !matches!(auth.role, Role::Judge | Role::Guardian | Role::Mayor)
-    {
+    if !self_ok && !auth.can_manage_citizens() && !matches!(auth.role, Role::Mayor) {
         return (
             StatusCode::FORBIDDEN,
             Json(ApiResponse::error("Недостаточно прав".to_string())),

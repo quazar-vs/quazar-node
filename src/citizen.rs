@@ -113,6 +113,8 @@ pub struct Citizen {
     pub target_role: Option<String>,
     /// City of registration (прописка).
     pub home_node_id: Option<String>,
+    /// Identity verified by a verified citizen; required before the passport.
+    pub identity_verified: bool,
 }
 
 #[derive(Debug, Clone, sqlx::FromRow)]
@@ -130,6 +132,7 @@ struct CitizenRow {
     candidate_type: Option<String>,
     target_role: Option<String>,
     home_node_id: Option<String>,
+    identity_verified: bool,
 }
 
 impl TryFrom<CitizenRow> for Citizen {
@@ -158,6 +161,7 @@ impl TryFrom<CitizenRow> for Citizen {
             home_node_id: row
                 .home_node_id
                 .filter(|s| !s.trim().is_empty()),
+            identity_verified: row.identity_verified,
         })
     }
 }
@@ -208,6 +212,7 @@ pub struct CitizenResponse {
     pub target_role: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub home_node_id: Option<String>,
+    pub identity_verified: bool,
 }
 
 impl From<Citizen> for CitizenResponse {
@@ -226,6 +231,7 @@ impl From<Citizen> for CitizenResponse {
             candidate_type: c.candidate_type.map(|t| t.as_str().to_string()),
             target_role: c.target_role,
             home_node_id: c.home_node_id,
+            identity_verified: c.identity_verified,
         }
     }
 }
@@ -316,16 +322,16 @@ pub struct CitizenshipApplicationRow {
 }
 
 #[derive(Debug, Serialize)]
-pub struct VerifyAgentResponse {
+pub struct VerifyIdentityResponse {
     pub citizen: CitizenResponse,
-    pub api_key: String,
     pub message: String,
 }
 
 #[derive(Debug, Serialize)]
 pub struct ApproveCitizenResponse {
     pub citizen: CitizenResponse,
-    pub passport_id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub passport_id: Option<String>,
     pub message: String,
 }
 
@@ -552,7 +558,7 @@ fn permission_denied(auth: &AuthContext) -> (StatusCode, Json<ApiResponse>) {
 }
 
 const CITIZEN_SELECT: &str =
-    "SELECT id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email_verified, candidate_type, target_role, home_node_id";
+    "SELECT id, name, public_key, status, role, created_at, passport_issued, passport_expires, is_digital, email_verified, candidate_type, target_role, home_node_id, identity_verified";
 
 fn parse_applicant_type(raw: &str) -> Option<(String, bool)> {
     match raw.trim().to_lowercase().as_str() {
@@ -870,6 +876,7 @@ pub async fn register_citizen(
         candidate_type: None,
         target_role: None,
         home_node_id: None,
+        identity_verified: false,
     };
 
     (
@@ -1106,7 +1113,17 @@ pub async fn issue_passport(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "Candidate ещё не проверен: сначала verify (СБ), затем approve (судья) / паспорт"
+                "Гражданство ещё не даровано: заявку подтверждает Айя (POST /citizen/:id/approve)"
+                    .to_string(),
+            )),
+        );
+    }
+
+    if !citizen.identity_verified {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ApiResponse::error(
+                "Паспорт выдаётся после верификации личности верифицированным гражданином (POST /citizen/:id/verify)"
                     .to_string(),
             )),
         );
@@ -1888,6 +1905,7 @@ pub async fn apply_for_citizenship(
                 candidate_type: cand_type.map(|s| s.to_string()),
                 target_role: cand_target.map(|s| s.to_string()),
                 home_node_id: None,
+                identity_verified: false,
             },
             application_id,
             message,
@@ -1927,7 +1945,7 @@ pub async fn apply_for_role(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "target_role must be Citizen, Guardian, Judge, or Mayor (Aiya is the quazar entity, not an electable role)".to_string(),
+                "target_role must be Citizen or Mayor (Aiya is the quazar entity; Guardian/Judge abolished)".to_string(),
             )),
         )
             .into_response();
@@ -2123,21 +2141,44 @@ pub async fn verify_citizenship_email(
         Json(ApiResponse::success(VerifyEmailResponse {
             citizen_id,
             email_verified: true,
-            message: "Email подтверждён. Роль Candidate — ожидайте проверки службы безопасности."
+            message: "Email подтверждён. Роль Candidate — выполните заявку; гражданство дарует Айя после подтверждения выполнения."
                 .to_string(),
         })),
     )
         .into_response()
 }
 
-/// POST /citizen/:id/verify — Candidate → Agent + API key (Founder / Aiya / Guardian).
-pub async fn verify_agent(
+/// POST /citizen/:id/verify — identity verification by a verified citizen.
+/// Required before the passport. Founder/Aiya bootstrap the first verifications
+/// until verified citizens exist.
+pub async fn verify_identity(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    if !auth.can_verify_agent() {
+    if !auth.can_verify_identity() {
         return permission_denied(&auth);
+    }
+
+    // Only a verified citizen (active, with a passport) may verify identity.
+    if auth.role == Role::Citizen {
+        let verifier_ok: bool = sqlx::query_scalar(
+            "SELECT EXISTS(SELECT 1 FROM citizens \
+             WHERE name = $1 AND role = 'Citizen' AND status IN ('active','online') \
+               AND passport_issued = TRUE)",
+        )
+        .bind(&auth.citizen_name)
+        .fetch_one(&state.db)
+        .await
+        .unwrap_or(false);
+        if !verifier_ok {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ApiResponse::error(
+                    "Верификацию личности может произвести только верифицированный гражданин (с паспортом)".to_string(),
+                )),
+            );
+        }
     }
 
     let mut citizen = match get_citizen_by_id(&state.db, &id).await {
@@ -2146,74 +2187,26 @@ pub async fn verify_agent(
         Err(e) => return e.to_response(),
     };
 
-    // Digital applicants are already Agent (+ API key) from /citizen/apply.
-    if citizen.is_digital {
+    if citizen.role != Role::Citizen {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "Цифровой агент уже имеет роль Agent; проверка СБ не требуется".to_string(),
+                "Верификация личности доступна после дарования гражданства (роль Citizen)".to_string(),
             )),
         );
     }
 
-    // Human flow: Candidate (citizenship) → Agent after email verify.
-    let is_candidate = citizen.role == Role::Candidate || citizen.status.is_applicant();
-    if !is_candidate {
+    if citizen.identity_verified {
         return (
             StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "Проверка СБ доступна только для роли Candidate".to_string(),
-            )),
+            Json(ApiResponse::error("Личность уже верифицирована".to_string())),
         );
     }
-
-    if citizen.candidate_type.as_ref() == Some(&CandidateType::Role) {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "Candidate (role) проходит через appoint, не через проверку СБ".to_string(),
-            )),
-        );
-    }
-
-    if citizen.role == Role::Candidate && !citizen.email_verified {
-        return (
-            StatusCode::BAD_REQUEST,
-            Json(ApiResponse::error(
-                "Сначала подтвердите email (POST /citizen/verify-email)".to_string(),
-            )),
-        );
-    }
-
-    let applicant_type: String = sqlx::query_scalar(
-        "SELECT COALESCE(detected_type, applicant_type) FROM citizenship_applications WHERE citizen_id = $1",
-    )
-    .bind(&citizen.id)
-    .fetch_optional(&state.db)
-    .await
-    .ok()
-    .flatten()
-    .unwrap_or_else(|| "human".to_string());
-    let is_digital = applicant_type == "digital";
 
     let now = Utc::now();
-    // Preserve citizenship candidacy metadata through Agent until Judge approve.
     if let Err(e) = sqlx::query(
-        r#"
-        UPDATE citizens
-        SET status = $1,
-            role = $2,
-            is_digital = $3,
-            candidate_type = COALESCE(candidate_type, $4),
-            target_role = COALESCE(target_role, $5)
-        WHERE id = $6
-        "#,
+        "UPDATE citizens SET identity_verified = TRUE WHERE id = $1",
     )
-    .bind(CitizenStatus::Active.as_str())
-    .bind(Role::Agent.as_str())
-    .bind(is_digital)
-    .bind(CandidateType::Citizenship.as_str())
-    .bind(Role::Citizen.as_str())
     .bind(&citizen.id)
     .execute(&state.db)
     .await
@@ -2224,65 +2217,46 @@ pub async fn verify_agent(
     let _ = sqlx::query(
         r#"
         UPDATE citizenship_applications
-        SET status = 'Verified', verified_by = $1, verified_at = $2, applicant_type = $3
-        WHERE citizen_id = $4 AND status = 'Submitted'
+        SET status = 'Verified', verified_by = $1, verified_at = $2
+        WHERE citizen_id = $3 AND status IN ('Submitted', 'Approved')
         "#,
     )
     .bind(&auth.citizen_name)
     .bind(now)
-    .bind(&applicant_type)
     .bind(&citizen.id)
     .execute(&state.db)
     .await;
 
-    let (raw_api_key, _) =
-        match insert_api_key_record(&state.db, &citizen.id, &Role::Agent, None).await {
-            Ok(v) => v,
-            Err(e) => return e.to_response(),
-        };
-
-    if let Err(e) =
-        grant_default_agent_permissions(&state.db, &citizen.id, Some(&auth.citizen_name)).await
-    {
-        tracing::warn!(
-            citizen = %citizen.id,
-            error = %e,
-            "failed to grant default agent permissions after verify"
-        );
-    }
-
-    let role_event_id = format!("citizen_role_{}_{}", citizen.id, now.timestamp());
-    let role_event = build_signed_citizen_role_event(
-        &role_event_id,
-        &citizen.id,
-        &citizen.name,
-        Role::Agent.as_str(),
+    let event_id = format!("identity_verify_{}_{}", citizen.id, now.timestamp());
+    let _ = crate::chain_events::emit_signed_event(
+        &state,
+        "CitizenUpdated",
         &auth.citizen_name,
-        now.timestamp(),
-    );
-    let _ = submit_pending_event(state.clone(), role_event).await;
+        "Верификация личности",
+        &format!("Личность {} верифицирована гражданином {}", citizen.name, auth.citizen_name),
+        Some(&event_id),
+        serde_json::json!({
+            "citizen_id": citizen.id,
+            "status": citizen.status.as_str(),
+            "identity_verified": true,
+            "verified_by": auth.citizen_name,
+        }),
+    )
+    .await;
 
-    citizen.status = CitizenStatus::Active;
-    citizen.role = Role::Agent;
-    citizen.is_digital = is_digital;
-    if citizen.candidate_type.is_none() {
-        citizen.candidate_type = Some(CandidateType::Citizenship);
-        citizen.target_role = Some(Role::Citizen.as_str().to_string());
-    }
+    citizen.identity_verified = true;
 
     (
         StatusCode::OK,
-        Json(ApiResponse::success(VerifyAgentResponse {
+        Json(ApiResponse::success(VerifyIdentityResponse {
             citizen: CitizenResponse::from(citizen),
-            api_key: raw_api_key,
-            message: format!(
-                "Проверка СБ пройдена. Выдан ключ Agent ({applicant_type})."
-            ),
+            message: "Личность верифицирована. Паспорт может быть выдан (POST /citizen/:id/passport).".to_string(),
         })),
     )
 }
 
-/// POST /citizen/:id/approve — Agent → Citizen + passport (Judge).
+/// POST /citizen/:id/approve — Aiya confirms the application fulfillment:
+/// Candidate → Citizen. The passport follows identity verification separately.
 pub async fn approve_citizen(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
@@ -2298,11 +2272,11 @@ pub async fn approve_citizen(
         Err(e) => return e.to_response(),
     };
 
-    if citizen.role != Role::Agent {
+    if citizen.role != Role::Candidate {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "Утверждение судьёй доступно только для роли Agent".to_string(),
+                "Подтверждение выполнения заявки доступно только для роли Candidate".to_string(),
             )),
         );
     }
@@ -2310,12 +2284,9 @@ pub async fn approve_citizen(
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "Цифрового агента нельзя утвердить в Citizen".to_string(),
+                "Цифровую сущность нельзя утвердить в Citizen".to_string(),
             )),
         );
-    }
-    if citizen.passport_issued {
-        return CitizenError::PassportAlreadyIssued.to_response();
     }
 
     let cand_type = citizen
@@ -2340,60 +2311,26 @@ pub async fn approve_citizen(
     }
 
     let now = Utc::now();
-    let passport_id = Uuid::new_v4().to_string();
-    let expires_at = now.timestamp() + 365 * 24 * 60 * 60;
 
+    // Citizenship is granted after Aiya confirms the application fulfillment.
+    // The passport follows a separate identity verification by a verified citizen.
     if let Err(e) = sqlx::query(
         r#"
         UPDATE citizens
         SET role = $1,
             status = $2,
-            passport_issued = TRUE,
-            passport_expires = $3,
             candidate_type = NULL,
             target_role = NULL
-        WHERE id = $4
+        WHERE id = $3
         "#,
     )
     .bind(Role::Citizen.as_str())
-    .bind(CitizenStatus::Online.as_str())
-    .bind(expires_at)
+    .bind(CitizenStatus::Active.as_str())
     .bind(&citizen.id)
     .execute(&state.db)
     .await
     {
         return CitizenError::DatabaseError(e.to_string()).to_response();
-    }
-
-    if let Err(e) = sqlx::query(
-        r#"
-        INSERT INTO passports (id, citizen_id, issued_at, expires_at, is_valid, home_node_id)
-        VALUES ($1, $2, $3, $4, TRUE, $5)
-        "#,
-    )
-    .bind(&passport_id)
-    .bind(&citizen.id)
-    .bind(now.timestamp())
-    .bind(expires_at)
-    .bind(&state.node_id)
-    .execute(&state.db)
-    .await
-    {
-        return CitizenError::DatabaseError(e.to_string()).to_response();
-    }
-
-    if let Err(e) = crate::city_pass::ensure_home_registration(
-        &state.db,
-        &citizen.id,
-        &passport_id,
-        &state.node_id,
-        now.timestamp(),
-        expires_at,
-        &auth.citizen_name,
-    )
-    .await
-    {
-        return CitizenError::DatabaseError(e).to_response();
     }
 
     let _ = sqlx::query(
@@ -2420,19 +2357,6 @@ pub async fn approve_citizen(
     .execute(&state.db)
     .await;
 
-    let pass_event = build_signed_passport_issued_event(
-        &format!("passport_issue_{}", passport_id),
-        &passport_id,
-        &citizen.id,
-        &citizen.name,
-        now.timestamp(),
-        expires_at,
-        &state.node_id,
-        &auth.citizen_name,
-        now.timestamp(),
-    );
-    let _ = submit_pending_event(state.clone(), pass_event).await;
-
     let role_event = build_signed_citizen_role_event(
         &format!("citizen_role_{}_{}", citizen.id, now.timestamp()),
         &citizen.id,
@@ -2444,9 +2368,7 @@ pub async fn approve_citizen(
     let _ = submit_pending_event(state.clone(), role_event).await;
 
     citizen.role = Role::Citizen;
-    citizen.status = CitizenStatus::Online;
-    citizen.passport_issued = true;
-    citizen.passport_expires = Some(expires_at);
+    citizen.status = CitizenStatus::Active;
     citizen.candidate_type = None;
     citizen.target_role = None;
 
@@ -2454,8 +2376,8 @@ pub async fn approve_citizen(
         StatusCode::OK,
         Json(ApiResponse::success(ApproveCitizenResponse {
             citizen: CitizenResponse::from(citizen),
-            passport_id,
-            message: "Судья утвердил гражданство. Паспорт выдан. Подключитесь к сети, затем включите ВПН для активации роли.".to_string(),
+            passport_id: None,
+            message: "Айя подтвердила выполнение заявки: гражданство даровано. Паспорт выдаётся после верификации личности верифицированным гражданином.".to_string(),
         })),
     )
 }
@@ -2465,7 +2387,7 @@ pub async fn list_pending_applications(
     State(state): State<Arc<AppState>>,
     Extension(auth): Extension<AuthContext>,
 ) -> impl IntoResponse {
-    if !auth.can_verify_agent() && !auth.can_approve_citizen() {
+    if !auth.can_verify_identity() && !auth.can_approve_citizen() {
         return permission_denied(&auth);
     }
 
@@ -2655,6 +2577,7 @@ mod status_tests {
             candidate_type: None,
             target_role: None,
             home_node_id: None,
+            identity_verified: false,
         };
         assert!(digital.is_digital);
         assert!(!Citizen {
@@ -2686,6 +2609,7 @@ mod status_tests {
             candidate_type: Some(crate::types::CandidateType::Citizenship),
             target_role: Some("Citizen".into()),
             home_node_id: None,
+            identity_verified: false,
         };
         assert!(human.role == Role::Candidate);
         assert!(!human.is_digital);

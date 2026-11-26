@@ -315,7 +315,7 @@ pub async fn vote_on_referendum(
 ) -> Result<ReferendumRow, ReferendumError> {
     if !auth.can_vote() {
         return Err(ReferendumError::bad_request(
-            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+            "Agent cannot vote; only Citizen, Mayor, Aiya, Founder may vote",
         ));
     }
     let voter_id = resolve_auth_citizen_id(auth, &state.db).await?;
@@ -427,7 +427,7 @@ pub async fn vote_handler(
     }
     if !auth.can_vote() {
         return response::forbidden(
-            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+            "Agent cannot vote; only Citizen, Mayor, Aiya, Founder may vote",
         );
     }
 

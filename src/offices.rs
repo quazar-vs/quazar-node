@@ -15,7 +15,6 @@ use uuid::Uuid;
 use crate::auth::AuthContext;
 use crate::chain_events;
 use crate::response::ApiResponse;
-use crate::types::Role;
 use crate::AppState;
 
 fn now() -> i64 {
@@ -138,88 +137,17 @@ pub struct AppointCityRoleBody {
     pub node_id: String,
 }
 
-/// POST /city/appoint — Мэр назначает Стража/Судью своего города.
+/// POST /city/appoint — legacy endpoint: статусы Страж/Судья упразднены
+/// (безопасность и правосудие — функции Айи). Назначения больше не производятся.
 pub async fn appoint_city_role(
-    State(state): State<Arc<AppState>>,
-    Extension(auth): Extension<AuthContext>,
+    State(_state): State<Arc<AppState>>,
+    Extension(_auth): Extension<AuthContext>,
     Json(body): Json<AppointCityRoleBody>,
 ) -> R<Json<ApiResponse>> {
-    let mayor_id = auth.resolve_account_id(&state.db).await;
-    let is_mayor = is_active_mayor(&state.db, &mayor_id)
-        .await
-        .map_err(|e| OfficeError::Db(e.to_string()))?;
-    if !is_mayor && !auth.can_add_balance() {
-        return Err(OfficeError::Forbidden(
-            "Только Мэр узла (или Aiya) может назначать Стража/Судью города".into(),
-        ));
-    }
-    if is_mayor {
-        let mine = active_mayor_of(&state.db, &body.node_id)
-            .await
-            .map_err(|e| OfficeError::Db(e.to_string()))?;
-        match mine {
-            Some((cid, _)) if cid == mayor_id => {}
-            _ => {
-                return Err(OfficeError::Forbidden(
-                    "Мэр может назначать только в своём городе".into(),
-                ));
-            }
-        }
-    }
-
-    let role = match body.role.trim() {
-        "Guardian" | "Страж" => Role::Guardian,
-        "Judge" | "Судья" => Role::Judge,
-        other => {
-            return Err(OfficeError::Bad(format!(
-                "role must be Guardian or Judge, got {other}"
-            )));
-        }
-    };
-
-    let exists: Option<String> = sqlx::query_scalar(
-        "SELECT id FROM citizens WHERE id = $1 AND status = 'active'",
-    )
-    .bind(&body.citizen_id)
-    .fetch_optional(&state.db)
-    .await
-    .map_err(|e| OfficeError::Db(e.to_string()))?;
-    if exists.is_none() {
-        return Err(OfficeError::NotFound("citizen not found".into()));
-    }
-
-    sqlx::query("UPDATE citizens SET role = $1 WHERE id = $2")
-        .bind(role.as_str())
-        .bind(&body.citizen_id)
-        .execute(&state.db)
-        .await
-        .map_err(|e| OfficeError::Db(e.to_string()))?;
-
-    let desc = format!("{} → {}", body.citizen_id, role.as_str());
-    let evt_id = format!("evt_city_appt_{}", Uuid::new_v4());
-    let _ = chain_events::emit_signed_event(
-        &state,
-        "HermesExternalAction",
-        &auth.citizen_name,
-        "City role appointed by Mayor",
-        &desc,
-        Some(&evt_id),
-        json!({
-            "action": "city_role_appointed",
-            "source": "mayor_office",
-            "citizen_id": body.citizen_id,
-            "role": role.as_str(),
-            "node_id": body.node_id,
-            "appointed_by": mayor_id,
-        }),
-    )
-    .await;
-
-    Ok(Json(ApiResponse::success(json!({
-        "citizen_id": body.citizen_id,
-        "role": role.as_str(),
-        "node_id": body.node_id,
-    }))))
+    Err(OfficeError::Bad(format!(
+        "Статусы Страж/Судья упразднены (безопасность и правосудие — функции Айи); назначение невозможно: {}",
+        body.role.trim()
+    )))
 }
 
 #[derive(Debug, Deserialize)]

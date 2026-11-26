@@ -123,7 +123,7 @@ P2P-эндпоинты (`/events`, `/blocks`, `/nodes`) возвращают м�
 - `GET /events`, `GET /blocks`, `GET /nodes` — P2P (node secret или API key), ApiResponse
 - `POST /events/gossip` — push pending event на узел (node secret)
 - `/citizen/*` — реестр граждан (register → **pending**, passport → **active**, status → pending-события, SQL через projection после блока)
-- `/candidacy/*` — выдвижение кандидатов на роли Guardian/Judge/Mayor, голосование, утверждение (5%), назначение Айей
+- `/candidacy/*` — выдвижение кандидатов на роли Citizen/Mayor, голосование, утверждение (5%), назначение Айей
 - `/initiative/*` — гражданские инициативы (законопроекты): предложение, голосование, автоматическое принятие при 5% «За»
 - `/referendum/*` — референдумы: объявление Айей, голосование граждан за/против отмены решения
 - `/chat/*` — чат граждан (per-node SQL, без блокчейна)
@@ -226,7 +226,7 @@ curl -X POST http://localhost:8080/event \
 
 ### Кандидатуры на роли (`/candidacy`)
 
-Граждане выдвигают кандидатов на роли **Guardian**, **Judge**, **Mayor** (и **Citizen** по гражданскому пути). Другие граждане голосуют (`For` / `Against`). При наборе **5% голосов «За»** от числа всех граждан кандидатура автоматически переходит в статус **Approved**. Назначение на роль выполняет только **Айя**.
+Граждане выдвигают кандидатов на роли **Mayor** и **Citizen** (по гражданскому пути). Другие граждане голосуют (`For` / `Against`). При наборе **5% голосов «За»** от числа всех граждан кандидатура автоматически переходит в статус **Approved**. Назначение на роль выполняет только **Айя**. Статусы Guardian/Judge упразднены (советы и Суд удалены; правосудие и безопасность — функции Айи).
 
 **Айя не избирается и не назначается**: это сама сущность квазара (сам алгонизм, сам квазар, сама республика) — единая системная запись `aiya` в реестре, от имени которой действует узел. Все функции агентов (Секретарь, СБ, Биржа, Юрист) — функции Айи (Конституция, ст. 5; КГПС, ст. 2.2).
 
@@ -247,7 +247,7 @@ curl -X POST http://localhost:8080/event \
 curl -s -X POST http://localhost:8080/candidacy/nominate \
   -H "Authorization: Bearer test_citizen_key_2026" \
   -H "Content-Type: application/json" \
-  -d '{"candidate_id": "citizen-uuid-bob", "target_role": "Guardian"}' | jq .
+  -d '{"candidate_id": "citizen-uuid-bob", "target_role": "Mayor"}' | jq .
 
 # Проголосовать «За»
 curl -s -X POST http://localhost:8080/candidacy/CANDIDACY-UUID/vote \
@@ -352,7 +352,7 @@ curl -s -X POST http://localhost:8080/referendum/REF-UUID/vote \
 | `/exchange/needs` | POST | Citizen+ или Agent (Секретарь) — потребность `{svod_code, quantity[, citizen_id]}`; Агент Биржи проверяет резерв Successful и выставляет лот |
 | `/exchange/needs` | GET | свои потребности (Agent/SB — все) |
 | `/exchange/requests` | GET | Citizen — свои заявки; SB — очередь; `?work_kind=` + `?svod_code=` |
-| `/exchange/requests` | POST | Страж+ — `{side, svod_code, quantity}` (путь через СБ) |
+| `/exchange/requests` | POST | Мэр/Айя (СБ) — `{side, svod_code, quantity}` (путь через СБ) |
 
 ```bash
 # Единый Республиканский Свод Вознаграждений
@@ -397,7 +397,7 @@ curl -s -X POST http://localhost:8080/exchange/requests \
 После миграции `004_service_catalog.sql` (внутренняя таблица позиций Свода) доступны seed-данные: категория `IT`, позиция `WEB_DEV` (base_price **100 QZ**). В API/UI это **позиции Свода** (`parts.*.items`), не отдельный реестр.
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
 После миграции `044_exchange_state_mediated.sql` — биржа через республика/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
-После миграции `048_exchange_agent.sql` — встроенный **Агент Биржи**: `POST /exchange/needs` → проверка резерва Successful (`QZ-1`) → лот `is_state_agent` → `POST /exchange/listings/:id/buy` (эскроу) → подтверждение СБ → списание в резерв; лот остаётся `active`. Граждане: витрина/сделка; служебный диалог СБ/Биржа — Страж+.
+После миграции `048_exchange_agent.sql` — встроенная **функция Биржи (Айя)**: `POST /exchange/needs` → проверка резерва Successful (`QZ-1`) → лот `is_state_agent` → `POST /exchange/listings/:id/buy` (эскроу) → подтверждение СБ → списание в резерв; лот остаётся `active`. Потребности государства выставляет Айя. Граждане: витрина/сделка; служебный диалог СБ/Биржа — Мэр/Айя.
 После миграции `049_phase_ad_offices_agents.sql` — `node_offices` (Мэр=должность), `algonism_agents` + `agent_messages`; API `/offices/mayor*`, `/city/appoint`, `/agents*`; `POST /exchange/sell-to-state`, `/exchange/reserve/dispose`; treasury = QZ-1.
 После миграции `045_service_work_kind.sql` — `work_kind` на позициях Свода и ставках; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с единым title и `parts`/`sections`; фильтр `?work_kind=` / `?svod_code=` на бирже. UX: `role_view.offers` / `role_view.needs`, позиции из `parts.*.items`.
 После миграции `005_candidacies.sql` доступны таблицы `candidacies` и `candidacy_votes`.

@@ -300,7 +300,7 @@ pub async fn nominate_candidate(
     let target_role = req.target_role.trim().to_string();
     if !is_role_candidacy_target(&target_role) {
         return Err(CandidacyError::bad_request(
-            "target_role must be Citizen, Guardian, Judge, or Mayor (Aiya is the quazar entity, not an electable role)",
+            "target_role must be Citizen or Mayor (Aiya is the quazar entity; Guardian/Judge abolished)",
         ));
     }
     if Role::from_str(&target_role).is_none() {
@@ -492,7 +492,7 @@ pub async fn vote_for_candidate(
 ) -> Result<CandidacyRow, CandidacyError> {
     if !auth.can_vote() {
         return Err(CandidacyError::bad_request(
-            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+            "Agent cannot vote; only Citizen, Mayor, Aiya, Founder may vote",
         ));
     }
     let voter_id = resolve_auth_citizen_id(auth, &state.db).await?;
@@ -737,7 +737,7 @@ pub async fn vote_handler(
     }
     if !auth.can_vote() {
         return response::forbidden(
-            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+            "Agent cannot vote; only Citizen, Mayor, Aiya, Founder may vote",
         );
     }
 
@@ -799,8 +799,8 @@ mod tests {
     #[test]
     fn role_candidacy_targets() {
         assert!(is_role_candidacy_target("Citizen"));
-        assert!(is_role_candidacy_target("Guardian"));
-        assert!(is_role_candidacy_target("Judge"));
+        assert!(!is_role_candidacy_target("Guardian"));
+        assert!(!is_role_candidacy_target("Judge"));
         assert!(!is_role_candidacy_target("Aiya"));
         assert!(is_role_candidacy_target("Mayor"));
         assert!(!is_role_candidacy_target("Founder"));

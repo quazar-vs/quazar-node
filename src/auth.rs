@@ -497,7 +497,7 @@ impl AuthContext {
     pub fn node() -> Self {
         Self {
             citizen_name: "__node__".to_string(),
-            role: Role::Guardian,
+            role: Role::Aiya,
             is_node: true,
             citizen_id: None,
             agent_permissions: Vec::new(),
@@ -595,14 +595,11 @@ impl AuthContext {
     }
 
     /// Exchange Security (СБ): verify sell requests and confirm delivery.
-    /// Страж и выше (иерархия доступа лота проверяется отдельно в confirm).
+    /// СБ — функция Айи; мэр подтверждает городские сделки.
     pub fn can_exchange_security(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
-            && matches!(
-                self.role,
-                Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder
-            )
+            && matches!(self.role, Role::Mayor | Role::Aiya | Role::Founder)
     }
 
     /// Подтвердить сделку СБ: роль ≥ требуемого уровня доступа лота.
@@ -610,28 +607,21 @@ impl AuthContext {
         self.can_exchange_security() && self.role.meets_access_level(required)
     }
 
-    /// Биржа (заявки sell/buy через СБ) и агенты СБ: только Страж и выше (КВА / Свод).
+    /// Биржа (заявки sell/buy через СБ): СБ — функция Айи, мэр — городские сделки.
     pub fn can_use_exchange(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
-            && matches!(
-                self.role,
-                Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder
-            )
+            && matches!(self.role, Role::Mayor | Role::Aiya | Role::Founder)
     }
 
-    /// Потребность → Агент Биржи: активный гражданин и выше (не агент).
+    /// Потребность на бирже: активный гражданин и выше (не агент).
+    /// Потребности государства выставляет Айя.
     pub fn can_express_exchange_need(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
             && matches!(
                 self.role,
-                Role::Citizen
-                    | Role::Guardian
-                    | Role::Judge
-                    | Role::Mayor
-                    | Role::Aiya
-                    | Role::Founder
+                Role::Citizen | Role::Mayor | Role::Aiya | Role::Founder
             )
     }
 
@@ -656,34 +646,31 @@ impl AuthContext {
     pub fn can_manage_citizens(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
-            && matches!(
-                self.role,
-                Role::Founder | Role::Aiya | Role::Mayor | Role::Guardian
-            )
+            && matches!(self.role, Role::Founder | Role::Aiya | Role::Mayor)
     }
 
     /// Start / advance mayor elections (not available to Agent/Candidate).
     pub fn can_manage_mayor_elections(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
-            && matches!(
-                self.role,
-                Role::Founder | Role::Aiya | Role::Mayor | Role::Guardian
-            )
+            && matches!(self.role, Role::Founder | Role::Aiya | Role::Mayor)
     }
 
-    /// SB verification: Candidate → Agent (Founder, Aiya, Guardian).
-    pub fn can_verify_agent(&self) -> bool {
+    /// Identity verification for the passport: only a verified citizen
+    /// (active Citizen with a passport). Founder/Aiya bootstrap the first
+    /// verifications until verified citizens exist.
+    pub fn can_verify_identity(&self) -> bool {
         self.has_system_access()
             && !self.role.is_agent()
-            && matches!(self.role, Role::Founder | Role::Aiya | Role::Guardian)
+            && matches!(self.role, Role::Citizen | Role::Founder | Role::Aiya)
     }
 
-    /// Judge approval: Agent → Citizen + passport.
-    /// Approve Agent → Citizen + passport: Judge or Секретарь (Agent).
+    /// Aiya confirms fulfillment of the citizenship application:
+    /// Candidate → Citizen. Passport follows identity verification separately.
     pub fn can_approve_citizen(&self) -> bool {
         self.has_system_access()
-            && (self.role == Role::Judge || self.role.is_agent())
+            && !self.role.is_agent()
+            && matches!(self.role, Role::Aiya | Role::Founder)
     }
 
     pub fn can_change_citizen_role(&self) -> bool {
@@ -713,18 +700,13 @@ impl AuthContext {
             && matches!(self.role, Role::Founder | Role::Aiya)
     }
 
-    /// Cast votes in governance / referendums / initiatives / generic votes.
-    /// Agent and Candidate are excluded; Citizen and higher political roles may vote.
+    /// Cast votes in referendums / initiatives / generic votes / codes adoption.
+    /// Agent and Candidate are excluded; Citizen and higher may vote.
     pub fn can_vote(&self) -> bool {
         self.has_system_access()
             && matches!(
                 self.role,
-                Role::Citizen
-                    | Role::Judge
-                    | Role::Guardian
-                    | Role::Mayor
-                    | Role::Aiya
-                    | Role::Founder
+                Role::Citizen | Role::Mayor | Role::Aiya | Role::Founder
             )
     }
 
@@ -744,12 +726,7 @@ impl AuthContext {
         }
         matches!(
             self.role,
-            Role::Citizen
-                | Role::Judge
-                | Role::Guardian
-                | Role::Mayor
-                | Role::Aiya
-                | Role::Founder
+            Role::Citizen | Role::Mayor | Role::Aiya | Role::Founder
         )
     }
 
@@ -935,6 +912,10 @@ pub fn can_assign_role(
     if *desired_role == Role::Aiya {
         return false;
     }
+    // Guardian/Judge are abolished (councils and Court removed) — never assigned.
+    if matches!(desired_role, Role::Guardian | Role::Judge) {
+        return false;
+    }
     // Never assign above the assigner's own hierarchy.
     if !assigner.satisfies(desired_role) {
         return false;
@@ -984,12 +965,13 @@ mod tests {
     #[test]
     fn can_vote_allows_citizen_and_officials_not_agent() {
         assert!(ctx(Role::Citizen).can_vote());
-        assert!(ctx(Role::Judge).can_vote());
-        assert!(ctx(Role::Guardian).can_vote());
         assert!(ctx(Role::Mayor).can_vote());
         assert!(ctx(Role::Aiya).can_vote());
         assert!(ctx(Role::Founder).can_vote());
 
+        // Guardian/Judge abolished (councils and Court removed).
+        assert!(!ctx(Role::Judge).can_vote());
+        assert!(!ctx(Role::Guardian).can_vote());
         assert!(!ctx(Role::Agent).can_vote());
         assert!(!ctx(Role::Agent).can_vote_in_election());
         assert!(!ctx(Role::Candidate).can_vote());
@@ -1020,8 +1002,12 @@ mod tests {
         assert!(!ctx(Role::Citizen).can_use_exchange());
         assert!(!ctx(Role::Citizen).can_submit_need_for_citizen());
 
-        assert!(ctx(Role::Guardian).can_express_exchange_need());
-        assert!(ctx(Role::Guardian).can_use_exchange());
+        // СБ — функция Айи; мэр — городские сделки.
+        assert!(ctx(Role::Aiya).can_express_exchange_need());
+        assert!(ctx(Role::Aiya).can_use_exchange());
+        assert!(ctx(Role::Mayor).can_use_exchange());
+        assert!(!ctx(Role::Guardian).can_express_exchange_need());
+        assert!(!ctx(Role::Guardian).can_use_exchange());
 
         assert!(!ctx(Role::Candidate).can_express_exchange_need());
         assert!(!ctx(Role::Agent).can_express_exchange_need());
@@ -1055,7 +1041,7 @@ mod tests {
         assert!(!c.can_update_citizen_status());
         assert!(!c.can_manage_citizens());
         assert!(!c.can_manage_mayor_elections());
-        assert!(!c.can_verify_agent());
+        assert!(!c.can_verify_identity());
         assert!(!c.can_approve_citizen());
         assert!(!c.can_change_citizen_role());
         assert!(!c.can_manage_api_keys());
@@ -1097,8 +1083,6 @@ mod tests {
     fn non_agent_roles_chat_unchanged() {
         for role in [
             Role::Citizen,
-            Role::Judge,
-            Role::Guardian,
             Role::Mayor,
             Role::Aiya,
             Role::Founder,
@@ -1140,19 +1124,23 @@ mod tests {
 
     #[test]
     fn verify_and_approve_permissions() {
-        assert!(ctx(Role::Founder).can_verify_agent());
-        assert!(ctx(Role::Aiya).can_verify_agent());
-        assert!(ctx(Role::Guardian).can_verify_agent());
-        assert!(!ctx(Role::Judge).can_verify_agent());
-        assert!(!ctx(Role::Citizen).can_verify_agent());
-        assert!(!ctx(Role::Agent).can_verify_agent());
-        assert!(!ctx(Role::Candidate).can_verify_agent());
+        // Identity verification: verified citizens (passport check is in the
+        // handler); Founder/Aiya bootstrap. Agent/Candidate never.
+        assert!(ctx(Role::Citizen).can_verify_identity());
+        assert!(ctx(Role::Founder).can_verify_identity());
+        assert!(ctx(Role::Aiya).can_verify_identity());
+        assert!(!ctx(Role::Judge).can_verify_identity());
+        assert!(!ctx(Role::Guardian).can_verify_identity());
+        assert!(!ctx(Role::Agent).can_verify_identity());
+        assert!(!ctx(Role::Candidate).can_verify_identity());
 
-        assert!(ctx(Role::Judge).can_approve_citizen());
-        assert!(ctx(Role::Agent).can_approve_citizen());
-        assert!(!ctx(Role::Founder).can_approve_citizen());
+        // Aiya confirms fulfillment of the citizenship application.
+        assert!(ctx(Role::Aiya).can_approve_citizen());
+        assert!(ctx(Role::Founder).can_approve_citizen());
+        assert!(!ctx(Role::Judge).can_approve_citizen());
+        assert!(!ctx(Role::Agent).can_approve_citizen());
         assert!(!ctx(Role::Guardian).can_approve_citizen());
-        assert!(!ctx(Role::Aiya).can_approve_citizen());
+        assert!(!ctx(Role::Mayor).can_approve_citizen());
         assert!(!ctx(Role::Citizen).can_approve_citizen());
         assert!(!ctx(Role::Candidate).can_approve_citizen());
     }
@@ -1193,33 +1181,27 @@ mod tests {
         assert!(can_assign_role(
             &aiya,
             Some(&ct),
+            Some("Mayor"),
+            &Role::Mayor
+        ));
+        assert!(!can_assign_role(
+            &aiya,
+            Some(&ct),
+            Some("Mayor"),
+            &Role::Citizen
+        ));
+        // Guardian/Judge abolished — never assignable, even via a legacy target.
+        assert!(!can_assign_role(
+            &aiya,
+            Some(&ct),
             Some("Guardian"),
             &Role::Guardian
         ));
         assert!(!can_assign_role(
             &aiya,
             Some(&ct),
-            Some("Guardian"),
-            &Role::Judge
-        ));
-        assert!(!can_assign_role(
-            &aiya,
-            Some(&ct),
-            Some("Guardian"),
-            &Role::Aiya
-        ));
-        assert!(!can_assign_role(
-            &aiya,
-            Some(&ct),
-            Some("Guardian"),
-            &Role::Citizen
-        ));
-        // Cannot assign above nominated target (Aiya when target is Judge).
-        assert!(!can_assign_role(
-            &aiya,
-            Some(&ct),
             Some("Judge"),
-            &Role::Aiya
+            &Role::Judge
         ));
         // Aiya is the quazar entity — never assignable, even via a legacy target.
         assert!(!can_assign_role(&aiya, Some(&ct), Some("Aiya"), &Role::Aiya));
@@ -1233,22 +1215,22 @@ mod tests {
 
     #[test]
     fn can_assign_role_respects_assigner_hierarchy() {
-        let guardian = Role::Guardian;
+        let mayor = Role::Mayor;
         let ct = CandidateType::Role;
 
-        // Guardian cannot assign Aiya (above hierarchy) even if target says Aiya.
+        // Mayor cannot assign Aiya (above hierarchy) even if target says Aiya.
         assert!(!can_assign_role(
-            &guardian,
+            &mayor,
             Some(&ct),
             Some("Aiya"),
             &Role::Aiya
         ));
-        // Guardian can assign Guardian if that is the target.
+        // Exact target match within the assigner hierarchy is allowed.
         assert!(can_assign_role(
-            &guardian,
+            &mayor,
             Some(&ct),
-            Some("Guardian"),
-            &Role::Guardian
+            Some("Mayor"),
+            &Role::Mayor
         ));
         // Aiya cannot assign Founder.
         assert!(!can_assign_role(

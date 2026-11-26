@@ -504,7 +504,7 @@ pub async fn cast_vote_handler(
     }
     if !auth.can_vote() {
         return response::forbidden(
-            "Agent cannot vote; only Citizen, Judge, Guardian, Mayor, Aiya, Founder may vote",
+            "Agent cannot vote; only Citizen, Mayor, Aiya, Founder may vote",
         );
     }
     if !auth.authorize_citizen_ref(&state.db, citizen_id).await {

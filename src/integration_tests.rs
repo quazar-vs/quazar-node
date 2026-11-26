@@ -543,14 +543,14 @@ async fn candidacy_nomination_vote_approve_flow() {
         &nominator_auth,
         NominateRequest {
             candidate_id: candidate_id.clone(),
-            target_role: "Guardian".to_string(),
+            target_role: "Mayor".to_string(),
         },
     )
     .await
     .expect("nominate");
 
     assert_eq!(row.status, "Active");
-    assert_eq!(row.target_role, "Guardian");
+    assert_eq!(row.target_role, "Mayor");
     assert!(row.threshold >= 1);
 
     let voter_auth = AuthContext::from_api_key(format!("candv{n}"), Role::Citizen);
@@ -614,7 +614,7 @@ async fn candidacy_nomination_vote_approve_flow() {
     .expect("candidate type after approve");
     assert_eq!(role_after, "Candidate");
     assert_eq!(ctype.as_deref(), Some("role"));
-    assert_eq!(trole.as_deref(), Some("Guardian"));
+    assert_eq!(trole.as_deref(), Some("Mayor"));
 
     let aiya_auth = AuthContext::from_api_key("aiya".into(), Role::Aiya);
     let appointed = appoint_candidate(state, &aiya_auth, &row.id)
@@ -636,7 +636,7 @@ async fn candidacy_nomination_vote_approve_flow() {
         .fetch_one(&pool)
         .await
         .expect("role");
-    assert_eq!(role, "Guardian");
+    assert_eq!(role, "Mayor");
 }
 
 #[tokio::test]
@@ -1484,4 +1484,126 @@ async fn aiya_not_a_candidacy_target() {
         err.to_string().contains("target_role"),
         "unexpected error: {err}"
     );
+}
+
+#[tokio::test]
+async fn citizenship_aiya_confirm_and_identity_verification() {
+    use std::sync::Arc;
+
+    use axum::extract::{Extension, Path, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+
+    use crate::auth::AuthContext;
+    use crate::citizen::{approve_citizen, issue_passport, verify_identity, IssuePassportRequest};
+    use crate::nodes::NodeRegistry;
+    use crate::types::Role;
+    use crate::AppState;
+
+    ensure_test_auth_secrets();
+
+    let Some(pool) = postgres_pool().await else {
+        eprintln!("skip citizenship_aiya_confirm_and_identity_verification: PostgreSQL unavailable");
+        return;
+    };
+    db::run_migrations(&pool).await.expect("migrations");
+
+    let n = uuid::Uuid::new_v4().simple().to_string();
+    let applicant_id = format!("cz-app-{n}");
+    let applicant_name = format!("cza{n}");
+    let verifier_id = format!("cz-ver-{n}");
+    let verifier_name = format!("czv{n}");
+
+    sqlx::query(
+        "INSERT INTO citizens (id, name, public_key, status, role, created_at, passport_issued, candidate_type, target_role)
+         VALUES ($1, $2, '00', 'pending', 'Candidate', $3, FALSE, 'citizenship', 'Citizen')",
+    )
+    .bind(&applicant_id)
+    .bind(&applicant_name)
+    .bind(1_700_006_000i64)
+    .execute(&pool)
+    .await
+    .expect("applicant fixture");
+
+    sqlx::query(
+        "INSERT INTO citizens (id, name, public_key, status, role, created_at, passport_issued, identity_verified)
+         VALUES ($1, $2, '00', 'active', 'Citizen', $3, TRUE, TRUE)",
+    )
+    .bind(&verifier_id)
+    .bind(&verifier_name)
+    .bind(1_700_006_000i64)
+    .execute(&pool)
+    .await
+    .expect("verifier fixture");
+
+    let state = Arc::new(AppState {
+        db: pool.clone(),
+        node_registry: Arc::new(NodeRegistry::new(pool.clone())),
+        node_id: "TEST-NODE".to_string(),
+        channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
+        dna: crate::algonism::DnaMemory::new(),
+    });
+
+    // An unverified citizen cannot verify anyone's identity.
+    let stranger_auth = AuthContext::from_api_key(applicant_name.clone(), Role::Citizen);
+    let resp = verify_identity(
+        State(state.clone()),
+        Extension(stranger_auth),
+        Path(applicant_id.clone()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+
+    // Aiya confirms the application fulfillment: Candidate → Citizen, no passport yet.
+    let aiya_auth = AuthContext::from_api_key("aiya".into(), Role::Aiya);
+    let resp = approve_citizen(
+        State(state.clone()),
+        Extension(aiya_auth.clone()),
+        Path(applicant_id.clone()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let (role, passport): (String, bool) =
+        sqlx::query_as("SELECT role, passport_issued FROM citizens WHERE id = $1")
+            .bind(&applicant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("role after approve");
+    assert_eq!(role, "Citizen");
+    assert!(!passport);
+
+    // Passport is blocked until identity verification.
+    let resp = issue_passport(
+        State(state.clone()),
+        Extension(aiya_auth.clone()),
+        Path(applicant_id.clone()),
+        Json(IssuePassportRequest { expires_in_days: None }),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // A verified citizen (active, with passport) verifies the identity.
+    let verifier_auth = AuthContext::from_api_key(verifier_name.clone(), Role::Citizen);
+    let resp = verify_identity(
+        State(state.clone()),
+        Extension(verifier_auth),
+        Path(applicant_id.clone()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    let verified: bool =
+        sqlx::query_scalar("SELECT identity_verified FROM citizens WHERE id = $1")
+            .bind(&applicant_id)
+            .fetch_one(&pool)
+            .await
+            .expect("identity_verified");
+    assert!(verified);
 }
