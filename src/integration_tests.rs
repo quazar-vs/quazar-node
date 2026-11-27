@@ -1527,8 +1527,8 @@ async fn citizenship_aiya_confirm_and_identity_verification() {
     .expect("applicant fixture");
 
     sqlx::query(
-        "INSERT INTO citizenship_applications (id, citizen_id, email, reason, status, applicant_type)
-         VALUES ($1, $2, 'a@example.org', 'вклад', 'Submitted', 'human')",
+        "INSERT INTO citizenship_applications (id, citizen_id, email, reason, status, applicant_type, fulfilled_at, fulfilled_by)
+         VALUES ($1, $2, 'a@example.org', 'вклад', 'Submitted', 'human', NOW(), 'applicant')",
     )
     .bind(format!("cz-app-{n}"))
     .bind(&applicant_id)
@@ -1658,6 +1658,17 @@ async fn approve_requires_application_and_login_requires_passport() {
     .await
     .expect("candidate fixture");
 
+    // Application exists but is NOT fulfilled.
+    sqlx::query(
+        "INSERT INTO citizenship_applications (id, citizen_id, email, reason, status, applicant_type)
+         VALUES ($1, $2, 'n@example.org', 'вклад', 'Submitted', 'human')",
+    )
+    .bind(format!("cz-noapp-{n}"))
+    .bind(&cid)
+    .execute(&pool)
+    .await
+    .expect("application fixture");
+
     let state = Arc::new(AppState {
         db: pool.clone(),
         node_registry: Arc::new(NodeRegistry::new(pool.clone())),
@@ -1667,8 +1678,26 @@ async fn approve_requires_application_and_login_requires_passport() {
         dna: crate::algonism::DnaMemory::new(),
     });
 
-    // C2: Aiya cannot approve a Candidate that has no application.
+    // C2: Aiya cannot approve a Candidate whose application is not fulfilled.
     let aiya_auth = AuthContext::from_api_key("aiya".into(), Role::Aiya);
+    let resp = approve_citizen(
+        State(state.clone()),
+        Extension(aiya_auth.clone()),
+        Path(cid.clone()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+
+    // Marking the application fulfilled (by Aiya on behalf) unblocks approval.
+    let resp = crate::citizen::fulfill_application(
+        State(state.clone()),
+        Extension(aiya_auth.clone()),
+        Path(cid.clone()),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
     let resp = approve_citizen(
         State(state.clone()),
         Extension(aiya_auth),
@@ -1676,7 +1705,7 @@ async fn approve_requires_application_and_login_requires_passport() {
     )
     .await
     .into_response();
-    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    assert_eq!(resp.status(), StatusCode::OK);
 
     // C3: an active Citizen without a passport cannot log in.
     sqlx::query("UPDATE citizens SET role = 'Citizen', status = 'active' WHERE id = $1")
@@ -1701,4 +1730,84 @@ async fn approve_requires_application_and_login_requires_passport() {
     .await
     .into_response();
     assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn portal_approve_grants_citizenship_without_passport() {
+    use std::sync::Arc;
+
+    use axum::extract::{Extension, Path, State};
+    use axum::http::StatusCode;
+    use axum::response::IntoResponse;
+    use axum::Json;
+
+    use crate::auth::AuthContext;
+    use crate::citizenship_portal::{approve_application, ReviewApplicationRequest};
+    use crate::nodes::NodeRegistry;
+    use crate::types::Role;
+    use crate::AppState;
+
+    ensure_test_auth_secrets();
+
+    let Some(pool) = postgres_pool().await else {
+        eprintln!("skip portal_approve_grants_citizenship_without_passport: PostgreSQL unavailable");
+        return;
+    };
+    db::run_migrations(&pool).await.expect("migrations");
+
+    let n = uuid::Uuid::new_v4().simple().to_string();
+    let app_id = uuid::Uuid::new_v4();
+    let login = format!("pt{n}");
+    let email = format!("{login}@example.org");
+
+    sqlx::query(
+        "INSERT INTO candidates (id, kind, status, email, payload)
+         VALUES ($1, 'citizenship', 'confirmed', $2, $3)",
+    )
+    .bind(app_id)
+    .bind(&email)
+    .bind(serde_json::json!({"login": login, "external_email": email}))
+    .execute(&pool)
+    .await
+    .expect("portal candidate fixture");
+
+    let state = Arc::new(AppState {
+        db: pool.clone(),
+        node_registry: Arc::new(NodeRegistry::new(pool.clone())),
+        node_id: "TEST-NODE".to_string(),
+        channel_hub: Arc::new(crate::channel::ChannelHub::new()),
+        trusted_proxies: crate::client_ip::TrustedProxyCache::new(pool.clone()),
+        dna: crate::algonism::DnaMemory::new(),
+    });
+
+    let aiya_auth = AuthContext::from_api_key("aiya".into(), Role::Aiya);
+    let resp = approve_application(
+        State(state.clone()),
+        Extension(aiya_auth),
+        Path(app_id.to_string()),
+        Json(ReviewApplicationRequest { note: None }),
+    )
+    .await
+    .into_response();
+    assert_eq!(resp.status(), StatusCode::OK);
+
+    // C1: citizenship granted, but NO passport and NO identity verification yet.
+    let (role, passport, verified): (String, bool, bool) =
+        sqlx::query_as("SELECT role, passport_issued, identity_verified FROM citizens WHERE name = $1")
+            .bind(&login)
+            .fetch_one(&pool)
+            .await
+            .expect("citizen created");
+    assert_eq!(role, "Citizen");
+    assert!(!passport);
+    assert!(!verified);
+
+    let passport_rows: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM passports p JOIN citizens c ON p.citizen_id = c.id WHERE c.name = $1",
+    )
+    .bind(&login)
+    .fetch_one(&pool)
+    .await
+    .expect("passport count");
+    assert_eq!(passport_rows, 0);
 }

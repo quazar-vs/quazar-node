@@ -23,17 +23,12 @@ cp .env.example .env   # задайте секреты
 
 Имена/порты переопределяются через `.env`. Согласовано с [QUA-10](/QUA/issues/QUA-10).
 
-### Deprecated: installers + Compose
+### Запуск без Compose plugin
 
-Не используйте на VPS без Compose plugin:
-
-| файл | чем заменить |
-|------|--------------|
-| `quazar_install.sh` | `scripts/run-stack-docker.sh` |
-| `quazar_install_complete.sh` | `scripts/run-stack-docker.sh` |
-| сгенерированный `docker-compose.yml` | тот же скрипт |
-
-Legacy имя контейнера в installers — `quazar_registry`. Контракт — **`quazar-node`** / **`quazar-postgres`**.
+На VPS и локально используйте plain `docker run` через `scripts/run-stack-docker.sh`
+(Compose plugin может отсутствовать). Устаревшие инсталлеры `quazar_install.sh` и
+`quazar_install_complete.sh` **удалены**; сгенерированный `docker-compose.yml` заменяется
+тем же скриптом. Контракт имён контейнеров — **`quazar-node`** / **`quazar-postgres`**.
 
 ## Быстрый старт
 
@@ -399,7 +394,7 @@ curl -s -X POST http://localhost:8080/exchange/requests \
 
 После миграции `004_service_catalog.sql` (внутренняя таблица позиций Свода) доступны seed-данные: категория `IT`, позиция `WEB_DEV` (base_price **100 QZ**). В API/UI это **позиции Свода** (`parts.*.items`), не отдельный реестр.
 После миграции `042_reward_svod.sql` — ставки `video_create` (50) и `video_view` (10 за 10 просмотров); env `SVOD_VIDEO_CREATE_REWARD` / `SVOD_VIDEO_VIEW_REWARD`.
-После миграции `044_exchange_state_mediated.sql` — биржа через республика/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Временно для старого Passport: `GET /exchange/offers` (=listings), `POST /exchange/offer` (=sell request), `POST /exchange/order` (=listing buy), `GET /exchange/orders` (=deals).
+После миграции `044_exchange_state_mediated.sql` — биржа через республика/СБ. Канон: `/exchange/requests`, `/listings`, `/deals`, `/balance`. Легаси-пути старого Passport (`/exchange/offers`, `/offer`, `/order`, `/orders`) **удалены**.
 После миграции `048_exchange_agent.sql` — встроенная **функция Биржи (Айя)**: `POST /exchange/needs` → проверка резерва Successful (`QZ-1`) → лот `is_state_agent` → `POST /exchange/listings/:id/buy` (эскроу) → подтверждение СБ → списание в резерв; лот остаётся `active`. Потребности государства выставляет Айя. Граждане: витрина/сделка; служебный диалог СБ/Биржа — Мэр/Айя.
 После миграции `049_phase_ad_offices_agents.sql` — `node_offices` (Мэр=должность), `algonism_agents` + `agent_messages`; API `/offices/mayor*`, `/city/appoint`, `/agents*`; `POST /exchange/sell-to-state`, `/exchange/reserve/dispose`; treasury = QZ-1.
 После миграции `045_service_work_kind.sql` — `work_kind` на позициях Свода и ставках; seed `CREATIVE_CONCEPT` + `idea_submit` (разработка); `WEB_DEV` / `video_*` (реализация); ответы `/svod` и `/svod/rewards` с единым title и `parts`/`sections`; фильтр `?work_kind=` / `?svod_code=` на бирже. UX: `role_view.offers` / `role_view.needs`, позиции из `parts.*.items`.

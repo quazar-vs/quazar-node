@@ -479,13 +479,6 @@ async fn main() {
             "/agents/city/ensure",
             post(agents::ensure_city_agents_handler),
         )
-        // Temporary Passport compatibility (old P2P paths → listings/requests/deals)
-        .route("/exchange/offers", get(exchange::legacy_get_offers))
-        .route("/exchange/offer", post(exchange::legacy_create_offer))
-        .route("/exchange/offer/:id", get(exchange::legacy_get_offer_by_id))
-        .route("/exchange/offer/:id", delete(exchange::legacy_cancel_offer))
-        .route("/exchange/order", post(exchange::legacy_create_order))
-        .route("/exchange/orders", get(exchange::legacy_get_orders))
         .route("/api/channel/videos", post(reward_svod::create_video_handler))
         .route(
             "/api/channel/videos/:id/view",
@@ -541,6 +534,7 @@ async fn main() {
         .route("/citizen/:id", get(get_citizen))
         .route("/citizen/:id/status", patch(update_status))
         .route("/citizen/:id/role", patch(update_role))
+        .route("/citizen/:id/fulfill", post(fulfill_application))
         .route("/citizen/:id/verify", post(verify_identity))
         .route("/citizen/:id/approve", post(approve_citizen))
         .route("/citizen/:id/passport", post(issue_passport))

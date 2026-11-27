@@ -2255,6 +2255,77 @@ pub async fn verify_identity(
     )
 }
 
+/// POST /citizen/:id/fulfill — the candidate marks the citizenship application
+/// fulfilled (contributed). Aiya/Founder may mark on behalf. Aiya then confirms
+/// via approve.
+pub async fn fulfill_application(
+    State(state): State<Arc<AppState>>,
+    Extension(auth): Extension<AuthContext>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let actor = auth.resolve_account_id(&state.db).await;
+    if actor != id && !auth.can_approve_citizen() {
+        return permission_denied(&auth);
+    }
+
+    let citizen = match get_citizen_by_id(&state.db, &id).await {
+        Ok(Some(c)) => c,
+        Ok(None) => return CitizenError::CitizenNotFound.to_response(),
+        Err(e) => return e.to_response(),
+    };
+
+    let now = Utc::now();
+    let updated = sqlx::query(
+        "UPDATE citizenship_applications \
+         SET fulfilled_at = $1, fulfilled_by = $2 \
+         WHERE citizen_id = $3 AND status <> 'Rejected' AND fulfilled_at IS NULL",
+    )
+    .bind(now)
+    .bind(&auth.citizen_name)
+    .bind(&id)
+    .execute(&state.db)
+    .await;
+
+    match updated {
+        Ok(r) if r.rows_affected() > 0 => {}
+        Ok(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ApiResponse::error(
+                    "Нет активной заявки или она уже отмечена выполненной".to_string(),
+                )),
+            );
+        }
+        Err(e) => return CitizenError::DatabaseError(e.to_string()).to_response(),
+    }
+
+    let event_id = format!("application_fulfill_{}_{}", id, now.timestamp());
+    let _ = crate::chain_events::emit_signed_event(
+        &state,
+        "CitizenUpdated",
+        &auth.citizen_name,
+        "Выполнение заявки",
+        &format!("Заявка гражданина {} отмечена выполненной", citizen.name),
+        Some(&event_id),
+        serde_json::json!({
+            "citizen_id": id,
+            "status": citizen.status.as_str(),
+            "application_fulfilled": true,
+            "fulfilled_by": auth.citizen_name,
+        }),
+    )
+    .await;
+
+    (
+        StatusCode::OK,
+        Json(ApiResponse::success(serde_json::json!({
+            "citizen_id": id,
+            "fulfilled": true,
+            "message": "Заявка отмечена выполненной. Айя подтвердит выполнение и дарует гражданство (POST /citizen/:id/approve)."
+        }))),
+    )
+}
+
 /// POST /citizen/:id/approve — Aiya confirms the application fulfillment:
 /// Candidate → Citizen. The passport follows identity verification separately.
 pub async fn approve_citizen(
@@ -2290,20 +2361,20 @@ pub async fn approve_citizen(
     }
 
     // Canon: Aiya confirms fulfillment of a citizenship application — the
-    // application must exist and not be rejected.
-    let has_application: bool = sqlx::query_scalar(
+    // application must exist, not be rejected, and be marked fulfilled.
+    let fulfilled: bool = sqlx::query_scalar(
         "SELECT EXISTS(SELECT 1 FROM citizenship_applications \
-         WHERE citizen_id = $1 AND status <> 'Rejected')",
+         WHERE citizen_id = $1 AND status <> 'Rejected' AND fulfilled_at IS NOT NULL)",
     )
     .bind(&citizen.id)
     .fetch_one(&state.db)
     .await
     .unwrap_or(false);
-    if !has_application {
+    if !fulfilled {
         return (
             StatusCode::BAD_REQUEST,
             Json(ApiResponse::error(
-                "Нет заявки на гражданство: Айя подтверждает выполнение существующей заявки".to_string(),
+                "Заявка не отмечена выполненной: Айя подтверждает выполнение заявки (POST /citizen/:id/fulfill)".to_string(),
             )),
         );
     }

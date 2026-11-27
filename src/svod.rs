@@ -143,11 +143,12 @@ pub fn lot_scope_from_access(access: &[String]) -> &'static str {
 }
 
 /// Русская метка доступа Свода → Role.
+/// Статусы Страж/Судья упразднены: их уровни доступа трактуются как Гражданин (Г),
+/// чтобы legacy-лоты Ст/Сд оставались доступны гражданам.
 pub fn role_from_access_label(label: &str) -> Option<Role> {
     match label.trim() {
         "Гражданин" | "Г" => Some(Role::Citizen),
-        "Страж" | "Ст" => Some(Role::Guardian),
-        "Судья" | "Сд" => Some(Role::Judge),
+        "Страж" | "Ст" | "Судья" | "Сд" => Some(Role::Citizen),
         "Мэр" | "М" => Some(Role::Mayor),
         "Айя" => Some(Role::Aiya),
         other => Role::from_str(other),
@@ -174,13 +175,17 @@ pub fn access_level_from_access(access: &[String]) -> Role {
 /// Активная роль видит/может заявлять лот с данным доступом.
 pub fn role_can_access_lot(role: &Role, access: &[String]) -> bool {
     if access.is_empty() {
-        return matches!(role, Role::Citizen | Role::Guardian | Role::Judge | Role::Mayor | Role::Aiya | Role::Founder);
+        return matches!(role, Role::Citizen | Role::Mayor | Role::Aiya | Role::Founder);
     }
     // Лот доступен, если роль ∈ списка ИЛИ ранг роли ≥ мин. уровня (выше видит ниже).
     let level = access_level_from_access(access);
     if role.meets_access_level(&level) {
-        // Дополнительно: для local-only (без Г) гражданин не видит.
-        if !access.iter().any(|a| a == "Гражданин") && matches!(role, Role::Citizen) {
+        // Дополнительно: для local-only (без гражданского доступа) гражданин не видит.
+        // Ст/Сд трактуются как Г, поэтому дают гражданский доступ.
+        let has_citizen_access = access
+            .iter()
+            .any(|a| role_from_access_label(a) == Some(Role::Citizen));
+        if !has_citizen_access && matches!(role, Role::Citizen) {
             return false;
         }
         return true;
@@ -1656,33 +1661,36 @@ mod tests {
 
     #[test]
     fn access_level_from_access_min_rank() {
+        // Ст/Сд упразднены и трактуются как Г.
         assert_eq!(
             access_level_from_access(&["Страж".into(), "Судья".into()]),
-            Role::Guardian
+            Role::Citizen
         );
         assert_eq!(
             access_level_from_access(&["Судья".into(), "Мэр".into()]),
-            Role::Judge
+            Role::Citizen
         );
         assert_eq!(
             access_level_from_access(&["Гражданин".into(), "Страж".into()]),
             Role::Citizen
         );
+        assert_eq!(access_level_from_access(&["Мэр".into()]), Role::Mayor);
     }
 
     #[test]
-    fn role_can_access_lot_citizen_local_denied() {
-        assert!(!role_can_access_lot(
+    fn role_can_access_lot_legacy_str_sd_citizen_allowed() {
+        // Legacy-лоты Ст/Сд доступны гражданам (статусы упразднены).
+        assert!(role_can_access_lot(
             &Role::Citizen,
             &["Страж".into(), "Судья".into()]
         ));
+        assert!(role_can_access_lot(&Role::Citizen, &["Страж".into()]));
         assert!(role_can_access_lot(
-            &Role::Guardian,
+            &Role::Mayor,
             &["Страж".into(), "Судья".into()]
         ));
-        assert!(role_can_access_lot(
-            &Role::Judge,
-            &["Страж".into()]
-        ));
+        // Мэр-only лот (без гражданского доступа) гражданину недоступен.
+        assert!(!role_can_access_lot(&Role::Citizen, &["Мэр".into()]));
+        assert!(role_can_access_lot(&Role::Mayor, &["Мэр".into()]));
     }
 }
