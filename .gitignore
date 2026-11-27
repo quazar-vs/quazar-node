@@ -1,4 +1,5 @@
 /target
+.canon-cache/
 *.db
 *.pid
 *.log

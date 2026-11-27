@@ -469,6 +469,21 @@ docker-compose up -d postgres
 bash scripts/test_p2p.sh
 ```
 
+## Канон: источники и синхронизация
+
+Единый источник истины:
+- **Законы** (Конституция, кодексы, Свод): `quazar-vs/quazar-law` — сабмодуль `constitution/`. Узел загружает их в кэш (`/algonism/documents`, `/law/:filename`).
+- **ДНК** (ALGONISM, DNA_ALGONISM, REFLEXES): `quazar-vs/algonism-core`.
+
+Зеркала в этом репозитории (`CONSTITUTION_QUAZAR.md`, `site/CONSTITUTION_QUAZAR.md`, `docs/algonism/*.md`, встроенный блок `constitutionSource` в `site/index.html`) **генерируются** и не редактируются вручную:
+
+```bash
+scripts/sync-canon.sh          # обновить зеркала из источников
+scripts/sync-canon.sh --check  # проверить дрейф (exit 1 при расхождении)
+```
+
+Правки канона вносятся в `quazar-law` / `algonism-core`, затем `sync-canon.sh` обновляет зеркала. CI проверяет дрейф на каждый push.
+
 ## CI
 
-GitHub Actions: `cargo check`, `cargo test`, сборка и `scripts/smoke.sh` с PostgreSQL service.
+GitHub Actions: проверка дрейфа канона (`sync-canon.sh --check`), `cargo check`, `cargo test`, сборка и `scripts/smoke.sh` с PostgreSQL service.
